@@ -44,6 +44,7 @@ from .core import (
     prompts,
     recall,
     registry,
+    sharing,
     tidy,
     tokens,
 )
@@ -192,6 +193,11 @@ class MemoryBeyondPlugin(Star):
         self._tidy = tidy.TidyBook(data_dir / "tidy")
         self._tidy_checked: dict[str, float] = {}
         self._tidy_gate = asyncio.Semaphore(1)
+        # 共享人物空间：成员表从配置解析，版本记录放在 state/ 下（不是记忆文件）
+        self._sharing = sharing.Membership()
+        self._sharing_warned: set[str] = set()
+        self._seen = sharing.SeenVersions(data_dir / "state" / "shared_seen.json")
+        self._refresh_sharing()
         self.dashboard = MemoryDashboard(self)
         self.dashboard.register()
 
@@ -513,16 +519,20 @@ class MemoryBeyondPlugin(Star):
         if callable(saver):
             await asyncio.to_thread(saver)
 
-    def platform_ids(self) -> list[str]:
-        """当前启用的机器人（平台适配器）ID，迁移时给管理员选。"""
+    def _platform_insts(self) -> list:
+        """当前启用的平台适配器；拿不到时返回空列表。"""
         manager = getattr(self.context, "platform_manager", None)
         try:
             getter = getattr(manager, "get_insts", None)
             insts = getter() if callable(getter) else getattr(manager, "platform_insts", [])
         except Exception:  # noqa: BLE001 - 平台管理器的实现随版本变化
             return []
+        return list(insts or [])
+
+    def platform_ids(self) -> list[str]:
+        """当前启用的机器人（平台适配器）ID，迁移时给管理员选。"""
         ids: list[str] = []
-        for inst in insts or []:
+        for inst in self._platform_insts():
             try:
                 platform_id = str(getattr(inst.meta(), "id", "") or "")
             except Exception:  # noqa: BLE001
@@ -531,9 +541,58 @@ class MemoryBeyondPlugin(Star):
                 ids.append(platform_id)
         return ids
 
-    def _guidance(self) -> str:
+    def platform_types(self) -> dict[str, str]:
+        """platform_id -> 平台类型（如 aiocqhttp），用于共享成员的撞号校验。"""
+        types: dict[str, str] = {}
+        for inst in self._platform_insts():
+            try:
+                meta = inst.meta()
+                platform_id = str(getattr(meta, "id", "") or "")
+                kind = str(getattr(meta, "name", "") or "")
+            except Exception:  # noqa: BLE001
+                continue
+            if platform_id and kind:
+                types[platform_id] = kind
+        return types
+
+    def _refresh_sharing(self) -> None:
+        """按配置重建共享人物空间成员表并注入 MemoryStore。
+
+        配置页改动后无需重启：每次请求和工具调用前都会重新解析。成员表的
+        有效内容没变时不做任何事，避免反复覆盖与刷日志。
+        """
+        raw = self.config.get("shared_people_bots", [])
+        membership = sharing.parse_config(raw).filter_same_platform(
+            self.platform_types()
+        )
+        for warning in membership.warnings:
+            if warning not in self._sharing_warned:
+                self._sharing_warned.add(warning)
+                logger.warning(LOG_PREFIX + warning)
+        if (
+            membership.members == self._sharing.members
+            and self._store.shared_people().members == membership.members
+        ):
+            return
+        self._sharing = membership
+        self._store.set_shared_people(membership)
+        if membership.active:
+            logger.info(
+                LOG_PREFIX
+                + "共享人物空间已启用："
+                + "、".join(
+                    f"{m.platform_id}={m.permission}"
+                    for m in membership.members.values()
+                )
+            )
+
+    def _guidance(self, umo: str = "") -> str:
+        shared = bool(umo) and self._sharing.is_member(self._platform_of(umo))
         return prompts.memory_guidance(
-            self._global_on(), self._people_on(), self._forgetting_on()
+            self._global_on(),
+            self._people_on(),
+            self._forgetting_on(),
+            shared_people=shared,
         )
 
     @staticmethod
@@ -543,6 +602,59 @@ class MemoryBeyondPlugin(Star):
 
     def _people_scope(self, umo: str) -> memstore.ScopeStore:
         return self._store.people_scope(self._platform_of(umo))
+
+    def _people_permission(self, platform_id: str) -> str | None:
+        """共享人物空间里这个机器人的权限；非成员返回 None（不受限制）。"""
+        return self._sharing.permission(platform_id)
+
+    def _can_extract_people(self, umo: str) -> bool:
+        """后台 / 压缩联动提取能否写 people。
+
+        只有 edit 级成员能写共享人物空间；append / read 级成员的提取拿不到
+        people 目标，和 people 关闭时一样只写 session。非成员维持上游行为。
+        """
+        if not self._people_on():
+            return False
+        permission = self._people_permission(self._platform_of(umo))
+        return permission is None or permission == sharing.PERMISSION_EDIT
+
+    async def _shared_version_ok(
+        self, event: AstrMessageEvent, store: memstore.ScopeStore, file: str
+    ) -> bool:
+        """整文件覆盖前的版本检查（只对共享人物空间）。"""
+        platform_id = self._event_actor(event)
+        if not self._sharing.is_member(platform_id):
+            return True
+        current = await store.read(file)
+        if current is None:
+            return True
+        return await asyncio.to_thread(
+            self._seen.is_current, platform_id, file, current
+        )
+
+    async def _note_shared_seen(
+        self,
+        event: AstrMessageEvent,
+        scope: str,
+        store: memstore.ScopeStore,
+        file: str,
+        content: str | None = None,
+    ) -> None:
+        """记住这个机器人刚看过的共享文件版本（读取与召回全文都算看过）。"""
+        if scope != "people" or not file:
+            return
+        platform_id = self._event_actor(event)
+        if not self._sharing.is_member(platform_id):
+            return
+        try:
+            if content is None:
+                content = await store.read(file)
+            if content is None:
+                return
+            await asyncio.to_thread(self._seen.note, platform_id, file, content)
+        except OSError:
+            # 版本记录写不进去只影响覆盖检查，不能影响读取/写入本身
+            logger.debug(LOG_PREFIX + "共享人物空间的版本记录写盘失败", exc_info=True)
 
     def _scope_for(
         self, event: AstrMessageEvent, scope: str
@@ -560,6 +672,8 @@ class MemoryBeyondPlugin(Star):
         self, event: AstrMessageEvent, scope: str
     ) -> tuple[memstore.ScopeStore | None, str, str]:
         """记忆工具的作用域解析：返回 (作用域, 归一化名称, 拒绝原因)。"""
+        # 配置页可能刚改过共享成员；工具调用前同步一次，保证目录映射与权限一致
+        self._refresh_sharing()
         scope = (scope or "").strip().lower()
         if scope == "global" and not self._global_on():
             return None, scope, GLOBAL_MEMORY_OFF
@@ -590,6 +704,8 @@ class MemoryBeyondPlugin(Star):
         umo = str(getattr(event, "unified_msg_origin", "") or "")
         if not umo:
             return
+        # 配置页改了共享成员时，索引/召回/提取立即按新成员表走
+        self._refresh_sharing()
         self._schedule_history_cleanup()
         # 其他插件自行发起的模型调用（event.request_llm，不带对话也没有历史）
         # 同样经过这个钩子：它不是本会话的对话请求，不注入也不动压缩状态——
@@ -683,7 +799,7 @@ class MemoryBeyondPlugin(Star):
             # ---- 相关记忆召回：本轮用得上的记忆全文附在新消息之前 ----
             recall_msg = await self._recall_message(event, umo, query)
 
-        guidance = self._guidance() if memory_on else ""
+        guidance = self._guidance(umo) if memory_on else ""
         estimator = tokens.TokenEstimator(state.ratio)
 
         overhead = (
@@ -930,19 +1046,40 @@ class MemoryBeyondPlugin(Star):
                     chosen = merged[:limit]
             if chosen is None:
                 chosen = recall.select_by_keywords(candidates, query, forced, limit)
+            platform_id = self._event_actor(event)
+            shared_people = self._sharing.is_member(platform_id)
             items: list[recall.Recalled] = []
             used: dict[str, list[str]] = {}
             for cand in chosen:
                 content = await stores[cand.scope].read(cand.header.file)
                 if content:
+                    is_shared = shared_people and cand.scope == "people"
                     items.append(
-                        recall.Recalled(cand.ref, content, cand.header.updated)
+                        recall.Recalled(
+                            cand.ref,
+                            content,
+                            cand.header.updated,
+                            shared=is_shared,
+                        )
                     )
                     used.setdefault(cand.scope, []).append(cand.header.file)
             # 被召回就算用到：使用统计是遗忘与整理的依据
             for label, names in used.items():
                 await asyncio.to_thread(stores[label].note_used, names)
             block = recall.build_recall_block(items, prompts.DATA_NOTICE)
+            if block:
+                # 召回实际附上的全文才算"看过"：被预算挤掉或按长度截断的不算，
+                # 之后的整文件覆盖仍要求先 memory_read 取回完整内容
+                for item in items:
+                    if (
+                        item.shared
+                        and len(item.content.strip()) <= recall.FILE_CHARS
+                        and f"### {item.ref}（" in block
+                    ):
+                        scope, _, file = item.ref.partition("/")
+                        await self._note_shared_seen(
+                            event, scope, stores[scope], file, item.content
+                        )
             return recall.build_recall_message(block) if block else None
         except Exception:  # noqa: BLE001 - 召回是锦上添花，失败不影响本轮
             logger.warning(LOG_PREFIX + f"会话 {umo} 相关记忆召回失败", exc_info=True)
@@ -1231,16 +1368,21 @@ class MemoryBeyondPlugin(Star):
         updatable: dict[str, set[str]],
         source: str,
         actor: str = "",
+        people: memstore.ScopeStore | None = None,
     ) -> int:
-        """抽取出的记忆落盘：默认进会话作用域；人物记忆开启时，模型标为
+        """抽取出的记忆落盘：默认进会话作用域；people 不为 None 时，模型标为
         people 的人物文件进该平台的人物作用域。绝不进全局。
+
+        调用方只在有写权限时传入 people（共享空间里仅 edit 级成员），
+        否则传 None，标为 people 的草稿会退回 session——和 people 关闭时
+        一样，提取拿不到 people 目标。
 
         已存在的文件只有在抽取时附过全文（模型据此合并）才允许改写，
         其余同名条目跳过——看不到原文就覆盖会丢内容。
         """
         stores = {"session": self._store.session_scope(umo)}
-        if self._people_on():
-            stores["people"] = self._people_scope(umo)
+        if people is not None:
+            stores["people"] = people
         stored = 0
         for draft in drafts:
             label = draft.scope if draft.scope in stores else "session"
@@ -1301,10 +1443,14 @@ class MemoryBeyondPlugin(Star):
         self, rt: RuntimeSession, umo: str, transcript: str
     ) -> None:
         try:
-            people_on = self._people_on()
+            # 共享空间里只有 edit 级成员的后台提取能写 people
+            people = (
+                self._people_scope(umo) if self._can_extract_people(umo) else None
+            )
+            people_on = people is not None
             scope = self._store.session_scope(umo)
             existing, updatable = await self._existing_for_extract(
-                scope, transcript, self._people_scope(umo) if people_on else None
+                scope, transcript, people
             )
             prompt = prompts.build_background_extract_prompt(
                 transcript, existing, people_on
@@ -1324,6 +1470,7 @@ class MemoryBeyondPlugin(Star):
                 updatable,
                 "后台提取",
                 actor=f"extract@{self._platform_of(umo)}",
+                people=people,
             )
         except Exception:  # noqa: BLE001
             logger.warning(LOG_PREFIX + f"会话 {umo} 后台记忆提取出错", exc_info=True)
@@ -1359,13 +1506,15 @@ class MemoryBeyondPlugin(Star):
         extract = self._bool("extract_memories", True) and self._bool(
             "enable_memory", True
         )
-        people_on = self._people_on()
+        # 压缩联动提取与后台提取同一套门控：只有 edit 级成员能写 people
+        people = self._people_scope(umo) if self._can_extract_people(umo) else None
+        people_on = people is not None
         existing, updatable = "", {}
         if extract:
             existing, updatable = await self._existing_for_extract(
                 self._store.session_scope(umo),
                 transcript,
-                self._people_scope(umo) if people_on else None,
+                people,
             )
         max_chars = max(
             200, self._int("summary_max_chars", prompts.SUMMARY_MAX_CHARS_DEFAULT)
@@ -1425,6 +1574,7 @@ class MemoryBeyondPlugin(Star):
                 updatable,
                 "压缩联动提取",
                 actor=f"extract@{self._platform_of(umo)}",
+                people=people,
             )
         # 压缩后从磁盘重新注入记忆索引：清空快照，下次请求重新加载。
         # 索引不是靠"被摘要保留下来"，而是每次从源头重新加载。
@@ -1800,6 +1950,8 @@ class MemoryBeyondPlugin(Star):
             if not restored:
                 # 恢复时已经记过一次使用
                 await asyncio.to_thread(store.note_used, [file])
+            # 共享人物空间：读过当前版本，之后的整文件覆盖才允许
+            await self._note_shared_seen(event, scope, store, file, content)
             # 时效按 frontmatter 的 updated 戳算；老文件没有戳才退回 mtime
             written = memstore.parse_stamp(
                 memstore.parse_memory(content).updated
@@ -1839,18 +1991,43 @@ class MemoryBeyondPlugin(Star):
         if scope == "people" and not memstore.is_person_file(file):
             return PEOPLE_FILE_RULE
         actor = self._event_actor(event)
+        permission = self._people_permission(actor) if scope == "people" else None
         if delete:
+            # append 与 read 级成员都不能删除共享人物记忆
+            refusal = sharing.write_refusal(
+                permission, exists=True, delete=True
+            )
+            if refusal:
+                return refusal
             report = await store.delete(file, actor=actor)
         else:
             if not content.strip():
                 return "content 为空。写入需提供完整文件内容；如要删除请设 delete=true。"
             existed = store.exists(file)
+            refusal = sharing.write_refusal(
+                permission, exists=existed, delete=False
+            )
+            if refusal:
+                return refusal
+            if scope == "people" and self._sharing.is_member(actor) and existed:
+                try:
+                    unchanged = await self._shared_version_ok(event, store, file)
+                except OSError:
+                    return (
+                        f"读取共享人物记忆 {file} 的当前内容失败，未写入；"
+                        "请稍后重试，确认不会覆盖别人的修改。"
+                    )
+                if not unchanged:
+                    return sharing.version_conflict_message(file)
             report = await store.write(
                 file,
                 content,
                 source=self._sender_identity(event)[0],
                 actor=actor,
             )
+            if report.ok:
+                # 自己刚写的版本算看过，紧接着再整文件覆盖不会被版本检查误拦
+                await self._note_shared_seen(event, scope, store, file)
             if report.ok and not existed:
                 hint = await self._duplicate_hint(store, file, content)
                 if hint:
@@ -1872,18 +2049,20 @@ class MemoryBeyondPlugin(Star):
         event: AstrMessageEvent,
         scope: str,
         file: str,
-        old_text: str,
-        new_text: str,
+        old_text: str = "",
+        new_text: str = "",
         replace_all: bool = False,
+        mode: str = "replace",
     ) -> str:
-        """局部修改一个已有的长期记忆文件：把 old_text 替换成 new_text，文件其余内容原样保留。改一处、补一句、更新 description 时用本工具，不要用 memory_write 整文件重写（重写容易丢内容）。old_text 必须与文件现有内容逐字一致（空格、换行、标点都算）且只出现一次，所以先用 memory_read 读出当前内容再复制片段；new_text 留空等于删掉这段。改了 frontmatter 的 description，索引行会自动同步。
+        """修改一个已有的长期记忆文件。默认 replace 模式：把 old_text 替换成 new_text，文件其余内容原样保留；改一处、补一句、更新 description 时用它，不要用 memory_write 整文件重写（重写容易丢内容）。replace 时 old_text 必须与文件现有内容逐字一致（空格、换行、标点都算）且只出现一次，所以先用 memory_read 读出当前内容再复制片段；new_text 留空等于删掉这段。append 模式：old_text 留空时把 new_text 追加到文件末尾，old_text 是某个小节标题行（如 ## 作息与习惯）时追加到该小节末尾，追加前插件自动保存旧版。改了 frontmatter 的 description，索引行会自动同步。
 
         Args:
             scope(string): 作用域，global（机器人自我的全局记忆）、session（当前会话的记忆）或 people（同一平台所有会话共享的人物记忆，一人一个 user-<数字ID>.md）
             file(string): 要修改的记忆文件名，如 user-12345678.md；不可为 MEMORY.md
-            old_text(string): 要被替换的原文片段，须与文件内容逐字一致且只出现一次
-            new_text(string): 替换后的文字；留空表示删掉 old_text
-            replace_all(boolean): 设为 true 时替换文件里所有匹配处（如统一改一个称呼），默认只接受唯一匹配
+            old_text(string): replace 模式下要被替换的原文片段，须与文件内容逐字一致且只出现一次；append 模式下留空表示追加到文件末尾，填小节标题行表示追加到该小节末尾
+            new_text(string): replace 模式下的替换文字（留空表示删掉 old_text）；append 模式下要追加的文字
+            replace_all(boolean): replace 模式下设为 true 时替换文件里所有匹配处（如统一改一个称呼），默认只接受唯一匹配
+            mode(string): replace（默认，局部替换）或 append（追加，不覆盖已有文字）
         """
         if not self._bool("enable_memory", True):
             return "记忆功能已在插件配置中停用。"
@@ -1892,6 +2071,15 @@ class MemoryBeyondPlugin(Star):
             return refused
         if scope == "people" and not memstore.is_person_file(file):
             return PEOPLE_FILE_RULE
+        mode = (mode or "replace").strip().lower()
+        permission = (
+            self._people_permission(self._event_actor(event))
+            if scope == "people"
+            else None
+        )
+        refusal = sharing.edit_refusal(permission, mode)
+        if refusal:
+            return refusal
         report = await store.edit(
             file,
             old_text,
@@ -1899,8 +2087,11 @@ class MemoryBeyondPlugin(Star):
             replace_all,
             source=self._sender_identity(event)[0],
             actor=self._event_actor(event),
+            mode=mode,
         )
         if report.ok:
+            # 自己刚改过的版本算看过，后续整文件覆盖不会被版本检查误拦
+            await self._note_shared_seen(event, scope, store, file)
             self._note_model_wrote(event)
         return report.message
 
@@ -1955,6 +2146,8 @@ class MemoryBeyondPlugin(Star):
         """
         if not self._bool("enable_memory", True):
             return "记忆功能已在插件配置中停用。"
+        # 配置页可能刚改过共享成员；保证 people 目录映射与权限使用最新配置
+        self._refresh_sharing()
         query = (query or "").strip()
         if not query:
             return "query 不能为空。"
@@ -2004,8 +2197,8 @@ class MemoryBeyondPlugin(Star):
         结果略低于请求路径的口径。
         """
         state = rt.state
+        umo = str(getattr(event, "unified_msg_origin", "") or "")
         try:
-            umo = str(event.unified_msg_origin)
             mgr = self.context.conversation_manager
             cid = await mgr.get_curr_conversation_id(umo)
             if not cid:
@@ -2054,7 +2247,9 @@ class MemoryBeyondPlugin(Star):
         parts = {
             "overhead": (
                 estimator.messages(contexts[:n_system])
-                + estimator.text(self._guidance() if memory_on else "")
+                + estimator.text(
+                    self._guidance(umo) if memory_on else ""
+                )
             ),
             "tools": tools_cost,
             "index": index_cost,

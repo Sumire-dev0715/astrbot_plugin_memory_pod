@@ -193,17 +193,25 @@ _PRIVACY_GLOBAL = "；global 绝不存放关于具体用户或群的信息"
 
 _PRIVACY_PEOPLE = "；people 只存本人亲口说的、换个群也成立的信息，不存他在某个群里的言行细节，也不替别人代写"
 
+# 机器人在共享人物空间里时追加的规则：共享的是"她是谁"，不是"她对谁说过什么"
+_SHARED_PEOPLE_RULE = """
+
+共享人物空间：people 是多个机器人共用的一份人物记忆。写人物时用中性的第三人称，只记本人亲口说的身份类事实（身份、职业与专长、常用称呼、长期偏好）；和“你（机器人）”的关系、健康、性、家庭矛盾、亲密互动、群内角色一律写 session，不进 people。"""
+
 
 def memory_guidance(
     include_global: bool = True,
     include_people: bool = False,
     include_forgetting: bool = False,
+    shared_people: bool = False,
 ) -> str:
     """记忆规范文本，按全局记忆、人物记忆、遗忘三个开关组合生成，每种组合
     逐字稳定（不破坏提示词缓存）。
 
     停用的作用域不描述，只明确告知不要读写——工具说明是静态的仍会列出
     它们，不在这里讲清楚，模型就会反复尝试一个必然被拒绝的作用域。
+    shared_people 表示当前机器人是共享人物空间的成员，追加共享空间的
+    书写规范（中性的第三人称、只记身份类事实）。
     """
     lines = []
     if include_global:
@@ -226,7 +234,10 @@ def memory_guidance(
         privacy += _PRIVACY_GLOBAL
     if include_people:
         privacy += _PRIVACY_PEOPLE
-    return _GUIDANCE_HEAD + scopes + _GUIDANCE_MIDDLE + privacy + "。"
+    text = _GUIDANCE_HEAD + scopes + _GUIDANCE_MIDDLE + privacy + "。"
+    if include_people and shared_people:
+        text += _SHARED_PEOPLE_RULE
+    return text
 
 
 # ---------------------------------------------------------------- 注入块

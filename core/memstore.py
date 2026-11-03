@@ -21,6 +21,9 @@
 原顺序，日志在索引末尾折叠成"最近两篇 + 一行汇总"的块，判定与折叠规则
 见 core/journal.py。
 
+共享人物空间：配置里列出的机器人统一使用 people/_shared/，目录映射只在
+MemoryStore.people_scope() 一处决定；成员表与写权限见 core/sharing.py。
+
 使用统计与遗忘：每个作用域目录下有一份 .usage.json，记每个文件最近一次
 被召回或读取的时间与次数。开启遗忘后，长期没用到的文件移进 forgotten/
 子目录——不进索引、不参与召回、工具看不见，但文件还在；那个人再出现、
@@ -40,7 +43,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import history, journal
+from . import history, journal, sharing
 
 INDEX_FILENAME = "MEMORY.md"
 INDEX_MAX_LINES = 200
@@ -81,6 +84,7 @@ _HOOK_WS_RE = re.compile(r"\s+")
 _LINK_RE = re.compile(r"\[\[([^\[\]\n]{1,120})\]\]")
 _INDEX_TARGET_RE = re.compile(r"\]\(([^()\s]+\.md)\)")
 _BLOCK_SCALAR_RE = re.compile(r"^[>|][+-]?$")
+_HEADING_RE = re.compile(r"^(#{1,6})\s+\S")
 
 
 def _indent(line: str) -> int:
@@ -551,6 +555,78 @@ def _truncate_index(
     return IndexSnapshot(text=text, total_lines=total, loaded_lines=loaded)
 
 
+def _headings(lines: list[str]) -> list[str]:
+    """文件里的全部小节标题行（去掉首尾空白），用于报错时列出现有标题。"""
+    return [line.strip() for line in lines if _HEADING_RE.match(line.strip())]
+
+
+def _append_to_section(
+    content: str, heading: str, text: str
+) -> tuple[str, str]:
+    """把 text 追加到 heading 这个小节的末尾。
+
+    返回 (新内容, 错误)；出错时新内容为空串。heading 必须与文件里的某个
+    标题行逐字一致（去掉首尾空白后比较）且只出现一次；范围到下一个同级
+    或更高级标题为止。小节没有正文时直接接在标题下面。
+    """
+    lines = content.splitlines()
+    target = (heading or "").strip()
+    matches = [
+        i
+        for i, line in enumerate(lines)
+        if line.strip() == target and _HEADING_RE.match(line.strip())
+    ]
+    if not matches:
+        existing = "；".join(_headings(lines)) or "（文件里没有标题行）"
+        return "", (
+            "old_text 必须是文件里的小节标题行（如 ## 作息与习惯），"
+            f"没找到 {target!r}。现有标题：{existing}"
+        )
+    if len(matches) > 1:
+        return "", (
+            f"标题 {target!r} 在文件里出现了 {len(matches)} 处，"
+            "无法确定追加到哪一节；请先整理重复的标题。"
+        )
+    start = matches[0]
+    level = len(_HEADING_RE.match(lines[start].strip()).group(1))
+    end = len(lines)
+    for i in range(start + 1, len(lines)):
+        match = _HEADING_RE.match(lines[i].strip())
+        if match and len(match.group(1)) <= level:
+            end = i
+            break
+    # 小节末尾的空白行留给下一个标题，追加内容接在最后一处正文之后
+    insert_at = end
+    while insert_at > start + 1 and not lines[insert_at - 1].strip():
+        insert_at -= 1
+    block = [line for line in text.strip("\n").strip().splitlines()]
+    if not block:
+        return "", "new_text 不能为空。"
+    new_lines = lines[:insert_at]
+    if new_lines and new_lines[-1].strip():
+        new_lines.append("")
+    new_lines.extend(block)
+    if insert_at < len(lines) and new_lines[-1].strip():
+        new_lines.append("")
+    new_lines.extend(lines[insert_at:])
+    trailing = "\n" if content.endswith("\n") else ""
+    return "\n".join(new_lines) + trailing, ""
+
+
+def append_text(content: str, old: str, new: str) -> tuple[str, str]:
+    """追加重载：old 为空追加到文件末尾；否则 old 是小节标题行，追加到该节末尾。"""
+    text = (new or "").replace("\r\n", "\n").strip("\n").strip()
+    if not text:
+        return "", "new_text 不能为空：追加模式要提供要补进去的文字。"
+    heading = (old or "").replace("\r\n", "\n").strip()
+    if heading:
+        return _append_to_section(content, heading, new)
+    base = (content or "").rstrip()
+    if not base:
+        return text + "\n", ""
+    return f"{base}\n\n{text}\n", ""
+
+
 class ScopeStore:
     """单个作用域目录内的读 / 写删 / 搜索，带路径约束与文件锁。
 
@@ -817,12 +893,18 @@ class ScopeStore:
         replace_all: bool = False,
         source: str = "",
         actor: str = "",
+        mode: str = "replace",
     ) -> WriteReport:
-        """局部替换：old 在文件里须恰好出现一次（replace_all 时可多次），其余原样保留。
+        """局部修改：默认 replace 把 old 替换成 new；append 追加内容。
 
-        读、换、写在同一把锁里完成，不会与并发的整文件写入交错；替换后的
-        全文照样过体积守门并同步索引行，改了 description 索引钩子随之更新。
+        replace：old 在文件里须恰好出现一次（replace_all 时可多次），其余原样保留。
+        append：old 留空追加到文件末尾；old 是某个小节标题行时追加到该小节末尾。
+        两种模式都持锁读改写，追加前同样把旧内容存进历史；替换后的全文照样过
+        体积守门并同步索引行，改了 description 索引钩子随之更新。
         """
+        mode = (mode or "").strip().lower()
+        if mode not in ("replace", "append"):
+            return WriteReport(False, "mode 只能是 replace（默认）或 append。")
         name = (name or "").strip().lstrip("/")
         path = self._resolve(name)
         if path is None:
@@ -836,16 +918,34 @@ class ScopeStore:
         # 文件统一以 \n 落盘，模型传来的片段带 \r\n 也能对上
         old = (old or "").replace("\r\n", "\n")
         new = (new or "").replace("\r\n", "\n")
-        if not old:
-            return WriteReport(False, "old_text 不能为空：请给出文件里要被替换的原文片段。")
-        if old == new:
-            return WriteReport(False, "old_text 与 new_text 相同，没有可做的修改。")
+        if mode == "replace":
+            if not old:
+                return WriteReport(
+                    False, "old_text 不能为空：请给出文件里要被替换的原文片段。"
+                )
+            if old == new:
+                return WriteReport(False, "old_text 与 new_text 相同，没有可做的修改。")
         async with self._lock:
             if not path.is_file():
                 return WriteReport(
                     False, f"文件不存在：{name}（新建文件请用 memory_write）"
                 )
             content = await asyncio.to_thread(path.read_text, "utf-8")
+            if mode == "append":
+                updated, error = append_text(content, old, new)
+                if error:
+                    return WriteReport(False, error)
+                return await self._commit(
+                    name,
+                    path,
+                    updated,
+                    f"已向 {name} 追加内容",
+                    source,
+                    content,
+                    action=history.ACTION_EDIT,
+                    actor=actor,
+                    active_before=content,
+                )
             count = content.count(old)
             if count == 0:
                 return WriteReport(
@@ -2037,6 +2137,20 @@ class MemoryStore:
         self._scopes_lock = threading.RLock()
         self.history_keep_days = max(0, int(history_keep_days))
         self.trash_keep_days = max(0, int(trash_keep_days))
+        # 共享人物空间的成员表；为空时 people 仍按平台各自一份（上游行为）
+        self._shared_people = sharing.Membership()
+
+    def set_shared_people(self, membership: sharing.Membership) -> None:
+        """注入共享人物空间成员表；插件启动与配置变更时调用。
+
+        只影响之后的 people_scope() 解析，已缓存的作用域对象照旧可用
+        （非成员与成员各自用自己目录下的那个 ScopeStore）。
+        """
+        with self._scopes_lock:
+            self._shared_people = membership or sharing.Membership()
+
+    def shared_people(self) -> sharing.Membership:
+        return self._shared_people
 
     def set_retention(self, history_keep_days: int, trash_keep_days: int) -> None:
         """更新保留期配置，已缓存的作用域一并生效。"""
@@ -2089,7 +2203,14 @@ class MemoryStore:
 
     def people_scope(self, platform: str) -> ScopeStore:
         """某个平台的人物记忆：一人一个文件，该平台的所有群聊和私聊共享。
-        按平台分目录是因为不同平台的数字 ID 可能撞号。"""
+        按平台分目录是因为不同平台的数字 ID 可能撞号。
+
+        共享人物空间的成员统一指向 people/_shared/；成员表只在这一处生效，
+        main.py、管理页、导出导入与整理的调用点都自动走同一套映射。
+        safe_key 的输出不会以 _ 开头，_shared 不会和任何平台目录撞名。
+        """
+        if self._shared_people.is_member(platform):
+            return self._scope(self.base_dir / "people" / sharing.SHARED_KEY)
         return self._scope(self.base_dir / "people" / safe_key(platform or "unknown"))
 
     def people_scope_by_key(self, key: str) -> ScopeStore | None:
@@ -2144,4 +2265,7 @@ class MemoryStore:
 
 
 def is_scope_key(key: str) -> bool:
+    """目录名是否是合法的作用域键；_shared 是共享人物空间的保留键。"""
+    if key == sharing.SHARED_KEY:
+        return True
     return bool(key) and bool(_SCOPE_KEY_RE.match(key))

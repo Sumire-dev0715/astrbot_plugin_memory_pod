@@ -15,6 +15,9 @@
 
 日志（journal）是流水账，既不进身份必选，也不进关键词与模型挑选；
 需要时按日期显式 memory_read 或 memory_search。
+
+共享人物空间里召回的人物文件在标题里注明"多个机器人共享"：召回内容
+只是数据，模型据此知道这不是当前机器人独有的人物记忆。
 """
 
 from __future__ import annotations
@@ -291,6 +294,8 @@ class Recalled:
     content: str
     # 最近修改时间（frontmatter 的 updated 戳，缺省退回 mtime）
     written: float
+    # 来自共享人物空间：标题里标明"多个机器人共享"，提醒模型这是共用记忆
+    shared: bool = False
 
 
 def freshness_note(written: float, now: float | None = None) -> str:
@@ -317,7 +322,8 @@ def build_recall_block(
         if sections and used + len(content) > TOTAL_CHARS:
             break
         used += len(content)
-        title = f"### {item.ref}（{age_label(item.written, now)}写入）"
+        shared = "多个机器人共享，" if item.shared else ""
+        title = f"### {item.ref}（{shared}{age_label(item.written, now)}写入）"
         note = freshness_note(item.written, now)
         sections.append("\n".join(part for part in (title, note, content) if part))
     if not sections:
