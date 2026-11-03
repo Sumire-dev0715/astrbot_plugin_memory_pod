@@ -331,7 +331,7 @@
       "trashRestoreTitle": "Restore from trash",
       "trashRestoreMessage": "Restore {file} (deleted {time})? If a file with the same name exists, its current content is saved to history first.",
       "trashDeleteTitle": "Delete trash entry permanently",
-      "trashDeleteMessage": "Permanently delete {file} (deleted {time}) from the trash? This trash entry cannot be restored. To remove its version history as well, restore it first and use \"Delete permanently (with history)\" on the file.",
+      "trashDeleteMessage": "Permanently delete {file} (deleted {time}) from the trash? This trash entry cannot be restored; version history and forgotten copies are not affected. To remove every backup of this file as well, use \"Delete permanently (with history)\" on the same row (for an active file, open it in the file details first).",
       "trashPurgeTitle": "Delete file permanently (with history)",
       "trashPurgeMessage": "Permanently delete {file}? It is no longer an active file (only a trash entry, forgotten copy, or version history remains). All versions, forgotten copies, and trash entries for this file in the current scope will be removed and cannot be recovered.",
       "historyVersions": "Version history",
