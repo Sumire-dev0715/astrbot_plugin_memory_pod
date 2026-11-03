@@ -148,6 +148,7 @@
       "peopleSub": "Shared by every chat on this platform, one file per person",
       "peopleSharedTitle": "Shared people memory",
       "peopleSharedSub": "Shared by several bots, one file per person",
+      "peopleSharedOff": "Sharing off",
       "peopleSharedMembers": "Members: {list}",
       "peopleSharedEmpty": "Shared people memory is on, but no member is configured",
       "peopleSharedNotice": "This is people memory shared by several bots: every member can read these files, and writes are limited by each bot's permission.",

@@ -657,6 +657,7 @@ def test_shared_people_overview_and_detail(plugin, dash):
     ]
     by_key = {p["key"]: p for p in people["platforms"]}
     assert by_key["_shared"]["shared"] is True
+    assert by_key["_shared"]["active"] is True
     assert by_key["_shared"]["fileCount"] == 0
     assert by_key["_shared"]["members"] == people["shared"]["members"]
 
@@ -700,6 +701,11 @@ def test_shared_people_overview_and_detail(plugin, dash):
     by_key = {p["key"]: p for p in data["people"]["platforms"]}
     assert by_key["Bot-A"]["unused"] is False
     assert by_key["_shared"]["shared"] is True
+    # 共享已关闭：列表里要显示未启用，而不是“多个机器人共用”
+    assert by_key["_shared"]["active"] is False
+    shared_detail = ok(call(dash, "scope", {"scope": "people", "key": "_shared"}))
+    assert shared_detail["people"]["active"] is False
+    assert shared_detail["people"]["members"] == []
 
 
 # ---------------------------------------------------------------- 遗忘
@@ -1107,6 +1113,14 @@ def test_migrate_platform_and_info(plugin, dash):
     info = ok(call(dash, "migrate/info"))
     assert info["platforms"] == [{"platform": "aiocqhttp", "sessions": 1, "people": False}]
     assert info["adapters"] == ["aiocqhttp", "qq_new"]
+    # 共享人物目录不是平台，不能出现在平台改名迁移的选项里
+    asyncio.run(
+        plugin._store.people_scope_by_key("_shared").write(
+            "user-1.md", memory("user-1", "共享人物")
+        )
+    )
+    info = ok(call(dash, "migrate/info"))
+    assert all(item["platform"] != "_shared" for item in info["platforms"])
     body = {"from": "aiocqhttp", "to": "qq_new"}
     preview = ok(call(dash, "migrate/platform", body={**body, "dryRun": True}))
     assert preview["totals"]["added"] == 1

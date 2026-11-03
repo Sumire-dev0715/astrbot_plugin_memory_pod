@@ -474,6 +474,7 @@ class MemoryDashboard:
                         "updatedAt": latest,
                         "tidyPending": pending(SCOPE_PEOPLE, key),
                         "shared": shared,
+                        "active": bool(shared and membership.active),
                         "members": members if shared else [],
                         # 已加入共享的成员，原来的平台目录不再被插件读写
                         "unused": bool(
@@ -1167,7 +1168,12 @@ class MemoryDashboard:
                 )
                 if platform:
                     counts[platform] = counts.get(platform, 0) + 1
-            return self.plugin._store.people_keys()
+            # 共享人物空间不是平台，不能出现在平台改名迁移的下拉框里
+            return [
+                p
+                for p in self.plugin._store.people_keys()
+                if p != sharing.SHARED_KEY
+            ]
 
         people = await asyncio.to_thread(collect)
         return _ok(

@@ -32,6 +32,7 @@
     peopleSub: "同一平台所有会话共享，一人一个文件",
     peopleSharedTitle: "共享人物记忆",
     peopleSharedSub: "多个机器人共用同一个目录，一人一个文件",
+    peopleSharedOff: "共享未启用",
     peopleSharedMembers: "成员：{list}",
     peopleSharedEmpty: "共享人物空间已启用，还没有配置成员",
     peopleSharedNotice: "这是多个机器人共用的共享人物记忆：每个成员都能读到这里的文件，写入受各自权限限制。",
@@ -1212,7 +1213,7 @@
         if (shared && p.members && p.members.length) {
           sub = peopleMemberSummary(p.members);
         } else if (shared) {
-          sub = people.enabled ? t("peopleSharedSub") : t("disabled");
+          sub = p.active ? t("peopleSharedSub") : t("peopleSharedOff");
         } else if (p.unused) {
           sub = t("peopleUnused");
         } else {

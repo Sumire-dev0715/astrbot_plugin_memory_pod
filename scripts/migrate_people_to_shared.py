@@ -2,8 +2,9 @@
 """把各机器人原来的 people 目录复制进共享人物空间 people/_shared/。
 
 共享人物空间启用后，成员机器人统一读写 people/_shared/，原来按平台分开的
-people/<platform>/ 不再被插件使用。本脚本把那些目录里的 user-*.md 和使用
-统计原样复制过去，写入时间与 frontmatter 都不改，原目录保留不动。
+people/<platform>/ 不再被插件使用。本脚本把那些目录里的 user-*.md（含
+forgotten/ 下已遗忘的）和使用统计原样复制过去，写入时间与 frontmatter 都
+不改，原目录保留不动。
 
 默认只预演（dry-run），不写任何文件；加 --apply 才真正复制。
 
@@ -48,6 +49,7 @@ class SourceFile:
     content: str
     usage: memstore.Usage
     mtime: float
+    forgotten: bool = False
 
 
 @dataclass
@@ -75,7 +77,9 @@ def _source_key(people_root: Path, raw: str) -> str:
     """把 --from 的参数换成 people 下的目录名。
 
     优先接受已经是 safe_key 输出形态、且磁盘上确实存在的目录名（方便手工
-    对照管理页）；否则按 platform_id 计算 safe_key。共享目录本身不能当来源。
+    对照管理页）；否则按 platform_id 计算 safe_key。目录不存在时直接报错，
+    避免拼错的 platform_id 被当成空来源、看起来迁移成功却漏了数据。
+    共享目录本身不能当来源。
     """
     raw = (raw or "").strip()
     if not raw:
@@ -84,11 +88,14 @@ def _source_key(people_root: Path, raw: str) -> str:
         raise MigrationError("--from 不能是共享目录 _shared")
     if memstore.is_scope_key(raw) and (people_root / raw).is_dir():
         return raw
-    return memstore.safe_key(raw)
+    key = memstore.safe_key(raw)
+    if not (people_root / key).is_dir():
+        raise MigrationError(f"来源 {raw} 的 people 目录不存在：{people_root / key}")
+    return key
 
 
 async def _read_source(store: memstore.ScopeStore, label: str) -> list[SourceFile]:
-    """读一个来源目录里的全部 user-*.md（含正文、使用统计与写入时间）。"""
+    """读一个来源目录里的全部 user-*.md（含已遗忘的、使用统计与写入时间）。"""
     result: list[SourceFile] = []
     for name in store.list_files():
         if not memstore.is_person_file(name):
@@ -103,6 +110,27 @@ async def _read_source(store: memstore.ScopeStore, label: str) -> list[SourceFil
                 content=content,
                 usage=store.usage_of(name),
                 mtime=store.mtime(name) or 0.0,
+            )
+        )
+    for name in store.forgotten_files():
+        if not memstore.is_person_file(name):
+            continue
+        content = await store.read_forgotten(name)
+        if content is None:
+            continue
+        path = store.root / memstore.FORGOTTEN_DIRNAME / name
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            mtime = 0.0
+        result.append(
+            SourceFile(
+                name=name,
+                source=label,
+                content=content,
+                usage=store.usage_of(name),
+                mtime=mtime,
+                forgotten=True,
             )
         )
     return result
@@ -158,6 +186,7 @@ async def _collect_plan(
             memstore.ImportEntry(
                 name=item.name,
                 content=item.content,
+                forgotten=item.forgotten,
                 usage=item.usage,
                 mtime=item.mtime,
             )
@@ -191,6 +220,11 @@ async def _run(args: argparse.Namespace) -> int:
             )
 
     if args.apply:
+        # 共享目录里可能已有文件而索引缺失（上次迁移中断、手工拷入）：
+        # 导入只补本次文件的行，这里按磁盘实际文件把缺的行补齐
+        report = await asyncio.to_thread(target.index_report)
+        if report.missing:
+            await target.rebuild_index()
         print(f"复制 {copied} 条，冲突 {len(plan.conflicts)} 条")
     else:
         print(f"计划复制 {copied} 条，冲突 {len(plan.conflicts)} 条")
