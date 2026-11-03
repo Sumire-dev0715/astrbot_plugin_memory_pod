@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from astrbot.api import logger
 
-from .core import consolidate, history, memstore, registry, tidy, transfer
+from .core import consolidate, history, memstore, registry, sharing, tidy, transfer
 from .core.compress import SessionState
 
 if TYPE_CHECKING:
@@ -185,6 +185,47 @@ def _scan_scope(store: memstore.ScopeStore) -> tuple[int, float]:
         mtime = store.mtime(name) or 0.0
         latest = max(latest, mtime)
     return count, latest
+
+
+def _member_dicts(membership: sharing.Membership) -> list[dict]:
+    """共享人物空间的成员与权限，按配置顺序给页面展示。"""
+    return [
+        {"platform": member.platform_id, "permission": member.permission}
+        for member in membership.members.values()
+    ]
+
+
+def _member_keys(membership: sharing.Membership) -> set[str]:
+    """成员原来的 people 目录名；用于把已并入共享的旧目录标成未使用。"""
+    return {
+        memstore.safe_key(member.platform_id)
+        for member in membership.members.values()
+    }
+
+
+def _people_display(key: str, membership: sharing.Membership) -> str:
+    """人物目录在页面上的显示名：共享目录用保留键，成员目录还原平台 ID。"""
+    if key == sharing.SHARED_KEY:
+        return key
+    for member in membership.members.values():
+        if memstore.safe_key(member.platform_id) == key:
+            return member.platform_id
+    return key
+
+
+def _people_info(key: str, membership: sharing.Membership) -> dict:
+    """管理页定位人物作用域时随详情返回的共享信息。"""
+    info = {
+        "key": key,
+        "platform": _people_display(key, membership),
+        "shared": key == sharing.SHARED_KEY,
+    }
+    if info["shared"]:
+        info["active"] = membership.active
+        info["members"] = _member_dicts(membership)
+    else:
+        info["unused"] = membership.active and key in _member_keys(membership)
+    return info
 
 
 class MemoryDashboard:
@@ -382,6 +423,11 @@ class MemoryDashboard:
         store = plugin._store
         records = plugin._registry.all()
         keys = sorted(set(store.session_keys()) | set(records))
+        membership = store.shared_people()
+        # 共享人物空间启用后即使还没有文件，也要在页面上给它一个入口
+        people_keys = set(store.people_keys())
+        if membership.active:
+            people_keys.add(sharing.SHARED_KEY)
         # 作用域对象在事件循环里取好再进线程：同一目录只能有一个实例
         # （串行写入的锁挂在上面），线程里懒建会和循环上的处理器撞车
         global_scope = store.global_scope()
@@ -391,8 +437,10 @@ class MemoryDashboard:
             if memstore.is_scope_key(key)
         }
         people_scopes = {
-            key: store.people_scope_by_key(key) for key in store.people_keys()
+            key: store.people_scope_by_key(key) for key in sorted(people_keys)
         }
+        members = _member_dicts(membership)
+        member_keys = _member_keys(membership)
 
         def collect() -> tuple[dict, list[dict], list[dict], dict]:
             metas = plugin._tidy.all_meta()
@@ -417,13 +465,22 @@ class MemoryDashboard:
             platforms = []
             for key, scope in people_scopes.items():
                 count, latest = _scan_scope(scope) if scope else (0, 0.0)
+                shared = key == sharing.SHARED_KEY
                 platforms.append(
                     {
                         "key": key,
-                        "platform": key,
+                        "platform": _people_display(key, membership),
                         "fileCount": count,
                         "updatedAt": latest,
                         "tidyPending": pending(SCOPE_PEOPLE, key),
+                        "shared": shared,
+                        "members": members if shared else [],
+                        # 已加入共享的成员，原来的平台目录不再被插件读写
+                        "unused": bool(
+                            not shared
+                            and membership.active
+                            and key in member_keys
+                        ),
                     }
                 )
             global_info = {
@@ -435,11 +492,21 @@ class MemoryDashboard:
 
         global_info, sessions, platforms, settings = await asyncio.to_thread(collect)
         global_info["enabled"] = plugin._global_on()
+        people_info: dict = {
+            "enabled": plugin._people_on(),
+            "platforms": platforms,
+        }
+        if membership.active:
+            people_info["shared"] = {
+                "key": sharing.SHARED_KEY,
+                "active": True,
+                "members": members,
+            }
         return _ok(
             {
                 "memoryEnabled": plugin._bool("enable_memory", True),
                 "global": global_info,
-                "people": {"enabled": plugin._people_on(), "platforms": platforms},
+                "people": people_info,
                 "sessions": sessions,
                 "autoTidy": self._autotidy_settings(settings),
             }
@@ -501,7 +568,9 @@ class MemoryDashboard:
                 self.plugin._archive.count, key
             )
         elif scope == SCOPE_PEOPLE:
-            data["people"] = {"key": key, "platform": key}
+            data["people"] = _people_info(
+                key, self.plugin._store.shared_people()
+            )
             data["enabled"] = self.plugin._people_on()
         else:
             data["enabled"] = self.plugin._global_on()

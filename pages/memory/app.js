@@ -10,6 +10,8 @@
   const FRONT_RE = /^---\s*\n([\s\S]*?)\n---\s*\n?/;
   const LINK_RE = /\[\[([^\[\]\n]{1,120})\]\]/g;
   const KIND_ICON = { group: "group", private: "user", other: "chat" };
+  // 与 core/sharing.SHARED_KEY 一致：共享人物空间的保留目录名
+  const SHARED_KEY = "_shared";
 
   // 简体中文文案；其他语言由 .astrbot-plugin/i18n 提供，缺失时回落到这里
   const ZH = {
@@ -28,6 +30,19 @@
     peopleLabel: "人物记忆",
     peopleTitle: "人物记忆 · {platform}",
     peopleSub: "同一平台所有会话共享，一人一个文件",
+    peopleSharedTitle: "共享人物记忆",
+    peopleSharedSub: "多个机器人共用同一个目录，一人一个文件",
+    peopleSharedMembers: "成员：{list}",
+    peopleSharedEmpty: "共享人物空间已启用，还没有配置成员",
+    peopleSharedNotice: "这是多个机器人共用的共享人物记忆：每个成员都能读到这里的文件，写入受各自权限限制。",
+    peopleSharedOffNotice: "共享人物空间未启用：这些文件目前没有机器人会读写，启用后成员会共用这个目录。",
+    peopleMemberLine: "{platform}（{permission}）",
+    peopleUnused: "未使用（已并入共享人物记忆）",
+    peopleUnusedShort: "未使用",
+    peopleUnusedNotice: "这个目录已经不再使用：该机器人已加入共享人物空间，人物记忆的读写都走「共享人物记忆」。目录里的旧文件仍保留在磁盘上。",
+    permission_edit: "可编辑",
+    permission_append: "仅追加",
+    permission_read: "只读",
     peopleNone: "还没有人物记忆：机器人记下某个人之后会按平台出现在这里",
     peopleOffNotice: "人物记忆未启用：机器人当前不会读取或写入这里的内容。如需使用，请在插件配置中开启「启用人物记忆」。",
     sessionsLabel: "会话 · {n}",
@@ -927,6 +942,32 @@
     return bits.filter(Boolean).join(" · ");
   }
 
+  function peopleScopeTitle(platform, key) {
+    return key === SHARED_KEY
+      ? t("peopleSharedTitle")
+      : t("peopleTitle", { platform: platform || key });
+  }
+
+  function permissionLabel(permission) {
+    return t("permission_" + permission);
+  }
+
+  function peopleMemberSummary(members) {
+    if (!members || !members.length) {
+      return t("peopleSharedEmpty");
+    }
+    return t("peopleSharedMembers", {
+      list: members
+        .map(function (m) {
+          return t("peopleMemberLine", {
+            platform: m.platform,
+            permission: permissionLabel(m.permission),
+          });
+        })
+        .join("、"),
+    });
+  }
+
   // ------------------------------------------------------------ 加载
 
   async function loadOverview(quiet) {
@@ -1165,12 +1206,24 @@
       }
       people.platforms.forEach(function (p) {
         const active = isSelected({ scope: "people", key: p.key });
+        const shared = p.key === SHARED_KEY;
+        const name = peopleScopeTitle(p.platform, p.key);
+        let sub;
+        if (shared && p.members && p.members.length) {
+          sub = peopleMemberSummary(p.members);
+        } else if (shared) {
+          sub = people.enabled ? t("peopleSharedSub") : t("disabled");
+        } else if (p.unused) {
+          sub = t("peopleUnused");
+        } else {
+          sub = people.enabled ? t("peopleSub") : t("disabled");
+        }
         list.append(
           h(
             "button",
             {
               class: "session-item" + (active ? " active" : ""),
-              title: p.platform,
+              title: shared ? t("peopleSharedTitle") : p.platform,
               onclick: function () {
                 selectScope({ scope: "people", key: p.key });
               },
@@ -1179,8 +1232,8 @@
             h(
               "div",
               { class: "session-text" },
-              h("div", { class: "session-name" }, p.platform),
-              h("div", { class: "session-sub" }, people.enabled ? t("peopleSub") : t("disabled"))
+              h("div", { class: "session-name" }, name),
+              h("div", { class: "session-sub" }, sub)
             ),
             pendingDot(p.tidyPending),
             h("span", { class: "count" }, p.fileCount)
@@ -1302,10 +1355,25 @@
     const isPeople = d.scope === "people";
     const isSession = !isGlobal && !isPeople;
     const s = d.session || {};
+    const people = d.people || {};
+    const peopleShared = isPeople && !!people.shared;
+    const peopleUnused = isPeople && !!people.unused;
     const meta = [];
     if (isGlobal || isPeople) {
-      meta.push(h("span", null, t(isPeople ? "peopleSub" : "globalSub")));
+      meta.push(
+        h(
+          "span",
+          null,
+          isGlobal ? t("globalSub") : peopleShared ? t("peopleSharedSub") : t("peopleSub")
+        )
+      );
+      if (peopleUnused) {
+        meta.push(h("span", { class: "tag warn" }, t("peopleUnusedShort")));
+      }
       meta.push(h("span", { class: "tag " + (d.enabled ? "ok" : "warn") }, d.enabled ? t("enabled") : t("disabled")));
+      if (peopleShared && people.members && people.members.length) {
+        meta.push(h("span", null, peopleMemberSummary(people.members)));
+      }
     } else {
       meta.push(h("span", null, kindLabel(s.kind)));
       if (s.platform) {
@@ -1350,7 +1418,7 @@
     const title = isGlobal
       ? t("globalTitle")
       : isPeople
-        ? t("peopleTitle", { platform: (d.people || {}).platform || d.key })
+        ? peopleScopeTitle(people.platform, d.key)
         : sessionTitle(s);
     const avatarKind = isGlobal ? "global" : isPeople ? "people" : s.kind;
     const avatarIcon = isGlobal ? "bot" : isPeople ? "user" : KIND_ICON[s.kind] || "chat";
@@ -1381,6 +1449,17 @@
     }
     if (isPeople && !d.enabled) {
       notices.push(notice("warn", t("peopleOffNotice")));
+    }
+    if (peopleShared) {
+      notices.push(
+        notice(
+          people.active ? "info" : "warn",
+          people.active ? t("peopleSharedNotice") : t("peopleSharedOffNotice")
+        )
+      );
+    }
+    if (peopleUnused) {
+      notices.push(notice("warn", t("peopleUnusedNotice")));
     }
     const tidy = d.tidy || {};
     if (tidy.pendingCount && tidy.plan) {
@@ -3153,7 +3232,12 @@
       people.platforms
         .filter(function (p) { return p.fileCount > 0; })
         .forEach(function (p) {
-          targets.push({ scope: "people", key: p.key, label: t("peopleTitle", { platform: p.platform }), sub: t("peopleSub") });
+          targets.push({
+            scope: "people",
+            key: p.key,
+            label: peopleScopeTitle(p.platform, p.key),
+            sub: p.key === SHARED_KEY ? t("peopleSharedSub") : t("peopleSub"),
+          });
         });
     }
     ov.sessions
@@ -3593,7 +3677,7 @@
     }
     ((ov.people || {}).platforms || []).forEach(function (p) {
       if (p.tidyPending) {
-        items.push({ scope: "people", key: p.key, label: t("peopleTitle", { platform: p.platform }), n: p.tidyPending });
+        items.push({ scope: "people", key: p.key, label: peopleScopeTitle(p.platform, p.key), n: p.tidyPending });
       }
     });
     ov.sessions.forEach(function (s) {
@@ -3786,7 +3870,7 @@
       return t("globalTitle");
     }
     if (item.scope === "people") {
-      return t("peopleTitle", { platform: item.platform || item.key });
+      return peopleScopeTitle(item.platform, item.key);
     }
     return sessionTitle(item);
   }

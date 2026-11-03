@@ -2287,6 +2287,8 @@ class MemoryBeyondPlugin(Star):
     async def show_status(self, event: AstrMessageEvent):
         """查看 Memory Beyond 当前会话的记忆与压缩状态。"""
         umo = str(event.unified_msg_origin)
+        # 配置页可能刚改过共享成员，状态里的目录与权限要和工具一致
+        self._refresh_sharing()
         rt = await self._runtime(umo)
         state = rt.state
         window, window_note = await self._resolve_window(event)
@@ -2375,10 +2377,21 @@ class MemoryBeyondPlugin(Star):
             f"相关记忆召回：{self._recall_label()}",
             f"后台记忆提取：{self._extract_label(state)}",
             f"记忆遗忘：{self._forget_label(umo)}",
+            f"共享人物空间：{self._sharing_label(umo)}",
             f"定期整理：{self._tidy_label(umo)}",
             "记忆管理页：AstrBot WebUI 侧边栏「插件页面」",
         ]
         yield event.plain_result("\n".join(lines))
+
+    def _sharing_label(self, umo: str) -> str:
+        """本机器人是否在共享人物空间、权限等级；供 /mb_status 展示。"""
+        if not self._sharing.active:
+            return "否（未启用）"
+        platform_id = self._platform_of(umo)
+        permission = self._sharing.permission(platform_id)
+        if permission is None:
+            return f"否（本机器人 {platform_id} 不在共享成员列表）"
+        return f"是（权限 {permission}）"
 
     def _loop_guard_label(self, rt: RuntimeSession) -> str:
         if not self._bool("loop_guard", True):

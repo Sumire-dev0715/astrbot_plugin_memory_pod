@@ -55,6 +55,7 @@ pkg_archive = importlib.import_module(f"{PACKAGE}.core.archive")
 pkg_compress = importlib.import_module(f"{PACKAGE}.core.compress")
 pkg_memstore = importlib.import_module(f"{PACKAGE}.core.memstore")
 pkg_registry = importlib.import_module(f"{PACKAGE}.core.registry")
+pkg_sharing = importlib.import_module(f"{PACKAGE}.core.sharing")
 pkg_tidy = importlib.import_module(f"{PACKAGE}.core.tidy")
 
 UMO = "aiocqhttp:GroupMessage:100200"
@@ -639,6 +640,66 @@ def test_people_scope_routes(plugin, dash):
     # 关闭后文件仍在、页面仍可看，只是标成未启用
     assert ok(call(dash, "scope", {"scope": "people", "key": "aiocqhttp"}))["enabled"] is False
     assert ok(call(dash, "overview"))["people"]["platforms"][0]["fileCount"] == 2
+
+
+def test_shared_people_overview_and_detail(plugin, dash):
+    membership = pkg_sharing.parse_config(["Bot-A=edit", "Bot-B=append"])
+    plugin._store.set_shared_people(membership)
+    plugin.config["enable_people_memory"] = True
+
+    # 还没有文件时，共享目录也要出现在人物分组里，成员与权限一并带上
+    data = ok(call(dash, "overview"))
+    people = data["people"]
+    assert people["shared"]["key"] == "_shared"
+    assert people["shared"]["members"] == [
+        {"platform": "Bot-A", "permission": "edit"},
+        {"platform": "Bot-B", "permission": "append"},
+    ]
+    by_key = {p["key"]: p for p in people["platforms"]}
+    assert by_key["_shared"]["shared"] is True
+    assert by_key["_shared"]["fileCount"] == 0
+    assert by_key["_shared"]["members"] == people["shared"]["members"]
+
+    # 共享目录里写一份；成员原来的平台目录里留一份旧数据
+    asyncio.run(
+        plugin._store.people_scope("Bot-A").write(
+            "user-1.md", memory("user-1", "共享人物")
+        )
+    )
+    asyncio.run(
+        plugin._store.people_scope_by_key("Bot-A").write(
+            "user-2.md", memory("user-2", "旧目录人物")
+        )
+    )
+    data = ok(call(dash, "overview"))
+    by_key = {p["key"]: p for p in data["people"]["platforms"]}
+    assert by_key["_shared"]["fileCount"] == 1
+    assert by_key["Bot-A"]["fileCount"] == 1
+    # 成员已并入共享：原来的平台目录不再被插件读写；没有旧目录的成员不单列
+    assert by_key["Bot-A"]["unused"] is True
+    assert "Bot-B" not in by_key
+    assert by_key["_shared"]["unused"] is False
+
+    shared_detail = ok(call(dash, "scope", {"scope": "people", "key": "_shared"}))
+    assert shared_detail["people"]["shared"] is True
+    assert shared_detail["people"]["active"] is True
+    assert shared_detail["people"]["members"] == data["people"]["shared"]["members"]
+    assert shared_detail["people"]["platform"] == "_shared"
+    assert [f["file"] for f in shared_detail["files"]] == ["user-1.md"]
+
+    legacy_detail = ok(call(dash, "scope", {"scope": "people", "key": "Bot-A"}))
+    assert legacy_detail["people"]["shared"] is False
+    assert legacy_detail["people"]["unused"] is True
+    assert legacy_detail["people"]["platform"] == "Bot-A"
+    assert [f["file"] for f in legacy_detail["files"]] == ["user-2.md"]
+
+    # 配置清空后共享标记消失，旧行为不变
+    plugin._store.set_shared_people(pkg_sharing.Membership())
+    data = ok(call(dash, "overview"))
+    assert "shared" not in data["people"]
+    by_key = {p["key"]: p for p in data["people"]["platforms"]}
+    assert by_key["Bot-A"]["unused"] is False
+    assert by_key["_shared"]["shared"] is True
 
 
 # ---------------------------------------------------------------- 遗忘

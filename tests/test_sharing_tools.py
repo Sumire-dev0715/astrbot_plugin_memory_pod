@@ -199,6 +199,9 @@ class FakeEvent:
     def get_messages(self):
         return []
 
+    def plain_result(self, text):
+        return text
+
 
 def person_file(name="user-123", body="身份：测试用户，工程师"):
     return (
@@ -639,3 +642,52 @@ def test_shared_member_guidance_adds_shared_rule(tmp_path):
     assert "共享人物空间" in guidance
     assert "中性的第三人称" in guidance
     assert "一律写 session" in guidance
+
+
+# ---------------------------------------------------------------- /mb_status
+
+
+def _status_text(plugin, event):
+    async def collect():
+        chunks = []
+        async for chunk in plugin.show_status(event):
+            chunks.append(chunk)
+        return "\n".join(chunks)
+
+    plugin._runtime = lambda umo: _async_value(
+        types.SimpleNamespace(state=pkg_compress.SessionState())
+    )
+    plugin._resolve_window = lambda event: _async_value((128000, "测试窗口"))
+    plugin._estimate_live = lambda event, rt: _async_value((0, {}))
+    plugin._loop_guard_label = lambda rt: "关闭"
+    plugin._recall_label = lambda: "关闭"
+    plugin._extract_label = lambda state: "关闭"
+    plugin._forget_label = lambda umo: "关闭"
+    plugin._tidy_label = lambda umo: "关闭"
+    plugin._warned_threshold = False
+    return run(collect())
+
+
+def _async_value(value):
+    async def inner(*args, **kwargs):
+        return value
+
+    return inner()
+
+
+def test_mb_status_shows_shared_space_and_permission(tmp_path):
+    plugin = make_plugin(
+        tmp_path, ["Bot-A=edit", "Bot-B=append", "Bot-C=read"]
+    )
+    for platform_id, permission in (
+        ("Bot-A", "edit"),
+        ("Bot-B", "append"),
+        ("Bot-C", "read"),
+    ):
+        text = _status_text(plugin, FakeEvent(platform_id))
+        assert f"共享人物空间：是（权限 {permission}）" in text
+    outsider = _status_text(plugin, FakeEvent("Bot-D"))
+    assert "共享人物空间：否（本机器人 Bot-D 不在共享成员列表）" in outsider
+
+    off = _status_text(make_plugin(tmp_path / "off", []), FakeEvent("Bot-A"))
+    assert "共享人物空间：否（未启用）" in off
