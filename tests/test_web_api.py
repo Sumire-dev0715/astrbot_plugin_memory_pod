@@ -667,6 +667,139 @@ def test_forgotten_routes(plugin, dash):
     assert ok(call(dash, "scope", q))["forgettingEnabled"] is False
 
 
+# ---------------------------------------------------------------- 历史与回收站
+
+
+def test_history_routes(plugin, dash):
+    store = session_store(plugin)
+    asyncio.run(store.write("a.md", memory("a", "甲", "第一版")))
+    first = asyncio.run(store.read("a.md"))
+    second = memory("a", "甲", "第二版")
+    q = {"scope": "session", "key": KEY, "file": "a.md"}
+    ok(
+        call(
+            dash,
+            "file/save",
+            body={**q, "oldFile": "a.md", "mode": "raw", "content": second},
+        )
+    )
+    second_saved = asyncio.run(store.read("a.md"))
+
+    data = ok(call(dash, "history/versions", q))
+    assert data["file"] == "a.md"
+    versions = data["versions"]
+    assert len(versions) == 1
+    version = versions[0]
+    assert version["action"] == "write" and version["actor"] == "webui"
+    assert version["ts"] > 0 and version["mtime"] > 0 and version["size"] > 0
+    assert version["version"].endswith("-write")
+
+    view = ok(call(dash, "history/file", {**q, "version": version["version"]}))
+    assert view["file"] == "a.md" and view["content"] == first
+    assert "没有这个历史版本" in err(
+        call(dash, "history/file", {**q, "version": "20200101-000000-000-write"})
+    )
+    assert "没有这个历史版本" in err(
+        call(dash, "history/file", {**q, "version": "../escape"})
+    )
+    assert "缺少历史版本" in err(call(dash, "history/file", q))
+    assert "缺少历史版本" in err(
+        call(dash, "history/restore", body={"scope": "session", "key": KEY, "file": "a.md"})
+    )
+    assert "索引" in err(call(dash, "history/versions", {**q, "file": "MEMORY.md"}))
+
+    result = call(dash, "history/restore", body={**q, "version": version["version"]})
+    assert result["status"] == "ok" and "已恢复" in result["message"]
+    assert asyncio.run(store.read("a.md")) == first
+    assert plugin.invalidated[-1] == KEY
+    assert store.index_report().dangling == []
+
+    # 恢复前先把当时的在册内容存进历史，动作记 restore
+    versions = ok(call(dash, "history/versions", q))["versions"]
+    assert len(versions) == 2
+    restore_version = next(item for item in versions if item["action"] == "restore")
+    assert store.read_history("a.md", restore_version["version"]) == second_saved
+
+
+def test_trash_routes(plugin, dash):
+    store = session_store(plugin)
+    asyncio.run(store.write("a.md", memory("a", "甲", "要删的内容")))
+    old = asyncio.run(store.read("a.md"))
+    q = {"scope": "session", "key": KEY}
+    ok(call(dash, "file/delete", body={**q, "file": "a.md"}))
+    assert ok(call(dash, "scope", q))["trashCount"] == 1
+
+    entries = ok(call(dash, "trash", q))["entries"]
+    assert len(entries) == 1
+    item = entries[0]
+    assert item["file"] == "a.md" and item["action"] == "delete"
+    assert item["actor"] == "webui" and item["entry"].endswith("__a.md")
+    assert item["ts"] > 0 and item["mtime"] > 0 and item["size"] > 0
+
+    view = ok(call(dash, "trash/file", {**q, "entry": item["entry"]}))
+    assert view["file"] == "a.md" and view["entry"] == item["entry"]
+    assert view["content"] == old and view["action"] == "delete"
+    assert "没有这个条目" in err(call(dash, "trash/file", {**q, "entry": "../escape"}))
+    assert "缺少回收站条目" in err(call(dash, "trash/file", q))
+    assert "缺少回收站条目" in err(call(dash, "trash/restore", body=q))
+    assert "缺少回收站条目" in err(call(dash, "trash/delete", body=q))
+
+    result = call(dash, "trash/restore", body={**q, "entry": item["entry"]})
+    assert result["status"] == "ok" and "已从回收站恢复" in result["message"]
+    assert asyncio.run(store.read("a.md")) == old
+    assert store.trash_entries() == []
+    assert ok(call(dash, "scope", q))["trashCount"] == 0
+    assert plugin.invalidated[-1] == KEY
+    assert store.index_report().dangling == []
+
+    # 同名文件已存在时，恢复前先把它存进历史
+    asyncio.run(store.write("a.md", memory("a", "甲", "后来写在册的版本")))
+    later = asyncio.run(store.read("a.md"))
+    ok(call(dash, "file/delete", body={**q, "file": "a.md"}))
+    entry = ok(call(dash, "trash", q))["entries"][0]
+    current = memory("a", "甲", "恢复前的当前版本")
+    asyncio.run(store.write("a.md", current))
+    ok(call(dash, "trash/restore", body={**q, "entry": entry["entry"]}))
+    assert asyncio.run(store.read("a.md")) == later
+    versions = store.history_versions("a.md")
+    assert any(v.action == "restore" for v in versions)
+
+    # 彻底删除回收站条目
+    ok(call(dash, "file/delete", body={**q, "file": "a.md"}))
+    entry = ok(call(dash, "trash", q))["entries"][0]
+    result = call(dash, "trash/delete", body={**q, "entry": entry["entry"]})
+    assert result["status"] == "ok" and "已彻底删除" in result["message"]
+    assert store.trash_entries() == []
+    assert "没有这个条目" in err(
+        call(dash, "trash/delete", body={**q, "entry": entry["entry"]})
+    )
+
+
+def test_file_purge_removes_history_trash_and_forgotten(plugin, dash):
+    store = session_store(plugin)
+    asyncio.run(store.write("a.md", memory("a", "甲", "第一版")))
+    asyncio.run(store.write("a.md", memory("a", "甲", "第二版")))
+    ok(call(dash, "file/forget", body={"scope": "session", "key": KEY, "file": "a.md"}))
+    asyncio.run(store.write("a.md", memory("a", "甲", "第三版")))
+    asyncio.run(store.write("a.md", memory("a", "甲", "第四版")))
+    ok(call(dash, "file/delete", body={"scope": "session", "key": KEY, "file": "a.md"}))
+    assert store.history_versions("a.md") and store.trash_entries()
+
+    q = {"scope": "session", "key": KEY, "file": "a.md"}
+    result = call(dash, "file/purge", body=q)
+    assert result["status"] == "ok" and "彻底删除" in result["message"]
+    assert ok(result)["file"] == "a.md"
+    assert store.list_files() == [] and store.forgotten_files() == []
+    assert store.history_versions("a.md") == []
+    assert store.trash_entries() == []
+    report = store.index_report()
+    assert report.missing == [] and report.dangling == []
+    assert plugin.invalidated[-1] == KEY
+
+    assert "没有找到" in err(call(dash, "file/purge", body=q))
+    assert "索引" in err(call(dash, "file/purge", body={**q, "file": "MEMORY.md"}))
+
+
 # ---------------------------------------------------------------- 定期整理
 
 

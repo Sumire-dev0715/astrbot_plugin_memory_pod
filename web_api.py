@@ -111,6 +111,32 @@ def _header_dict(header: memstore.MemoryHeader) -> dict:
     }
 
 
+def _history_dict(version: history.HistoryVersion) -> dict:
+    return {
+        "file": version.file,
+        "version": version.version,
+        "action": version.action,
+        "ts": version.ts,
+        "mtime": version.mtime,
+        "size": version.size,
+        "actor": version.actor,
+        "source": version.source,
+    }
+
+
+def _trash_dict(entry: history.TrashEntry) -> dict:
+    return {
+        "entry": entry.entry,
+        "file": entry.file,
+        "ts": entry.ts,
+        "mtime": entry.mtime,
+        "size": entry.size,
+        "action": entry.action,
+        "actor": entry.actor,
+        "source": entry.source,
+    }
+
+
 def _record_dict(key: str, record: registry.SessionRecord | None) -> dict:
     if record is None:
         platform, kind, target = registry.guess_from_key(key)
@@ -189,6 +215,14 @@ class MemoryDashboard:
             ("file/forget", "POST", self.file_forget, "记忆管理：遗忘记忆文件"),
             ("forgotten/restore", "POST", self.forgotten_restore, "记忆管理：恢复已遗忘的文件"),
             ("forgotten/delete", "POST", self.forgotten_delete, "记忆管理：删除已遗忘的文件（移入回收站）"),
+            ("history/versions", "GET", self.history_versions, "记忆管理：文件的历史版本"),
+            ("history/file", "GET", self.history_file, "记忆管理：读取某一历史版本"),
+            ("history/restore", "POST", self.history_restore, "记忆管理：恢复历史版本"),
+            ("trash", "GET", self.trash_entries, "记忆管理：回收站列表"),
+            ("trash/file", "GET", self.trash_file, "记忆管理：读取回收站条目"),
+            ("trash/restore", "POST", self.trash_restore, "记忆管理：从回收站恢复"),
+            ("trash/delete", "POST", self.trash_delete, "记忆管理：彻底删除回收站条目"),
+            ("file/purge", "POST", self.file_purge, "记忆管理：彻底删除文件及其历史"),
             ("index/save", "POST", self.index_save, "记忆管理：保存索引"),
             ("index/rebuild", "POST", self.index_rebuild, "记忆管理：重建索引"),
             ("session/reset", "POST", self.session_reset, "记忆管理：重置压缩状态"),
@@ -434,6 +468,8 @@ class MemoryDashboard:
             return {
                 "files": [_header_dict(h) for h in headers],
                 "forgotten": [_header_dict(h) for h in store.forgotten_headers()],
+                # 回收站条目只在打开标签时按需拉取，这里只给数量
+                "trashCount": len(store.trash_entries()),
                 "index": {
                     "exists": report.exists,
                     "content": index_text,
@@ -652,6 +688,113 @@ class MemoryDashboard:
         report = await store.delete_forgotten(name, actor=history.ACTOR_WEBUI)
         if not report.ok:
             raise ApiError(report.message)
+        return _ok({"file": name}, report.message)
+
+    # ------------------------------------------------------------ 历史与回收站
+
+    async def history_versions(self) -> dict:
+        """某个文件的全部历史版本，新的在前。"""
+        _, _, store = self._scope_from_query()
+        name = self._file_name(_query("file"))
+        versions = await asyncio.to_thread(store.history_versions, name)
+        return _ok(
+            {
+                "file": name,
+                "versions": [_history_dict(item) for item in versions],
+            }
+        )
+
+    async def history_file(self) -> dict:
+        """读某一版历史的原文。"""
+        _, _, store = self._scope_from_query()
+        name = self._file_name(_query("file"))
+        version = _text(_query("version")).strip()
+        if not version:
+            raise ApiError("缺少历史版本")
+        content = await asyncio.to_thread(store.read_history, name, version)
+        if content is None:
+            raise ApiError(f"没有这个历史版本：{version}")
+        return _ok({"file": name, "version": version, "content": content})
+
+    async def history_restore(self) -> dict:
+        """恢复某一版历史：当前在册文件会先存进历史再覆盖。"""
+        body = await _body()
+        _, key, store = self._scope_from_body(body)
+        name = self._file_name(body.get("file"))
+        version = _text(body.get("version")).strip()
+        if not version:
+            raise ApiError("缺少历史版本")
+        report = await store.restore_history(
+            name, version, actor=history.ACTOR_WEBUI
+        )
+        if not report.ok:
+            raise ApiError(report.message)
+        self._changed(key)
+        return _ok({"file": name, "version": version}, report.message)
+
+    async def trash_entries(self) -> dict:
+        """回收站条目，新的在前。"""
+        _, _, store = self._scope_from_query()
+        entries = await asyncio.to_thread(store.trash_entries)
+        return _ok({"entries": [_trash_dict(item) for item in entries]})
+
+    async def trash_file(self) -> dict:
+        """读回收站条目的原文。"""
+        _, _, store = self._scope_from_query()
+        entry_name = _text(_query("entry")).strip()
+        if not entry_name:
+            raise ApiError("缺少回收站条目")
+
+        def read():
+            info = next(
+                (item for item in store.trash_entries() if item.entry == entry_name),
+                None,
+            )
+            return info, store.read_trash(entry_name)
+
+        info, content = await asyncio.to_thread(read)
+        if info is None or content is None:
+            raise ApiError("回收站里没有这个条目")
+        data = _trash_dict(info)
+        data["content"] = content
+        return _ok(data)
+
+    async def trash_restore(self) -> dict:
+        """从回收站恢复一条：同名在册文件先存进历史再覆盖。"""
+        body = await _body()
+        _, key, store = self._scope_from_body(body)
+        entry_name = _text(body.get("entry")).strip()
+        if not entry_name:
+            raise ApiError("缺少回收站条目")
+        report = await store.restore_trash(entry_name, actor=history.ACTOR_WEBUI)
+        if not report.ok:
+            raise ApiError(report.message)
+        self._changed(key)
+        return _ok({"entry": entry_name}, report.message)
+
+    async def trash_delete(self) -> dict:
+        """彻底删除一条回收站条目。"""
+        body = await _body()
+        _, _, store = self._scope_from_body(body)
+        entry_name = _text(body.get("entry")).strip()
+        if not entry_name:
+            raise ApiError("缺少回收站条目")
+        report = await store.delete_trash(entry_name, actor=history.ACTOR_WEBUI)
+        if not report.ok:
+            raise ApiError(report.message)
+        return _ok({"entry": entry_name}, report.message)
+
+    async def file_purge(self) -> dict:
+        """彻底删除在册/已遗忘文件及其全部历史、回收站条目（要求遗忘时用）。"""
+        body = await _body()
+        _, key, store = self._scope_from_body(body)
+        name = self._file_name(body.get("file"))
+        report = await store.delete_file_completely(
+            name, actor=history.ACTOR_WEBUI
+        )
+        if not report.ok:
+            raise ApiError(report.message)
+        self._changed(key)
         return _ok({"file": name}, report.message)
 
     async def index_save(self) -> dict:

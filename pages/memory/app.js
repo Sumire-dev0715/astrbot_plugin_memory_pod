@@ -182,6 +182,40 @@
     forgotten: "已遗忘",
     forgetDeleteTitle: "彻底删除",
     forgetDeleteMessage: "确定永久删除已遗忘的 {file} 吗？删除后无法恢复。",
+    tabTrash: "回收站",
+    trashTitle: "回收站",
+    trashHint: "被删除的记忆会先放在这里，保留期内可以查看、恢复或彻底删除。",
+    noTrashTitle: "回收站是空的",
+    noTrashHint: "删除记忆时文件会先移到这里，之后可以恢复。",
+    trashDeletedAt: "{time} 删除",
+    trashRestoreTitle: "从回收站恢复",
+    trashRestoreMessage: "恢复 {file}（{time} 删除的版本）。如果现在有同名文件，会先把当前内容存进历史再覆盖。",
+    trashDeleteTitle: "彻底删除回收站条目",
+    trashDeleteMessage: "确定永久删除回收站里的 {file}（{time} 删除）吗？删除后无法恢复。",
+    historyVersions: "历史版本",
+    historyHint: "覆盖或修改前自动保存的旧内容；恢复时会先把当前版本存进历史。",
+    noHistoryTitle: "还没有历史版本",
+    noHistoryHint: "这个文件第一次被覆盖或修改后，旧内容会出现在这里。",
+    historyRestoreTitle: "恢复历史版本",
+    historyRestoreMessage: "用 {time} 的版本覆盖 {file} 吗？当前内容会先存进历史，尚未保存的修改会丢失。",
+    historyActor: "操作者：{actor}",
+    historySource: "来源 {source}",
+    actorUnknown: "未知",
+    action_write: "覆盖",
+    action_edit: "修改",
+    action_delete: "删除",
+    action_import: "导入",
+    action_restore: "恢复",
+    action_forget: "遗忘",
+    action_discard_forgotten: "替换遗忘副本",
+    action_delete_forgotten: "删除遗忘文件",
+    action_delete_trash: "彻底删除",
+    action_purge_file: "彻底删除文件",
+    action_purge_scope: "清除作用域",
+    purgeFile: "彻底删除（含历史）",
+    purgeFileTitle: "彻底删除文件",
+    purgeFileMessage: "确定彻底删除 {file} 吗？在册文件、已遗忘副本、全部历史版本和回收站条目都会删除，无法恢复。",
+    purgeFileConfirm: "彻底删除",
     backToArchives: "返回归档列表",
     archiveSummary: "这次压缩生成的摘要",
     archiveMessages: "被摘要的原文（{n} 条）",
@@ -797,6 +831,9 @@
     archives: null,
     archivesLoading: false,
     archiveView: null,
+    history: null,
+    trash: null,
+    trashLoading: false,
   };
   const els = {};
   let searchTimer = 0;
@@ -828,6 +865,9 @@
     state.archives = null;
     state.archivesLoading = false;
     state.archiveView = null;
+    state.history = null;
+    state.trash = null;
+    state.trashLoading = false;
   }
 
   function hasUnsaved() {
@@ -926,6 +966,8 @@
     state.compression = null;
     state.archives = null;
     state.archiveView = null;
+    state.history = null;
+    state.trash = null;
     state.searchResults = null;
     state.fileQuery = "";
     if (state.editor && !state.editor.isNew) {
@@ -1353,6 +1395,7 @@
     if (d.forgettingEnabled || forgotten.length) {
       tabs.push(["forgotten", "tabForgotten", forgotten.length]);
     }
+    tabs.push(["trash", "tabTrash", d.trashCount || 0]);
     const tabBar = h("div", { class: "tabs", role: "tablist" });
     tabs.forEach(function (tab) {
       tabBar.append(
@@ -1401,6 +1444,8 @@
       body.append(renderArchiveTab());
     } else if (state.tab === "forgotten") {
       body.append(renderForgottenTab());
+    } else if (state.tab === "trash") {
+      body.append(renderTrashTab());
     }
   }
 
@@ -1783,15 +1828,35 @@
       h(
         "div",
         { class: "actions" },
-        ed.isNew ? null : h("button", { class: "btn danger", onclick: deleteFile }, icon("trash"), t("delete")),
+        ed.isNew
+          ? null
+          : h(
+              "button",
+              { class: "btn", onclick: toggleHistory, title: t("historyHint") },
+              icon("history"),
+              t("historyVersions")
+            ),
         ed.isNew || !state.detail.forgettingEnabled
           ? null
           : h("button", { class: "btn", onclick: forgetFile, title: t("forgottenHint") }, icon("archive"), t("forget")),
+        ed.isNew ? null : h("button", { class: "btn danger", onclick: deleteFile }, icon("trash"), t("delete")),
+        ed.isNew
+          ? null
+          : h(
+              "button",
+              { class: "btn danger", onclick: purgeFile, title: t("purgeFileTitle") },
+              icon("warn"),
+              t("purgeFile")
+            ),
         h("button", { class: "btn", onclick: cancelEdit }, t("cancel")),
         saveBtn
       )
     );
-    box.append(h("div", { class: "panel-head" }, els.editorTitle, modes), body, foot);
+    const historyPanel =
+      !ed.isNew && state.history && state.history.open && state.history.file === ed.oldFile
+        ? renderHistoryPanel()
+        : null;
+    box.append(h("div", { class: "panel-head" }, els.editorTitle, modes), body, historyPanel, foot);
   }
 
   // 编辑器底部的一行：首次记于 / 最近更新 / 来源 ID；老文件没有戳时退回 mtime
@@ -1849,6 +1914,7 @@
       return;
     }
     const sel = state.selected;
+    state.history = null;
     state.editor = { loading: true, isNew: false, oldFile: file };
     renderFileList();
     renderEditor();
@@ -1875,6 +1941,7 @@
     if (!(await confirmDiscard())) {
       return;
     }
+    state.history = null;
     state.editor = {
       isNew: true,
       oldFile: "",
@@ -1898,6 +1965,7 @@
       return;
     }
     state.editor = null;
+    state.history = null;
     renderFileList();
     renderEditor();
   }
@@ -1956,6 +2024,7 @@
     try {
       const res = await apiPost("file/delete", Object.assign(scopeParams(), { file: ed.oldFile }));
       state.editor = null;
+      state.history = null;
       toast(res.message || t("deleted"));
       await Promise.all([loadDetail(), loadOverview(true)]);
     } catch (err) {
@@ -1976,7 +2045,197 @@
     try {
       const res = await apiPost("file/forget", Object.assign(scopeParams(), { file: ed.oldFile }));
       state.editor = null;
+      state.history = null;
       toast(res.message || t("forgotten"));
+      await Promise.all([loadDetail(), loadOverview(true)]);
+    } catch (err) {
+      toast(err.message, "error");
+    }
+  }
+
+  // ------------------------------------------------------------ 历史版本
+
+  const KNOWN_ACTIONS = [
+    "write",
+    "edit",
+    "delete",
+    "import",
+    "restore",
+    "forget",
+    "discard-forgotten",
+    "delete-forgotten",
+    "delete-trash",
+    "purge-file",
+    "purge-scope",
+  ];
+
+  function actionLabel(action) {
+    return KNOWN_ACTIONS.indexOf(action) >= 0 ? t("action_" + action) : action || "—";
+  }
+
+  function toggleHistory() {
+    const ed = state.editor;
+    if (!ed || ed.isNew) {
+      return;
+    }
+    if (state.history && state.history.file === ed.oldFile && state.history.open) {
+      state.history = null;
+      renderEditor();
+      return;
+    }
+    state.history = { file: ed.oldFile, open: true, loading: true, items: [], error: "" };
+    renderEditor();
+    loadHistory(ed.oldFile);
+  }
+
+  async function loadHistory(file) {
+    const sel = state.selected;
+    let result;
+    try {
+      const res = await apiGet("history/versions", Object.assign(scopeParams(), { file: file }));
+      result = { items: res.versions || [], error: "" };
+    } catch (err) {
+      result = { items: [], error: err.message };
+    }
+    if (!isSelected(sel) || !state.history || state.history.file !== file) {
+      return;
+    }
+    state.history.loading = false;
+    state.history.items = result.items;
+    state.history.error = result.error;
+    if (state.tab === "memories" && state.editor && state.editor.oldFile === file) {
+      renderEditor();
+    }
+  }
+
+  function renderHistoryPanel() {
+    const hs = state.history;
+    const panel = h("section", { class: "history-panel" });
+    panel.append(
+      h(
+        "div",
+        { class: "panel-head" },
+        h("h3", null, t("historyVersions")),
+        h("span", { style: "color:var(--text-3);font-size:12.5px" }, t("historyHint"))
+      )
+    );
+    if (hs.loading) {
+      panel.append(spinnerBlock());
+      return panel;
+    }
+    if (hs.error) {
+      panel.append(notice("warn", hs.error));
+      return panel;
+    }
+    if (!hs.items.length) {
+      panel.append(emptyState("history", t("noHistoryTitle"), t("noHistoryHint")));
+      return panel;
+    }
+    hs.items.forEach(function (item) {
+      const meta = [t("historyActor", { actor: item.actor || t("actorUnknown") })];
+      if (item.source) {
+        meta.push(t("historySource", { source: item.source }));
+      }
+      meta.push(item.version);
+      panel.append(
+        h(
+          "div",
+          { class: "forgotten-item" },
+          h(
+            "div",
+            { class: "grow" },
+            h(
+              "div",
+              { class: "file-item-top" },
+              h("strong", { class: "history-time" }, fmtTime(item.ts)),
+              h("span", { class: "tag" }, actionLabel(item.action)),
+              h("span", { class: "file-age" }, fmtBytes(item.size))
+            ),
+            h("div", { class: "session-sub" }, meta.join(" · "))
+          ),
+          h(
+            "div",
+            { class: "actions" },
+            h("button", { class: "btn small", onclick: function () { viewHistory(item); } }, t("view")),
+            h("button", { class: "btn small primary", onclick: function () { restoreHistoryVersion(item); } }, t("restore"))
+          )
+        )
+      );
+    });
+    return panel;
+  }
+
+  async function viewHistory(item) {
+    const ed = state.editor;
+    if (!ed) {
+      return;
+    }
+    try {
+      const data = await apiGet(
+        "history/file",
+        Object.assign(scopeParams(), { file: ed.oldFile, version: item.version })
+      );
+      openDialog({
+        title: fmtTime(item.ts) + " · " + ed.oldFile,
+        body: h("pre", { class: "pre" }, data.content || ""),
+        wide: true,
+      });
+    } catch (err) {
+      toast(err.message, "error");
+    }
+  }
+
+  async function restoreHistoryVersion(item) {
+    const ed = state.editor;
+    if (!ed) {
+      return;
+    }
+    const file = ed.oldFile;
+    const ok = await confirmDialog({
+      title: t("historyRestoreTitle"),
+      message: t("historyRestoreMessage", { file: file, time: fmtTime(item.ts) }),
+      confirm: t("restore"),
+      danger: true,
+    });
+    if (!ok) {
+      return;
+    }
+    try {
+      const res = await apiPost(
+        "history/restore",
+        Object.assign(scopeParams(), { file: file, version: item.version })
+      );
+      toast(res.message || t("restored"));
+      if (state.editor) {
+        state.editor.dirty = false;
+      }
+      state.history = null;
+      await Promise.all([loadDetail(), loadOverview(true)]);
+      await openFile(file);
+    } catch (err) {
+      toast(err.message, "error");
+    }
+  }
+
+  async function purgeFile() {
+    const ed = state.editor;
+    if (!ed || ed.isNew) {
+      return;
+    }
+    const ok = await confirmDialog({
+      title: t("purgeFileTitle"),
+      message: t("purgeFileMessage", { file: ed.oldFile }),
+      confirm: t("purgeFileConfirm"),
+      danger: true,
+    });
+    if (!ok) {
+      return;
+    }
+    try {
+      const res = await apiPost("file/purge", Object.assign(scopeParams(), { file: ed.oldFile }));
+      state.editor = null;
+      state.history = null;
+      toast(res.message || t("deleted"));
       await Promise.all([loadDetail(), loadOverview(true)]);
     } catch (err) {
       toast(err.message, "error");
@@ -2067,6 +2326,162 @@
     try {
       const res = await apiPost("forgotten/delete", Object.assign(scopeParams(), { file: file }));
       toast(res.message || t("deleted"));
+      await loadDetail();
+    } catch (err) {
+      toast(err.message, "error");
+    }
+  }
+
+  // ------------------------------------------------------------ 回收站标签页
+
+  async function loadTrash() {
+    if (state.trashLoading) {
+      return;
+    }
+    const sel = state.selected;
+    state.trashLoading = true;
+    let result;
+    try {
+      const res = await apiGet("trash", scopeParams());
+      result = { items: res.entries || [] };
+    } catch (err) {
+      result = { error: err.message };
+    }
+    if (!isSelected(sel)) {
+      return;
+    }
+    state.trashLoading = false;
+    state.trash = result;
+    if (state.tab === "trash") {
+      renderTab();
+    }
+  }
+
+  function trashMeta(item) {
+    const bits = [fmtTime(item.ts), fmtBytes(item.size), actionLabel(item.action)];
+    if (item.actor) {
+      bits.push(t("historyActor", { actor: item.actor }));
+    }
+    if (item.source) {
+      bits.push(t("historySource", { source: item.source }));
+    }
+    return bits.filter(Boolean).join(" · ");
+  }
+
+  function renderTrashTab() {
+    const data = state.trash;
+    if (!data) {
+      loadTrash();
+      return spinnerBlock();
+    }
+    if (data.error) {
+      return errorBlock(data.error, function () {
+        state.trash = null;
+        renderTab();
+      });
+    }
+    const items = data.items || [];
+    const panel = h(
+      "section",
+      { class: "panel" },
+      h(
+        "div",
+        { class: "panel-head" },
+        h("h3", null, t("trashTitle")),
+        h("span", { style: "color:var(--text-3);font-size:12.5px" }, t("trashHint"))
+      )
+    );
+    if (!items.length) {
+      panel.append(emptyState("trash", t("noTrashTitle"), t("noTrashHint")));
+      return panel;
+    }
+    items.forEach(function (item) {
+      panel.append(
+        h(
+          "div",
+          { class: "forgotten-item" },
+          h(
+            "div",
+            { class: "grow" },
+            h(
+              "div",
+              { class: "file-item-top" },
+              h("span", { class: "file-name" }, item.file),
+              h(
+                "span",
+                { class: "file-age", title: fmtTime(item.ts) },
+                t("trashDeletedAt", { time: relTime(item.ts) })
+              )
+            ),
+            h("div", { class: "session-sub" }, trashMeta(item))
+          ),
+          h(
+            "div",
+            { class: "actions" },
+            h("button", { class: "btn small", onclick: function () { viewTrashEntry(item); } }, t("view")),
+            h(
+              "button",
+              { class: "btn small primary", onclick: function () { restoreTrashEntry(item); } },
+              t("restore")
+            ),
+            h(
+              "button",
+              { class: "btn small danger", onclick: function () { deleteTrashEntry(item); } },
+              t("delete")
+            )
+          )
+        )
+      );
+    });
+    return panel;
+  }
+
+  async function viewTrashEntry(item) {
+    try {
+      const data = await apiGet("trash/file", Object.assign(scopeParams(), { entry: item.entry }));
+      openDialog({
+        title: item.file + " · " + fmtTime(item.ts),
+        body: h("pre", { class: "pre" }, data.content || ""),
+        wide: true,
+      });
+    } catch (err) {
+      toast(err.message, "error");
+    }
+  }
+
+  async function restoreTrashEntry(item) {
+    const ok = await confirmDialog({
+      title: t("trashRestoreTitle"),
+      message: t("trashRestoreMessage", { file: item.file, time: fmtTime(item.ts) }),
+      confirm: t("restore"),
+    });
+    if (!ok) {
+      return;
+    }
+    try {
+      const res = await apiPost("trash/restore", Object.assign(scopeParams(), { entry: item.entry }));
+      toast(res.message || t("restored"));
+      state.trash = null;
+      await Promise.all([loadDetail(), loadOverview(true)]);
+    } catch (err) {
+      toast(err.message, "error");
+    }
+  }
+
+  async function deleteTrashEntry(item) {
+    const ok = await confirmDialog({
+      title: t("trashDeleteTitle"),
+      message: t("trashDeleteMessage", { file: item.file, time: fmtTime(item.ts) }),
+      confirm: t("delete"),
+      danger: true,
+    });
+    if (!ok) {
+      return;
+    }
+    try {
+      const res = await apiPost("trash/delete", Object.assign(scopeParams(), { entry: item.entry }));
+      toast(res.message || t("deleted"));
+      state.trash = null;
       await loadDetail();
     } catch (err) {
       toast(err.message, "error");
