@@ -191,7 +191,7 @@
     trashRestoreTitle: "从回收站恢复",
     trashRestoreMessage: "恢复 {file}（{time} 删除的版本）。如果现在有同名文件，会先把当前内容存进历史再覆盖。",
     trashDeleteTitle: "彻底删除回收站条目",
-    trashDeleteMessage: "确定永久删除回收站里的 {file}（{time} 删除）吗？删除后无法恢复。",
+    trashDeleteMessage: "确定永久删除回收站里的 {file}（{time} 删除）吗？这条回收站记录删除后无法恢复；如需连同它的历史版本一起清除，请先恢复，再在文件详情里「彻底删除（含历史）」。",
     historyVersions: "历史版本",
     historyHint: "覆盖或修改前自动保存的旧内容；恢复时会先把当前版本存进历史。",
     noHistoryTitle: "还没有历史版本",
@@ -838,6 +838,15 @@
   const els = {};
   let searchTimer = 0;
   let detailToken = 0;
+  let trashToken = 0;
+
+  // 作用域详情一变（删除、改名、整理、导入等），缓存下来的回收站列表就作废；
+  // 飞在半路的旧请求也会因为 token 对不上而被丢弃。
+  function invalidateTrash() {
+    trashToken += 1;
+    state.trash = null;
+    state.trashLoading = false;
+  }
 
   function scopeParams() {
     return { scope: state.selected.scope, key: state.selected.key || "" };
@@ -866,8 +875,7 @@
     state.archivesLoading = false;
     state.archiveView = null;
     state.history = null;
-    state.trash = null;
-    state.trashLoading = false;
+    invalidateTrash();
   }
 
   function hasUnsaved() {
@@ -950,6 +958,7 @@
       }
       state.detail = data;
       state.detailError = "";
+      invalidateTrash();
     } catch (err) {
       if (token !== detailToken) {
         return;
@@ -967,7 +976,7 @@
     state.archives = null;
     state.archiveView = null;
     state.history = null;
-    state.trash = null;
+    invalidateTrash();
     state.searchResults = null;
     state.fileQuery = "";
     if (state.editor && !state.editor.isNew) {
@@ -2339,6 +2348,7 @@
       return;
     }
     const sel = state.selected;
+    const token = trashToken;
     state.trashLoading = true;
     let result;
     try {
@@ -2347,7 +2357,7 @@
     } catch (err) {
       result = { error: err.message };
     }
-    if (!isSelected(sel)) {
+    if (!isSelected(sel) || token !== trashToken) {
       return;
     }
     state.trashLoading = false;

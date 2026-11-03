@@ -707,6 +707,12 @@ def test_history_routes(plugin, dash):
         call(dash, "history/restore", body={"scope": "session", "key": KEY, "file": "a.md"})
     )
     assert "索引" in err(call(dash, "history/versions", {**q, "file": "MEMORY.md"}))
+    # file 参数同样不能带路径片段
+    assert "文件名不合法" in err(call(dash, "history/versions", {**q, "file": "../x.md"}))
+    assert "文件名不合法" in err(
+        call(dash, "history/restore", body={**q, "file": "../x.md", "version": version["version"]})
+    )
+    assert "文件名不合法" in err(call(dash, "file/purge", body={**q, "file": "../x.md"}))
 
     result = call(dash, "history/restore", body={**q, "version": version["version"]})
     assert result["status"] == "ok" and "已恢复" in result["message"]
@@ -743,6 +749,8 @@ def test_trash_routes(plugin, dash):
     assert "缺少回收站条目" in err(call(dash, "trash/file", q))
     assert "缺少回收站条目" in err(call(dash, "trash/restore", body=q))
     assert "缺少回收站条目" in err(call(dash, "trash/delete", body=q))
+    assert "没有这个条目" in err(call(dash, "trash/restore", body={**q, "entry": "../x"}))
+    assert "没有这个条目" in err(call(dash, "trash/delete", body={**q, "entry": "../x"}))
 
     result = call(dash, "trash/restore", body={**q, "entry": item["entry"]})
     assert result["status"] == "ok" and "已从回收站恢复" in result["message"]
@@ -764,19 +772,36 @@ def test_trash_routes(plugin, dash):
     versions = store.history_versions("a.md")
     assert any(v.action == "restore" for v in versions)
 
-    # 彻底删除回收站条目
+    # 彻底删除回收站条目：只删这一条，历史版本仍在
     ok(call(dash, "file/delete", body={**q, "file": "a.md"}))
     entry = ok(call(dash, "trash", q))["entries"][0]
+    history_before = len(store.history_versions("a.md"))
+    assert history_before > 0
     result = call(dash, "trash/delete", body={**q, "entry": entry["entry"]})
     assert result["status"] == "ok" and "已彻底删除" in result["message"]
     assert store.trash_entries() == []
+    assert len(store.history_versions("a.md")) == history_before
     assert "没有这个条目" in err(
         call(dash, "trash/delete", body={**q, "entry": entry["entry"]})
     )
 
+    # 文件已不在册时，彻底删除接口仍能清掉它剩下的历史
+    result = call(dash, "file/purge", body={**q, "file": "a.md"})
+    assert result["status"] == "ok"
+    assert store.history_versions("a.md") == []
+    assert store.trash_entries() == []
+
 
 def test_file_purge_removes_history_trash_and_forgotten(plugin, dash):
     store = session_store(plugin)
+    # 同名以外的文件：历史与回收站都不能被顺带清掉
+    asyncio.run(store.write("b.md", memory("b", "乙", "第一版")))
+    asyncio.run(store.write("b.md", memory("b", "乙", "第二版")))
+    ok(call(dash, "file/delete", body={"scope": "session", "key": KEY, "file": "b.md"}))
+    b_history = len(store.history_versions("b.md"))
+    b_trash = [item.entry for item in store.trash_entries() if item.file == "b.md"]
+    assert b_history and b_trash
+
     asyncio.run(store.write("a.md", memory("a", "甲", "第一版")))
     asyncio.run(store.write("a.md", memory("a", "甲", "第二版")))
     ok(call(dash, "file/forget", body={"scope": "session", "key": KEY, "file": "a.md"}))
@@ -791,13 +816,58 @@ def test_file_purge_removes_history_trash_and_forgotten(plugin, dash):
     assert ok(result)["file"] == "a.md"
     assert store.list_files() == [] and store.forgotten_files() == []
     assert store.history_versions("a.md") == []
-    assert store.trash_entries() == []
+    assert [item for item in store.trash_entries() if item.file == "a.md"] == []
+    assert len(store.history_versions("b.md")) == b_history
+    assert [item.entry for item in store.trash_entries() if item.file == "b.md"] == b_trash
     report = store.index_report()
     assert report.missing == [] and report.dangling == []
     assert plugin.invalidated[-1] == KEY
 
     assert "没有找到" in err(call(dash, "file/purge", body=q))
     assert "索引" in err(call(dash, "file/purge", body={**q, "file": "MEMORY.md"}))
+
+
+def test_scope_trash_count_does_not_read_audit(plugin, dash, monkeypatch):
+    store = session_store(plugin)
+    asyncio.run(store.write("a.md", memory("a", "d")))
+    ok(call(dash, "file/delete", body={"scope": "session", "key": KEY, "file": "a.md"}))
+
+    def boom():
+        raise AssertionError("作用域详情不应该为了数量去读完整审计")
+
+    monkeypatch.setattr(store._history, "audit_entries", boom)
+    data = ok(call(dash, "scope", {"scope": "session", "key": KEY}))
+    assert data["trashCount"] == 1
+
+
+def test_history_and_trash_are_scoped(plugin, dash):
+    other_umo = "aiocqhttp:GroupMessage:300400"
+    other_key = pkg_memstore.safe_key(other_umo)
+    first = session_store(plugin)
+    other = plugin._store.session_scope(other_umo)
+    for store in (first, other):
+        asyncio.run(store.write("a.md", memory("a", "甲", "第一版")))
+        asyncio.run(store.write("a.md", memory("a", "甲", "第二版")))
+        asyncio.run(store.delete("a.md", actor="webui"))
+
+    q1 = {"scope": "session", "key": KEY, "file": "a.md"}
+    q2 = {"scope": "session", "key": other_key, "file": "a.md"}
+    assert len(ok(call(dash, "history/versions", q1))["versions"]) == 1
+    assert len(ok(call(dash, "history/versions", q2))["versions"]) == 1
+    assert len(ok(call(dash, "trash", {"scope": "session", "key": KEY}))["entries"]) == 1
+    assert len(ok(call(dash, "trash", {"scope": "session", "key": other_key}))["entries"]) == 1
+
+    assert call(dash, "file/purge", body=q1)["status"] == "ok"
+    assert first.history_versions("a.md") == [] and first.trash_entries() == []
+    assert other.history_versions("a.md") and other.trash_entries()
+    assert len(ok(call(dash, "history/versions", q2))["versions"]) == 1
+    assert len(ok(call(dash, "trash", {"scope": "session", "key": other_key}))["entries"]) == 1
+
+    version = ok(call(dash, "history/versions", q2))["versions"][0]
+    assert call(
+        dash, "history/restore", body={**q2, "version": version["version"]}
+    )["status"] == "ok"
+    assert other.list_files() == ["a.md"]
 
 
 # ---------------------------------------------------------------- 定期整理

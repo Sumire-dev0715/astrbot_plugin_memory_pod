@@ -35,6 +35,8 @@ TRASH_DIRNAME = ".trash"
 AUDIT_FILENAME = ".audit.jsonl"
 # 与 memstore.FORGOTTEN_DIRNAME 一致：整作用域归档里的已遗忘子目录
 FORGOTTEN_DIRNAME = "forgotten"
+# 与 memstore.INDEX_FILENAME 一致：归档里的索引文件，彻底遗忘时也要删掉它的行
+INDEX_FILENAME = "MEMORY.md"
 # 被 purge 的整个作用域目录挪到 memories/.trash-scopes/<层>-<键>-<时间>/
 SCOPE_TRASH_DIRNAME = ".trash-scopes"
 
@@ -134,6 +136,21 @@ def _rmdir_if_empty(path: Path) -> None:
             path.rmdir()
     except OSError:
         pass
+
+
+def _remove_index_line(index_path: Path, file: str) -> bool:
+    """删掉归档索引里指向 file 的行；文件不存在或没有这行返回 False。"""
+    try:
+        text = index_path.read_text("utf-8")
+    except OSError:
+        return False
+    marker = f"]({file})"
+    lines = text.splitlines()
+    kept = [line for line in lines if marker not in line]
+    if len(kept) == len(lines):
+        return False
+    _write_atomic(index_path, "\n".join(kept).strip("\n") + "\n" if kept else "")
+    return True
 
 
 def append_audit(path: Path, record: dict) -> None:
@@ -430,6 +447,23 @@ class HistoryLog:
         result.sort(key=lambda item: item.ts, reverse=True)
         return result
 
+    def count_trash(self) -> int:
+        """回收站条目数；只扫 .trash 目录，不读审计（列表才需要 actor/source）。"""
+        if not self.trash_root.is_dir():
+            return 0
+        try:
+            entries = list(self.trash_root.iterdir())
+        except OSError:
+            return 0
+        count = 0
+        for path in entries:
+            match = _TRASH_NAME_RE.match(path.name)
+            if match is None or not path.is_file():
+                continue
+            if _parse_stamp(match.group(1)) is not None:
+                count += 1
+        return count
+
     @staticmethod
     def _trash_name(entry: str) -> str:
         entry = (entry or "").strip()
@@ -574,6 +608,8 @@ class HistoryLog:
                 except OSError:
                     continue
             _rmdir_if_empty(archive / FORGOTTEN_DIRNAME)
+            # 索引行里的描述也算内容，不能留在隐藏归档里
+            _remove_index_line(archive / INDEX_FILENAME, file)
             other = HistoryLog(archive)
             removed += other.remove_versions(file)
             removed += other.remove_trash_for(file)

@@ -309,7 +309,7 @@
       "trashRestoreTitle": "Restore from trash",
       "trashRestoreMessage": "Restore {file} (deleted {time})? If a file with the same name exists, its current content is saved to history first.",
       "trashDeleteTitle": "Delete trash entry permanently",
-      "trashDeleteMessage": "Permanently delete {file} (deleted {time}) from the trash? This cannot be undone.",
+      "trashDeleteMessage": "Permanently delete {file} (deleted {time}) from the trash? This trash entry cannot be restored. To remove its version history as well, restore it first and use \"Delete permanently (with history)\" on the file.",
       "historyVersions": "Version history",
       "historyHint": "Old content saved automatically before overwrites or edits; restoring saves the current version to history first.",
       "noHistoryTitle": "No version history yet",

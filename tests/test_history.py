@@ -156,6 +156,36 @@ def test_restore_trash_over_active_saves_current_first(store):
     run(scenario())
 
 
+def test_restore_trash_refuses_memory_index(store):
+    async def scenario():
+        await store.write_index("## 索引\n- [a](a.md) — 甲\n")
+        before = (store.root / INDEX_FILENAME).read_text("utf-8")
+        entry = "20200101-000000-000__MEMORY.md"
+        trash = store.root / history.TRASH_DIRNAME
+        trash.mkdir(parents=True, exist_ok=True)
+        (trash / entry).write_text("## 被篡改的索引\n", "utf-8")
+        report = await store.restore_trash(entry, actor="webui")
+        assert not report.ok and "MEMORY.md" in report.message
+        assert (store.root / INDEX_FILENAME).read_text("utf-8") == before
+        assert store.trash_count() == 1
+
+    run(scenario())
+
+
+def test_trash_count_matches_list_and_ignores_junk(store):
+    async def scenario():
+        await store.write("a.md", memory("a", "甲"))
+        await store.write("b.md", memory("b", "乙"))
+        assert (await store.delete("a.md", actor="webui")).ok
+        assert (await store.delete("b.md", actor="webui")).ok
+        trash = store.root / history.TRASH_DIRNAME
+        (trash / "notes.txt").write_text("不是回收站条目", "utf-8")
+        (trash / "99999999-000000-000__bad.md").write_text("坏时间戳", "utf-8")
+        assert store.trash_count() == len(store.trash_entries()) == 2
+
+    run(scenario())
+
+
 def test_write_over_forgotten_name_keeps_forgotten_copy(store):
     async def scenario():
         await store.write("p.md", memory("p", "第一版"), actor="aiocqhttp")
@@ -548,12 +578,16 @@ def test_delete_file_completely_clears_purged_scope_archives(tmp_path):
         archived = next((tmp_path / "memories" / ".trash-scopes").iterdir())
         assert (archived / "a.md").is_file()
         assert (archived / history.HISTORY_DIRNAME / "a.md").is_dir()
+        archive_index = archived / INDEX_FILENAME
+        assert "](a.md)" in archive_index.read_text("utf-8")
 
         await store.write("a.md", memory("a", "甲", "purge 之后又写的"), actor="aiocqhttp")
         report = await store.delete_file_completely("a.md", actor="webui")
         assert report.ok and "归档副本" in report.message
         assert not (archived / "a.md").exists()
         assert not (archived / history.HISTORY_DIRNAME / "a.md").exists()
+        # 归档索引里的描述也要清掉，不能只删正文
+        assert "](a.md)" not in archive_index.read_text("utf-8")
         assert store.list_files() == []
 
     run(scenario())

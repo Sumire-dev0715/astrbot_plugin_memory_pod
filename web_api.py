@@ -469,7 +469,7 @@ class MemoryDashboard:
                 "files": [_header_dict(h) for h in headers],
                 "forgotten": [_header_dict(h) for h in store.forgotten_headers()],
                 # 回收站条目只在打开标签时按需拉取，这里只给数量
-                "trashCount": len(store.trash_entries()),
+                "trashCount": store.trash_count(),
                 "index": {
                     "exists": report.exists,
                     "content": index_text,

@@ -1348,6 +1348,10 @@ class ScopeStore:
         """回收站条目（新的在前）；同步方法。"""
         return self._history.list_trash()
 
+    def trash_count(self) -> int:
+        """回收站条目数；只扫目录，管理页标签用它避免每次读完整审计。"""
+        return self._history.count_trash()
+
     def read_trash(self, entry: str) -> str | None:
         """读回收站条目的原文。"""
         return self._history.read_trash(entry)
@@ -1361,6 +1365,11 @@ class ScopeStore:
             content = await asyncio.to_thread(self._history.read_trash, entry)
             if info is None or content is None:
                 return WriteReport(False, "回收站里没有这个条目")
+            # 其他写入路径都拒绝 MEMORY.md；回收站文件名正则本身允许它
+            if info.file.lower() == INDEX_FILENAME.lower():
+                return WriteReport(
+                    False, "MEMORY.md 不能从回收站恢复，请在「索引」页处理"
+                )
             path = self.root / info.file
             try:
                 current = await asyncio.to_thread(self._read_for_update, path)

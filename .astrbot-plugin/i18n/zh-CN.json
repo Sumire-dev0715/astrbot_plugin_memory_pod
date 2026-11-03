@@ -180,7 +180,7 @@
       "trashRestoreTitle": "从回收站恢复",
       "trashRestoreMessage": "恢复 {file}（{time} 删除的版本）。如果现在有同名文件，会先把当前内容存进历史再覆盖。",
       "trashDeleteTitle": "彻底删除回收站条目",
-      "trashDeleteMessage": "确定永久删除回收站里的 {file}（{time} 删除）吗？删除后无法恢复。",
+      "trashDeleteMessage": "确定永久删除回收站里的 {file}（{time} 删除）吗？这条回收站记录删除后无法恢复；如需连同它的历史版本一起清除，请先恢复，再在文件详情里「彻底删除（含历史）」。",
       "historyVersions": "历史版本",
       "historyHint": "覆盖或修改前自动保存的旧内容；恢复时会先把当前版本存进历史。",
       "noHistoryTitle": "还没有历史版本",
