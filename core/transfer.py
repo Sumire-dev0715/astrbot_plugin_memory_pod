@@ -18,6 +18,7 @@ import asyncio
 import time
 from dataclasses import dataclass, field
 
+from . import history
 from .archive import ArchiveStore
 from .memstore import (
     CONFLICT_NEWER,
@@ -347,7 +348,11 @@ class MemoryTransfer:
             store = self.scope_store(item.ref)
             entries, rejected = _people_filter(item.ref, item.entries)
             results = rejected + await store.import_files(
-                entries, policy, index=item.index, dry_run=dry_run
+                entries,
+                policy,
+                index=item.index,
+                dry_run=dry_run,
+                actor=history.ACTOR_TRANSFER,
             )
             if (
                 not dry_run
@@ -421,7 +426,11 @@ class MemoryTransfer:
             raise TransferError("来源没有可迁移的记忆")
         entries, rejected = _people_filter(dst, entries)
         results = rejected + await dst_store.import_files(
-            entries, policy, index=index, dry_run=dry_run
+            entries,
+            policy,
+            index=index,
+            dry_run=dry_run,
+            actor=history.ACTOR_TRANSFER,
         )
         moved = 0
         if not dry_run:
@@ -444,9 +453,13 @@ class MemoryTransfer:
             if not item.landed:
                 continue
             if item.name in forgotten:
-                report = await store.delete_forgotten(item.name)
+                report = await store.delete_forgotten(
+                    item.name, actor=history.ACTOR_TRANSFER
+                )
             else:
-                report = await store.delete(item.name)
+                report = await store.delete(
+                    item.name, actor=history.ACTOR_TRANSFER
+                )
             moved += 1 if report.ok else 0
         return moved
 
@@ -569,7 +582,7 @@ class MemoryTransfer:
         """作用域里在册与已遗忘的记忆都没了就删掉整个目录；返回是否已空。"""
         if await asyncio.to_thread(_has_memories, store):
             return False
-        await store.purge()
+        await store.purge(actor=history.ACTOR_TRANSFER)
         return True
 
     # ------------------------------------------------------------ 报告

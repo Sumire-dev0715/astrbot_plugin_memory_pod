@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from astrbot.api import logger
 
-from .core import consolidate, memstore, registry, tidy, transfer
+from .core import consolidate, history, memstore, registry, tidy, transfer
 from .core.compress import SessionState
 
 if TYPE_CHECKING:
@@ -587,11 +587,11 @@ class MemoryDashboard:
             if isinstance(base, (int, float)) and abs(current - float(base)) > 1e-3:
                 raise ApiError("这个文件在你编辑期间被修改过（可能是模型刚写入），请刷新后再改")
 
-        report = await store.write(name, content)
+        report = await store.write(name, content, actor=history.ACTOR_WEBUI)
         if not report.ok:
             raise ApiError(report.message)
         if renaming:
-            await store.delete(old)
+            await store.delete(old, actor=history.ACTOR_WEBUI)
         self._changed(key)
         return _ok({"file": name, "mtime": store.mtime(name) or 0.0}, report.message)
 
@@ -599,7 +599,7 @@ class MemoryDashboard:
         body = await _body()
         _, key, store = self._scope_from_body(body)
         name = self._file_name(body.get("file"))
-        report = await store.delete(name)
+        report = await store.delete(name, actor=history.ACTOR_WEBUI)
         if not report.ok:
             raise ApiError(report.message)
         self._changed(key)
@@ -629,7 +629,7 @@ class MemoryDashboard:
         body = await _body()
         _, key, store = self._scope_from_body(body)
         name = self._file_name(body.get("file"))
-        report = await store.forget(name)
+        report = await store.forget(name, actor=history.ACTOR_WEBUI)
         if not report.ok:
             raise ApiError(report.message)
         self._changed(key)
@@ -639,7 +639,7 @@ class MemoryDashboard:
         body = await _body()
         _, key, store = self._scope_from_body(body)
         name = self._file_name(body.get("file"))
-        report = await store.restore(name)
+        report = await store.restore(name, actor=history.ACTOR_WEBUI)
         if not report.ok:
             raise ApiError(report.message)
         self._changed(key)
@@ -649,7 +649,7 @@ class MemoryDashboard:
         body = await _body()
         _, _, store = self._scope_from_body(body)
         name = self._file_name(body.get("file"))
-        report = await store.delete_forgotten(name)
+        report = await store.delete_forgotten(name, actor=history.ACTOR_WEBUI)
         if not report.ok:
             raise ApiError(report.message)
         return _ok({"file": name}, report.message)
@@ -707,7 +707,9 @@ class MemoryDashboard:
         key = self._session_key(body.get("key"))
         plugin = self.plugin
         store = plugin._store.session_scope_by_key(key)
-        removed = await store.purge() if store is not None else 0
+        removed = (
+            await store.purge(actor=history.ACTOR_WEBUI) if store is not None else 0
+        )
         plugin.invalidate_for_key(key)
         # 记忆都没了，待确认的方案与整理记录也跟着作废
         await asyncio.to_thread(
@@ -782,7 +784,12 @@ class MemoryDashboard:
                 {"op": "", "file": file, "ok": False, "message": "未通过校验，已跳过"}
                 for file in sorted(requested - {op.file for op in ops})
             ]
-            results = await tidy.apply(store, ops, people=scope == SCOPE_PEOPLE)
+            results = await tidy.apply(
+                store,
+                ops,
+                people=scope == SCOPE_PEOPLE,
+                actor=history.ACTOR_TIDY,
+            )
             now = time.time()
             run = tidy.make_run(
                 tidy.TRIGGER_CONFIRMED if from_pending else tidy.TRIGGER_MANUAL,
@@ -900,7 +907,7 @@ class MemoryDashboard:
         if not book.claim(sid):
             raise ApiError("这个作用域正在整理中，请稍后再试")
         try:
-            results = await tidy.undo(store, run)
+            results = await tidy.undo(store, run, actor=history.ACTOR_TIDY)
             await asyncio.to_thread(book.mark_undone, sid, run_id, time.time())
         finally:
             book.release(sid)

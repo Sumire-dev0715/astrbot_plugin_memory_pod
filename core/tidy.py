@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Awaitable, Callable
 
-from . import consolidate
+from . import consolidate, history
 from .memstore import (
     CONFLICT_OVERWRITE,
     CONFLICT_SKIP,
@@ -326,7 +326,10 @@ async def propose(
 
 
 async def apply(
-    store: ScopeStore, ops: list[consolidate.Operation], people: bool = False
+    store: ScopeStore,
+    ops: list[consolidate.Operation],
+    people: bool = False,
+    actor: str = history.ACTOR_TIDY,
 ) -> list[dict]:
     """先写后删地应用方案；每项结果带改动前原文（before）供撤销。"""
     results = []
@@ -340,13 +343,13 @@ async def apply(
         elif op.op == "write" and people and not is_person_file(op.file):
             ok, message = False, PEOPLE_ONLY
         elif op.op == "write":
-            report = await store.write(op.file, op.render())
+            report = await store.write(op.file, op.render(), actor=actor)
             ok, message = report.ok, report.message
         elif write_failed:
             # 合并目标没写成就不能删源文件，否则内容就丢了
             ok, message = False, "有写入未完成，为避免丢内容已跳过删除"
         else:
-            report = await store.delete(op.file)
+            report = await store.delete(op.file, actor=actor)
             ok, message = report.ok, report.message
         if op.op == "write" and not ok:
             write_failed = True
@@ -417,7 +420,9 @@ def public_run(run: dict) -> dict:
     }
 
 
-async def undo(store: ScopeStore, run: dict) -> list[dict]:
+async def undo(
+    store: ScopeStore, run: dict, actor: str = history.ACTOR_TIDY
+) -> list[dict]:
     """撤销一次整理：被删的文件写回、被改写的恢复原文、新建的删掉。
 
     之后又被改过的文件不动（以免盖掉新内容），逐项报告。先恢复被删的
@@ -439,7 +444,9 @@ async def undo(store: ScopeStore, run: dict) -> list[dict]:
                 ok, message = False, "没有留下原文，无法写回"
             else:
                 entry = ImportEntry(file, before, usage=Usage.from_raw(op.get("usage")))
-                outcome = await store.import_files([entry], CONFLICT_SKIP)
+                outcome = await store.import_files(
+                    [entry], CONFLICT_SKIP, actor=actor
+                )
                 ok = bool(outcome) and outcome[0].landed
                 message = "已写回" if ok else (outcome[0].reason if outcome else "写回失败")
         else:
@@ -447,11 +454,13 @@ async def undo(store: ScopeStore, run: dict) -> list[dict]:
             if current is None or abs(current - after) > MTIME_TOLERANCE:
                 ok, message = False, "整理之后这个文件又被改过或删掉，没有回退"
             elif before is None:
-                report = await store.delete(file)
+                report = await store.delete(file, actor=actor)
                 ok, message = report.ok, "已删除整理时新建的文件" if report.ok else report.message
             else:
                 outcome = await store.import_files(
-                    [ImportEntry(file, str(before))], CONFLICT_OVERWRITE
+                    [ImportEntry(file, str(before))],
+                    CONFLICT_OVERWRITE,
+                    actor=actor,
                 )
                 ok = bool(outcome) and outcome[0].landed
                 message = "已恢复原文" if ok else (outcome[0].reason if outcome else "恢复失败")

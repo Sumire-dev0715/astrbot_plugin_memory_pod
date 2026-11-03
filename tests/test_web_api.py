@@ -351,6 +351,48 @@ def test_file_delete(plugin, dash):
     assert err(call(dash, "file/delete", body={"scope": "session", "key": KEY, "file": "a.md"}))
 
 
+def test_file_save_and_delete_keep_history_and_trash(plugin, dash):
+    store = session_store(plugin)
+    asyncio.run(store.write("a.md", memory("a", "甲", "第一版")))
+    original = asyncio.run(store.read("a.md"))
+    content = memory("a", "甲", "第二版")
+    ok(
+        call(
+            dash,
+            "file/save",
+            body={
+                "scope": "session",
+                "key": KEY,
+                "file": "a.md",
+                "oldFile": "a.md",
+                "mode": "raw",
+                "content": content,
+            },
+        )
+    )
+    versions = store.history_versions("a.md")
+    assert len(versions) == 1 and versions[0].actor == "webui"
+    assert store.read_history("a.md", versions[0].version) == original
+    updated = asyncio.run(store.read("a.md"))
+    assert updated != original
+
+    ok(call(dash, "file/delete", body={"scope": "session", "key": KEY, "file": "a.md"}))
+    entries = store.trash_entries()
+    assert len(entries) == 1 and entries[0].actor == "webui"
+    assert store.read_trash(entries[0].entry) == updated
+
+
+def test_session_purge_moves_scope_into_trash_scopes(plugin, dash):
+    store = session_store(plugin)
+    asyncio.run(store.write("a.md", memory("a", "d")))
+    before = asyncio.run(store.read("a.md"))
+    assert ok(call(dash, "session/purge", body={"key": KEY}))["removed"] == 1
+    assert not store.root.exists()
+    archived = list((plugin._store.base_dir / ".trash-scopes").iterdir())
+    assert len(archived) == 1 and archived[0].name.startswith(f"session-{KEY}-")
+    assert (archived[0] / "a.md").read_text("utf-8") == before
+
+
 def test_index_save_and_rebuild(plugin, dash):
     store = session_store(plugin)
     asyncio.run(store.write("a.md", memory("a", "A")))

@@ -37,6 +37,7 @@ from astrbot.api.star import Context, Star, StarTools
 from .core import (
     archive,
     compress,
+    history,
     loopguard,
     memstore,
     prompts,
@@ -172,6 +173,11 @@ class MemoryBeyondPlugin(Star):
         data_dir = self._resolve_data_dir()
         self.data_dir = data_dir
         self._store = memstore.MemoryStore(data_dir / "memories")
+        self._store.set_retention(
+            self._int("history_keep_days", history.DEFAULT_KEEP_DAYS),
+            self._int("trash_keep_days", history.DEFAULT_KEEP_DAYS),
+        )
+        self._history_cleanup_at = 0.0
         self._state_dir = data_dir / "state"
         self._registry = registry.SessionRegistry(data_dir / "sessions.json")
         self._archive = archive.ArchiveStore(data_dir / "archive")
@@ -334,6 +340,29 @@ class MemoryBeyondPlugin(Star):
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
 
+    def _schedule_history_cleanup(self) -> None:
+        """每 6 小时在后台清理一次各作用域的历史与回收站。
+
+        ScopeStore 自己也会按间隔兜住，所以即便这里偶尔多调度一次，
+        每个作用域最多还是每 6 小时清一次；清理全程在工作线程里。
+        """
+        # 配置页里改过保留期时，已缓存的作用域也跟着生效
+        self._store.set_retention(
+            self._int("history_keep_days", history.DEFAULT_KEEP_DAYS),
+            self._int("trash_keep_days", history.DEFAULT_KEEP_DAYS),
+        )
+        now = time.time()
+        if now - self._history_cleanup_at < history.CLEANUP_INTERVAL:
+            return
+        self._history_cleanup_at = now
+        self._spawn(self._cleanup_history(now), "history-cleanup")
+
+    async def _cleanup_history(self, now: float) -> None:
+        try:
+            await asyncio.to_thread(self._store.cleanup_history, now)
+        except Exception:  # noqa: BLE001 - 清理失败不能影响对话
+            logger.warning(LOG_PREFIX + "历史与回收站清理失败", exc_info=True)
+
     def _touch_registry(self, event: AstrMessageEvent, umo: str) -> bool:
         """登记会话活跃；返回是否需要落盘。登记失败不影响请求。"""
         try:
@@ -366,6 +395,14 @@ class MemoryBeyondPlugin(Star):
         except Exception:  # noqa: BLE001
             pass
         return sender_id, name
+
+    @staticmethod
+    def _event_actor(event: AstrMessageEvent) -> str:
+        """审计里的 actor：工具调用记当前事件的平台 ID。"""
+        try:
+            return str(event.get_platform_id() or "").strip()
+        except Exception:  # noqa: BLE001
+            return ""
 
     @staticmethod
     def _sender_raw_fields(
@@ -550,6 +587,7 @@ class MemoryBeyondPlugin(Star):
         umo = str(getattr(event, "unified_msg_origin", "") or "")
         if not umo:
             return
+        self._schedule_history_cleanup()
         # 其他插件自行发起的模型调用（event.request_llm，不带对话也没有历史）
         # 同样经过这个钩子：它不是本会话的对话请求，不注入也不动压缩状态——
         # 否则"没有历史"会被当成对话被清空，把摘要作废
@@ -1070,7 +1108,9 @@ class MemoryBeyondPlugin(Star):
                 }
                 outcome, message = tidy.OUTCOME_PENDING, f"有 {len(ops)} 项修改等你确认"
             else:
-                results = await tidy.apply(store, ops, people=scope == "people")
+                results = await tidy.apply(
+                    store, ops, people=scope == "people", actor=history.ACTOR_TIDY
+                )
                 run = tidy.make_run(tidy.TRIGGER_AUTO, results, time.time())
                 if run is not None:
                     await asyncio.to_thread(book.add_run, sid, run)
@@ -1181,6 +1221,7 @@ class MemoryBeyondPlugin(Star):
         drafts: list[prompts.MemoryDraft],
         updatable: dict[str, set[str]],
         source: str,
+        actor: str = "",
     ) -> int:
         """抽取出的记忆落盘：默认进会话作用域；人物记忆开启时，模型标为
         people 的人物文件进该平台的人物作用域。绝不进全局。
@@ -1201,7 +1242,7 @@ class MemoryBeyondPlugin(Star):
                 ):
                     continue
                 report = await scope.write(
-                    draft.filename, prompts.render_memory_file(draft)
+                    draft.filename, prompts.render_memory_file(draft), actor=actor
                 )
                 if report.ok:
                     # 索引行由 write 按 frontmatter description 自动同步
@@ -1268,7 +1309,13 @@ class MemoryBeyondPlugin(Star):
                 )
                 return
             drafts = prompts.parse_memories(text, people_on)
-            await self._store_drafts(umo, drafts, updatable, "后台提取")
+            await self._store_drafts(
+                umo,
+                drafts,
+                updatable,
+                "后台提取",
+                actor=f"extract@{self._platform_of(umo)}",
+            )
         except Exception:  # noqa: BLE001
             logger.warning(LOG_PREFIX + f"会话 {umo} 后台记忆提取出错", exc_info=True)
         finally:
@@ -1363,7 +1410,13 @@ class MemoryBeyondPlugin(Star):
         await self._archive_compressed(umo, state, plan.to_summarize)
 
         if extract and drafts:
-            await self._store_drafts(umo, drafts, updatable, "压缩联动提取")
+            await self._store_drafts(
+                umo,
+                drafts,
+                updatable,
+                "压缩联动提取",
+                actor=f"extract@{self._platform_of(umo)}",
+            )
         # 压缩后从磁盘重新注入记忆索引：清空快照，下次请求重新加载。
         # 索引不是靠"被摘要保留下来"，而是每次从源头重新加载。
         rt.index_block = None
@@ -1776,19 +1829,30 @@ class MemoryBeyondPlugin(Star):
             return refused
         if scope == "people" and not memstore.is_person_file(file):
             return PEOPLE_FILE_RULE
+        actor = self._event_actor(event)
         if delete:
-            report = await store.delete(file)
+            report = await store.delete(file, actor=actor)
         else:
             if not content.strip():
                 return "content 为空。写入需提供完整文件内容；如要删除请设 delete=true。"
             existed = store.exists(file)
             report = await store.write(
-                file, content, source=self._sender_identity(event)[0]
+                file,
+                content,
+                source=self._sender_identity(event)[0],
+                actor=actor,
             )
             if report.ok and not existed:
                 hint = await self._duplicate_hint(store, file, content)
                 if hint:
                     report = memstore.WriteReport(True, report.message + "\n" + hint)
+                if history.looks_like_manual_backup(file):
+                    report = memstore.WriteReport(
+                        True,
+                        report.message
+                        + "\n提醒：覆盖和删除前插件已自动保存旧版，管理页可以恢复，"
+                        "不需要手动备份（backup、副本或 zz- 开头的文件）。",
+                    )
         if report.ok:
             self._note_model_wrote(event)
         return report.message
@@ -1825,6 +1889,7 @@ class MemoryBeyondPlugin(Star):
             new_text,
             replace_all,
             source=self._sender_identity(event)[0],
+            actor=self._event_actor(event),
         )
         if report.ok:
             self._note_model_wrote(event)

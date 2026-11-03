@@ -1,0 +1,602 @@
+"""自动历史、回收站与审计。
+
+任何覆盖或移除记忆文件的代码路径，都在作用域锁里先经过这里把旧内容留住：
+
+    <作用域>/.history/<文件名>/<YYYYmmdd-HHMMSS-fff>-<动作>.md   覆盖或修改前的旧内容
+    <作用域>/.trash/<YYYYmmdd-HHMMSS-fff>__<文件名>               被删除的文件
+    <作用域>/.audit.jsonl                                        每次变更一行
+
+三个路径都以 "." 开头、不是作用域根目录下的 .md 文件，所以 list_files、
+headers、索引、召回、搜索、查重与遗忘扫描天然看不到它们。
+
+真正删除字节的只有两种情况：管理员在回收站点"彻底删除"，以及保留期到期
+清理。保留期由 history_keep_days / trash_keep_days 控制，0 表示永久；
+历史版本清理时每个文件至少保留最近 MIN_KEEP_VERSIONS 版。清理每个作用域
+至多每 CLEANUP_INTERVAL 秒跑一次，由调用方放进工作线程执行。
+
+这里只做文件操作，不碰索引与使用统计；作用域语义（哪条算在册、索引怎么
+同步）仍由 core/memstore.py 的 ScopeStore 负责。
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import re
+import shutil
+import threading
+import time
+from dataclasses import dataclass
+from pathlib import Path
+
+HISTORY_DIRNAME = ".history"
+TRASH_DIRNAME = ".trash"
+AUDIT_FILENAME = ".audit.jsonl"
+# 被 purge 的整个作用域目录挪到 memories/.trash-scopes/<层>-<键>-<时间>/
+SCOPE_TRASH_DIRNAME = ".trash-scopes"
+
+DEFAULT_KEEP_DAYS = 90
+# 即使超过保留天数，每个文件也至少留下最近这么多版
+MIN_KEEP_VERSIONS = 10
+CLEANUP_INTERVAL = 6 * 3600
+DAY = 24 * 3600
+
+# 变更动作（写进历史文件名与审计行）
+ACTION_WRITE = "write"
+ACTION_EDIT = "edit"
+ACTION_DELETE = "delete"
+ACTION_IMPORT = "import"
+ACTION_RESTORE = "restore"
+ACTION_FORGET = "forget"
+ACTION_DISCARD_FORGOTTEN = "discard-forgotten"
+ACTION_DELETE_FORGOTTEN = "delete-forgotten"
+ACTION_DELETE_TRASH = "delete-trash"
+ACTION_PURGE_FILE = "purge-file"
+ACTION_PURGE_SCOPE = "purge-scope"
+
+# actor：谁改的
+ACTOR_TIDY = "tidy"
+ACTOR_WEBUI = "webui"
+ACTOR_TRANSFER = "transfer"
+ACTOR_SYSTEM = "system"
+
+# 会在 .trash 里留下条目的动作；审计按 (文件, 时间戳) 找回条目属性时只认这些
+TRASH_ACTIONS = (
+    ACTION_DELETE,
+    ACTION_DELETE_FORGOTTEN,
+    ACTION_DISCARD_FORGOTTEN,
+    ACTION_IMPORT,
+)
+
+_STAMP_FORMAT = "%Y%m%d-%H%M%S"
+_VERSION_ID_RE = re.compile(r"^(\d{8}-\d{6}-\d{3})-([A-Za-z][A-Za-z0-9_-]*)$")
+_TRASH_NAME_RE = re.compile(
+    r"^(\d{8}-\d{6}-\d{3})__([A-Za-z0-9][A-Za-z0-9._-]{0,120}\.md)$"
+)
+
+# 文件名像手动备份时，写入回执提示不需要
+_BACKUP_MARKERS = ("backup", "bak", "备份", "副本")
+
+
+def _now() -> float:
+    """当前时间；单独成函数，测试可以替换它造出不同时间的版本。"""
+    return time.time()
+
+
+def _stamp(ts: float) -> str:
+    """时间戳文件名：YYYYmmdd-HHMMSS-fff（本地时间，毫秒）。"""
+    millis = int(round(ts * 1000))
+    head = time.strftime(_STAMP_FORMAT, time.localtime(millis / 1000))
+    return f"{head}-{millis % 1000:03d}"
+
+
+def _parse_stamp(text: str) -> float:
+    base = time.mktime(time.strptime(text[:15], _STAMP_FORMAT))
+    return base + int(text[16:19]) / 1000
+
+
+def content_sha1(content: str) -> str:
+    return hashlib.sha1((content or "").encode("utf-8")).hexdigest()
+
+
+def _file_sha1(path: Path) -> str:
+    try:
+        return hashlib.sha1(path.read_bytes()).hexdigest()
+    except OSError:
+        return ""
+
+
+def looks_like_manual_backup(name: str) -> bool:
+    """文件名像模型自己做的备份（backup / bak / 备份 / 副本 / zz- 开头）。"""
+    stem = (name or "").strip().lower()
+    return stem.startswith("zz-") or any(marker in stem for marker in _BACKUP_MARKERS)
+
+
+def _write_atomic(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(content, encoding="utf-8")
+    tmp.replace(path)
+
+
+def _rmdir_if_empty(path: Path) -> None:
+    try:
+        if path.is_dir() and not any(path.iterdir()):
+            path.rmdir()
+    except OSError:
+        pass
+
+
+def append_audit(path: Path, record: dict) -> None:
+    """往 .audit.jsonl 追加一行；审计写失败不抛出。"""
+    line = json.dumps(record, ensure_ascii=False, separators=(",", ":"))
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
+    except OSError:
+        pass
+
+
+@dataclass(frozen=True)
+class HistoryVersion:
+    """一个历史版本；管理页按时间、动作、actor、大小展示。"""
+
+    file: str
+    version: str
+    action: str
+    ts: float
+    mtime: float
+    size: int
+    actor: str = ""
+    source: str = ""
+
+
+@dataclass(frozen=True)
+class TrashEntry:
+    """回收站里的一条；entry 是完整文件名，读取 / 恢复 / 删除都用它。"""
+
+    entry: str
+    file: str
+    ts: float
+    mtime: float
+    size: int
+    action: str = ""
+    actor: str = ""
+    source: str = ""
+
+
+class HistoryLog:
+    """一个作用域目录下的历史、回收站与审计（同步方法，调用方持锁）。"""
+
+    def __init__(self, root: Path):
+        self.root = Path(root)
+        self._lock = threading.Lock()
+
+    # ------------------------------------------------------------ 路径
+
+    @property
+    def history_root(self) -> Path:
+        return self.root / HISTORY_DIRNAME
+
+    @property
+    def trash_root(self) -> Path:
+        return self.root / TRASH_DIRNAME
+
+    @property
+    def audit_path(self) -> Path:
+        return self.root / AUDIT_FILENAME
+
+    # ------------------------------------------------------------ 审计
+
+    def audit_entries(self) -> list[dict]:
+        """读全部审计行（坏行跳过）。"""
+        path = self.audit_path
+        if not path.is_file():
+            return []
+        try:
+            lines = path.read_text("utf-8").splitlines()
+        except OSError:
+            return []
+        result: list[dict] = []
+        for line in lines:
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(row, dict):
+                result.append(row)
+        return result
+
+    def _audit_index(self) -> dict[tuple[str, str, str], dict]:
+        index: dict[tuple[str, str, str], dict] = {}
+        for row in self.audit_entries():
+            try:
+                ts = float(row.get("ts") or 0)
+            except (TypeError, ValueError):
+                continue
+            key = (
+                str(row.get("file") or ""),
+                str(row.get("action") or ""),
+                _stamp(ts),
+            )
+            # 同一毫秒内的多次变更按写入顺序覆盖：版本对应最后一次审计
+            index[key] = row
+        return index
+
+    def record(
+        self,
+        action: str,
+        file: str,
+        actor: str = "",
+        source: str = "",
+        before_sha1: str = "",
+        after_sha1: str = "",
+        ts: float | None = None,
+    ) -> None:
+        """追加一行审计：ts、动作、文件、actor、来源与前后内容哈希。"""
+        ts = _now() if ts is None else ts
+        record = {
+            "ts": round(ts, 3),
+            "action": action,
+            "file": file,
+            "actor": actor,
+            "source": source,
+            "before_sha1": before_sha1,
+            "after_sha1": after_sha1,
+        }
+        with self._lock:
+            append_audit(self.audit_path, record)
+
+    # ------------------------------------------------------------ 历史
+
+    def save_version(
+        self,
+        file: str,
+        content: str,
+        action: str,
+        actor: str = "",
+        source: str = "",
+        ts: float | None = None,
+    ) -> HistoryVersion:
+        """把旧内容存成一个历史版本；返回版本信息（审计由调用方在写完后记）。"""
+        ts = _now() if ts is None else ts
+        ts = round(ts * 1000) / 1000
+        folder = self.history_root / file
+        while True:
+            version = f"{_stamp(ts)}-{action}"
+            path = folder / f"{version}.md"
+            if not path.exists():
+                break
+            ts = round(ts + 0.001, 3)
+        _write_atomic(path, content)
+        try:
+            st = path.stat()
+        except OSError:
+            st = None
+        return HistoryVersion(
+            file=file,
+            version=version,
+            action=action,
+            ts=ts,
+            mtime=st.st_mtime if st else ts,
+            size=st.st_size if st else len(content.encode("utf-8")),
+            actor=actor,
+            source=source,
+        )
+
+    def list_versions(self, file: str) -> list[HistoryVersion]:
+        """某个文件的全部历史版本，新的在前；actor / source 从审计补齐。"""
+        folder = self.history_root / file
+        if not folder.is_dir():
+            return []
+        audit = self._audit_index()
+        result: list[HistoryVersion] = []
+        try:
+            entries = list(folder.iterdir())
+        except OSError:
+            return []
+        for path in entries:
+            if not path.name.endswith(".md"):
+                continue
+            match = _VERSION_ID_RE.match(path.name[: -len(".md")])
+            if match is None or not path.is_file():
+                continue
+            try:
+                st = path.stat()
+            except OSError:
+                continue
+            ts = _parse_stamp(match.group(1))
+            row = audit.get((file, match.group(2), match.group(1)), {})
+            result.append(
+                HistoryVersion(
+                    file=file,
+                    version=match.group(0),
+                    action=match.group(2),
+                    ts=ts,
+                    mtime=st.st_mtime,
+                    size=st.st_size,
+                    actor=str(row.get("actor") or ""),
+                    source=str(row.get("source") or ""),
+                )
+            )
+        result.sort(key=lambda item: (-item.ts, item.version))
+        return result
+
+    @staticmethod
+    def _version_id(version: str) -> str:
+        version = (version or "").strip()
+        if version.endswith(".md"):
+            version = version[: -len(".md")]
+        return version if _VERSION_ID_RE.match(version) else ""
+
+    def read_version(self, file: str, version: str) -> str | None:
+        version = self._version_id(version)
+        if not version:
+            return None
+        path = self.history_root / file / f"{version}.md"
+        try:
+            return path.read_text("utf-8") if path.is_file() else None
+        except OSError:
+            return None
+
+    def remove_versions(self, file: str) -> int:
+        """彻底删除某个文件的全部历史版本，返回删掉的版本数。"""
+        folder = self.history_root / file
+        if not folder.is_dir():
+            return 0
+        count = 0
+        try:
+            for path in folder.iterdir():
+                if path.is_file() and path.name.endswith(".md"):
+                    count += 1
+        except OSError:
+            pass
+        shutil.rmtree(folder, ignore_errors=True)
+        return count
+
+    # ------------------------------------------------------------ 回收站
+
+    def list_trash(self) -> list[TrashEntry]:
+        """回收站条目，新的在前；actor / source 从审计补齐。"""
+        if not self.trash_root.is_dir():
+            return []
+        audit: dict[tuple[str, str], dict] = {}
+        for row in self.audit_entries():
+            if str(row.get("action") or "") not in TRASH_ACTIONS:
+                continue
+            try:
+                ts = float(row.get("ts") or 0)
+            except (TypeError, ValueError):
+                continue
+            audit.setdefault((str(row.get("file") or ""), _stamp(ts)), row)
+        result: list[TrashEntry] = []
+        try:
+            entries = list(self.trash_root.iterdir())
+        except OSError:
+            return []
+        for path in entries:
+            match = _TRASH_NAME_RE.match(path.name)
+            if match is None or not path.is_file():
+                continue
+            try:
+                st = path.stat()
+            except OSError:
+                continue
+            ts = _parse_stamp(match.group(1))
+            row = audit.get((match.group(2), match.group(1)), {})
+            result.append(
+                TrashEntry(
+                    entry=path.name,
+                    file=match.group(2),
+                    ts=ts,
+                    mtime=st.st_mtime,
+                    size=st.st_size,
+                    action=str(row.get("action") or ""),
+                    actor=str(row.get("actor") or ""),
+                    source=str(row.get("source") or ""),
+                )
+            )
+        result.sort(key=lambda item: item.ts, reverse=True)
+        return result
+
+    @staticmethod
+    def _trash_name(entry: str) -> str:
+        entry = (entry or "").strip()
+        return entry if _TRASH_NAME_RE.match(entry) else ""
+
+    def read_trash(self, entry: str) -> str | None:
+        entry = self._trash_name(entry)
+        if not entry:
+            return None
+        path = self.trash_root / entry
+        try:
+            return path.read_text("utf-8") if path.is_file() else None
+        except OSError:
+            return None
+
+    def trash_info(self, entry: str) -> TrashEntry | None:
+        entry = self._trash_name(entry)
+        if not entry:
+            return None
+        return next((item for item in self.list_trash() if item.entry == entry), None)
+
+    def move_to_trash(
+        self,
+        path: Path,
+        file: str,
+        action: str,
+        actor: str = "",
+        source: str = "",
+    ) -> TrashEntry:
+        """把文件移进回收站并记审计；返回回收站条目。"""
+        before_sha1 = _file_sha1(path)
+        ts = round(_now() * 1000) / 1000
+        while True:
+            entry = f"{_stamp(ts)}__{file}"
+            dest = self.trash_root / entry
+            if not dest.exists():
+                break
+            ts = round(ts + 0.001, 3)
+        self.trash_root.mkdir(parents=True, exist_ok=True)
+        os.replace(path, dest)
+        st = dest.stat()
+        self.record(action, file, actor, source, before_sha1, "", ts=ts)
+        return TrashEntry(
+            entry=entry,
+            file=file,
+            ts=ts,
+            mtime=st.st_mtime,
+            size=st.st_size,
+            action=action,
+            actor=actor,
+            source=source,
+        )
+
+    def remove_entry(self, entry: str) -> bool:
+        """从回收站删掉一条（恢复成功后或彻底删除时用）；不记审计。"""
+        entry = self._trash_name(entry)
+        if not entry:
+            return False
+        path = self.trash_root / entry
+        try:
+            path.unlink()
+        except OSError:
+            return False
+        _rmdir_if_empty(self.trash_root)
+        return True
+
+    def delete_entry(self, entry: str, actor: str = "") -> bool:
+        """彻底删除一条回收站条目，记审计。"""
+        entry = self._trash_name(entry)
+        if not entry:
+            return False
+        path = self.trash_root / entry
+        before_sha1 = _file_sha1(path)
+        try:
+            path.unlink()
+        except OSError:
+            return False
+        match = _TRASH_NAME_RE.match(entry)
+        self.record(
+            ACTION_DELETE_TRASH,
+            match.group(2) if match else entry,
+            actor,
+            "",
+            before_sha1,
+            "",
+        )
+        _rmdir_if_empty(self.trash_root)
+        return True
+
+    def remove_trash_for(self, file: str) -> int:
+        """彻底删除某个文件的全部回收站条目，返回删掉的条数。"""
+        if not self.trash_root.is_dir():
+            return 0
+        count = 0
+        try:
+            entries = list(self.trash_root.iterdir())
+        except OSError:
+            return 0
+        for path in entries:
+            match = _TRASH_NAME_RE.match(path.name)
+            if match is None or match.group(2) != file or not path.is_file():
+                continue
+            try:
+                path.unlink()
+                count += 1
+            except OSError:
+                continue
+        _rmdir_if_empty(self.trash_root)
+        return count
+
+    # ------------------------------------------------------------ 保留期清理
+
+    def cleanup(
+        self, history_keep_days: int, trash_keep_days: int, now: float | None = None
+    ) -> dict[str, int]:
+        """按保留期清理历史版本与回收站；返回 (删掉的版本数, 条目数)。
+
+        历史版本每个文件至少保留最近 MIN_KEEP_VERSIONS 版，即使它们已经
+        超过 history_keep_days。0 表示永久保留。
+        """
+        now = _now() if now is None else now
+        removed_versions = 0
+        removed_trash = 0
+        if history_keep_days > 0 and self.history_root.is_dir():
+            cutoff = now - history_keep_days * DAY
+            try:
+                folders = list(self.history_root.iterdir())
+            except OSError:
+                folders = []
+            for folder in folders:
+                if not folder.is_dir():
+                    continue
+                versions: list[tuple[float, Path]] = []
+                try:
+                    for path in folder.iterdir():
+                        if not path.name.endswith(".md"):
+                            continue
+                        match = _VERSION_ID_RE.match(path.name[: -len(".md")])
+                        if match is not None and path.is_file():
+                            versions.append((_parse_stamp(match.group(1)), path))
+                except OSError:
+                    continue
+                versions.sort(key=lambda item: item[0], reverse=True)
+                for ts, path in versions[MIN_KEEP_VERSIONS:]:
+                    if ts >= cutoff:
+                        continue
+                    try:
+                        path.unlink()
+                        removed_versions += 1
+                    except OSError:
+                        continue
+                _rmdir_if_empty(folder)
+            _rmdir_if_empty(self.history_root)
+        if trash_keep_days > 0 and self.trash_root.is_dir():
+            cutoff = now - trash_keep_days * DAY
+            try:
+                entries = list(self.trash_root.iterdir())
+            except OSError:
+                entries = []
+            for path in entries:
+                match = _TRASH_NAME_RE.match(path.name)
+                if match is None or not path.is_file():
+                    continue
+                if _parse_stamp(match.group(1)) >= cutoff:
+                    continue
+                try:
+                    path.unlink()
+                    removed_trash += 1
+                except OSError:
+                    continue
+            _rmdir_if_empty(self.trash_root)
+        return {"versions": removed_versions, "trash": removed_trash}
+
+
+def move_scope(
+    root: Path, scopes_dir: Path, label: str, actor: str = ""
+) -> Path:
+    """整个作用域目录挪进 .trash-scopes/，而不是 rmtree。"""
+    scopes_dir.mkdir(parents=True, exist_ok=True)
+    ts = round(_now() * 1000) / 1000
+    while True:
+        dest = scopes_dir / f"{label}-{_stamp(ts)}"
+        if not dest.exists():
+            break
+        ts = round(ts + 0.001, 3)
+    shutil.move(str(root), str(dest))
+    append_audit(
+        dest / AUDIT_FILENAME,
+        {
+            "ts": round(ts, 3),
+            "action": ACTION_PURGE_SCOPE,
+            "file": "*",
+            "actor": actor,
+            "source": "",
+            "before_sha1": "",
+            "after_sha1": "",
+        },
+    )
+    return dest

@@ -30,12 +30,13 @@ import hashlib
 import json
 import os
 import re
-import shutil
 import threading
 import time
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from . import history
 
 INDEX_FILENAME = "MEMORY.md"
 INDEX_MAX_LINES = 200
@@ -537,9 +538,19 @@ def _truncate_index(raw: str) -> IndexSnapshot:
 
 
 class ScopeStore:
-    """单个作用域目录内的读 / 写删 / 搜索，带路径约束与文件锁。"""
+    """单个作用域目录内的读 / 写删 / 搜索，带路径约束与文件锁。
 
-    def __init__(self, root: Path):
+    所有会覆盖或移除记忆文件的路径都先经过 core/history：旧内容进
+    .history/<文件名>/，被删除的文件进 .trash/，每次变更记一行审计。
+    """
+
+    def __init__(
+        self,
+        root: Path,
+        *,
+        scope_label: str = "",
+        scopes_trash_dir: Path | None = None,
+    ):
         self.root = root
         self._lock = asyncio.Lock()
         # 文件名 -> ((mtime_ns, size), 头信息)；按修改时间失效
@@ -548,6 +559,37 @@ class ScopeStore:
         self._headers_lock = threading.Lock()
         # .usage.json 的读改写互斥（召回记用与管理页可能并发）
         self._usage_lock = threading.Lock()
+        # 历史 / 回收站 / 审计
+        self._history = history.HistoryLog(root)
+        self._scope_label = scope_label or root.name
+        self._scopes_trash_dir = (
+            Path(scopes_trash_dir)
+            if scopes_trash_dir is not None
+            else root.parent / history.SCOPE_TRASH_DIRNAME
+        )
+        self._history_keep_days = history.DEFAULT_KEEP_DAYS
+        self._trash_keep_days = history.DEFAULT_KEEP_DAYS
+        self._last_history_cleanup = 0.0
+
+    def set_retention(self, history_keep_days: int, trash_keep_days: int) -> None:
+        """设置保留期（天）；0 表示永久保留。"""
+        try:
+            self._history_keep_days = max(0, int(history_keep_days))
+            self._trash_keep_days = max(0, int(trash_keep_days))
+        except (TypeError, ValueError):
+            pass
+
+    def cleanup_history(
+        self, now: float | None = None, force: bool = False
+    ) -> dict[str, int]:
+        """按保留期清理；每个作用域至多每 6 小时跑一次（force 忽略间隔）。"""
+        now = time.time() if now is None else now
+        if not force and now - self._last_history_cleanup < history.CLEANUP_INTERVAL:
+            return {}
+        self._last_history_cleanup = now
+        return self._history.cleanup(
+            self._history_keep_days, self._trash_keep_days, now
+        )
 
     # ------------------------------------------------------------ 路径约束
 
@@ -688,10 +730,13 @@ class ScopeStore:
 
     # ------------------------------------------------------------ 写 / 删
 
-    async def write(self, name: str, content: str, source: str = "") -> WriteReport:
+    async def write(
+        self, name: str, content: str, source: str = "", actor: str = ""
+    ) -> WriteReport:
         """写入记忆文件并自动同步索引行（钩子取自 frontmatter description）。
 
-        source 是本次写入的来源 ID（通常是当前发送者），并入文件的 source 戳。
+        source 是本次写入的来源 ID（通常是当前发送者），并入文件的 source 戳；
+        actor 是这次变更的执行者（工具调用记平台 ID），写进审计。
         """
         # 与 _resolve 同样的归一化：索引守门与索引行都要用整理后的名字，
         # 否则 " MEMORY.md" / "/MEMORY.md" 能绕过守门，索引行也会写错
@@ -709,13 +754,22 @@ class ScopeStore:
         async with self._lock:
             # 同名文件若已被遗忘，把它当作上一版：created 戳得以延续，
             # 新内容落盘后那份遗忘副本随之作废
-            previous = await asyncio.to_thread(self._read_if_exists, path)
+            active = await asyncio.to_thread(self._read_if_exists, path)
+            previous = active
             if previous is None:
                 previous = await asyncio.to_thread(
                     self._read_if_exists, self._forgotten_path(name)
                 )
             return await self._commit(
-                name, path, content, f"已写入 {name}", source, previous
+                name,
+                path,
+                content,
+                f"已写入 {name}",
+                source,
+                previous,
+                action=history.ACTION_WRITE,
+                actor=actor,
+                active_before=active,
             )
 
     @staticmethod
@@ -732,6 +786,7 @@ class ScopeStore:
         new: str,
         replace_all: bool = False,
         source: str = "",
+        actor: str = "",
     ) -> WriteReport:
         """局部替换：old 在文件里须恰好出现一次（replace_all 时可多次），其余原样保留。
 
@@ -782,7 +837,15 @@ class ScopeStore:
                     "改完整个文件就空了，不会写入；要删除文件请用 memory_write 并设 delete=true。",
                 )
             return await self._commit(
-                name, path, updated, f"已修改 {name}，替换 {replaced} 处", source, content
+                name,
+                path,
+                updated,
+                f"已修改 {name}，替换 {replaced} 处",
+                source,
+                content,
+                action=history.ACTION_EDIT,
+                actor=actor,
+                active_before=content,
             )
 
     async def _commit(
@@ -793,8 +856,12 @@ class ScopeStore:
         done: str,
         source: str = "",
         previous: str | None = None,
+        *,
+        action: str = history.ACTION_WRITE,
+        actor: str = "",
+        active_before: str | None = None,
     ) -> WriteReport:
-        """持锁落盘：补戳 → 体积守门 → 原子写 → 失效头缓存 → 同步索引行。"""
+        """持锁落盘：补戳 → 体积守门 → 存旧版 → 原子写 → 失效头缓存 → 同步索引行。"""
         content = stamp_memory(content, time.time(), source, previous)
         if len(content.encode("utf-8")) > MAX_FILE_BYTES:
             return WriteReport(
@@ -802,9 +869,32 @@ class ScopeStore:
                 f"内容超过单文件上限 {MAX_FILE_BYTES // 1024}KB，请精简后重写",
             )
         description, from_frontmatter = parse_description(content)
+        version = None
+        if active_before is not None:
+            # 旧内容必须在新内容落盘之前存好，这是自动历史的硬规则
+            try:
+                version = await asyncio.to_thread(
+                    self._history.save_version,
+                    name,
+                    active_before,
+                    action,
+                    actor,
+                    source,
+                )
+            except OSError as exc:
+                return WriteReport(False, f"旧版本保存失败，未写入 {name}：{exc}")
         await asyncio.to_thread(self._write_atomic, path, content)
         self._drop_header(name)
-        await asyncio.to_thread(self._discard_forgotten, name)
+        self._history.record(
+            action,
+            name,
+            actor,
+            source,
+            history.content_sha1(active_before) if active_before is not None else "",
+            history.content_sha1(content),
+            ts=version.ts if version is not None else None,
+        )
+        await asyncio.to_thread(self._discard_forgotten, name, actor, source)
         lines, size = await asyncio.to_thread(
             self._sync_index_line, name, description
         )
@@ -819,7 +909,7 @@ class ScopeStore:
             message += "。" + health
         return WriteReport(True, message)
 
-    async def delete(self, name: str) -> WriteReport:
+    async def delete(self, name: str, actor: str = "") -> WriteReport:
         name = (name or "").strip().lstrip("/")
         path = self._resolve(name)
         if path is None:
@@ -832,19 +922,37 @@ class ScopeStore:
         async with self._lock:
             if not path.is_file():
                 return WriteReport(False, f"文件不存在：{name}")
-            await asyncio.to_thread(path.unlink)
+            try:
+                await asyncio.to_thread(
+                    self._history.move_to_trash,
+                    path,
+                    name,
+                    history.ACTION_DELETE,
+                    actor,
+                )
+            except OSError as exc:
+                return WriteReport(False, f"删除前保存到回收站失败，未删除 {name}：{exc}")
             self._drop_header(name)
             await asyncio.to_thread(self._remove_index_line, name)
             await asyncio.to_thread(self._forget_usage, name)
         return WriteReport(True, f"已删除 {name}，对应索引行已同步移除")
 
-    async def purge(self) -> int:
-        """删除整个作用域目录（全部记忆文件、已遗忘文件、使用统计与索引），
-        返回删除的在册记忆文件数。"""
+    async def purge(self, actor: str = "") -> int:
+        """把整个作用域目录移进 memories/.trash-scopes/，返回在册记忆文件数。
+
+        不再 rmtree：目录里的记忆、已遗忘文件、历史、回收站、使用统计与
+        索引都原样留在归档里，需要时可以人工取回。
+        """
         async with self._lock:
             count = len(self.list_files())
             if self.root.is_dir():
-                await asyncio.to_thread(shutil.rmtree, self.root)
+                await asyncio.to_thread(
+                    history.move_scope,
+                    self.root,
+                    self._scopes_trash_dir,
+                    self._scope_label,
+                    actor,
+                )
             with self._headers_lock:
                 self._headers.clear()
         return count
@@ -970,7 +1078,10 @@ class ScopeStore:
         return result
 
     async def forget_stale(
-        self, max_idle: float, now: float | None = None
+        self,
+        max_idle: float,
+        now: float | None = None,
+        actor: str = history.ACTOR_SYSTEM,
     ) -> list[str]:
         """把长期没用到的在册记忆移进 forgotten/，返回被遗忘的文件名。
 
@@ -979,20 +1090,26 @@ class ScopeStore:
         """
         now = time.time() if now is None else now
         async with self._lock:
-            return await asyncio.to_thread(self._forget_stale_sync, max_idle, now)
+            return await asyncio.to_thread(
+                self._forget_stale_sync, max_idle, now, actor
+            )
 
-    def _forget_stale_sync(self, max_idle: float, now: float) -> list[str]:
+    def _forget_stale_sync(
+        self, max_idle: float, now: float, actor: str
+    ) -> list[str]:
         forgotten: list[str] = []
         for header in self.headers():
             if header.type in FORGET_EXEMPT_TYPES:
                 continue
             if now - header.idle_since() < max_idle:
                 continue
-            if self._move_to_forgotten(header.file, now):
+            if self._move_to_forgotten(header.file, now, actor):
                 forgotten.append(header.file)
         return forgotten
 
-    async def forget(self, name: str, now: float | None = None) -> WriteReport:
+    async def forget(
+        self, name: str, now: float | None = None, actor: str = ""
+    ) -> WriteReport:
         """管理员手动遗忘一个在册文件。"""
         name = (name or "").strip().lstrip("/")
         path = self._resolve(name)
@@ -1002,19 +1119,39 @@ class ScopeStore:
         async with self._lock:
             if not path.is_file():
                 return WriteReport(False, f"文件不存在：{name}")
-            moved = await asyncio.to_thread(self._move_to_forgotten, name, now)
+            moved = await asyncio.to_thread(
+                self._move_to_forgotten, name, now, actor
+            )
         if not moved:
             return WriteReport(False, f"遗忘 {name} 失败")
         return WriteReport(True, f"已遗忘 {name}，索引行已移除；需要时可恢复")
 
-    def _move_to_forgotten(self, name: str, now: float) -> bool:
+    def _move_to_forgotten(self, name: str, now: float, actor: str = "") -> bool:
         src = self.root / name
         dst = self._forgotten_path(name)
         try:
+            content = src.read_text("utf-8")
+        except OSError:
+            return False
+        try:
             dst.parent.mkdir(parents=True, exist_ok=True)
+            # 同名的遗忘副本还在时先把它留住，绝不直接覆盖
+            if dst.is_file():
+                self._history.move_to_trash(
+                    dst, name, history.ACTION_DISCARD_FORGOTTEN, actor
+                )
             src.replace(dst)
         except OSError:
             return False
+        self._history.record(
+            history.ACTION_FORGET,
+            name,
+            actor,
+            "",
+            history.content_sha1(content),
+            "",
+            ts=now,
+        )
         self._drop_header(name)
         self._remove_index_line(name)
         with self._usage_lock:
@@ -1025,16 +1162,18 @@ class ScopeStore:
             self._save_usage(data)
         return True
 
-    async def restore(self, name: str, now: float | None = None) -> WriteReport:
+    async def restore(
+        self, name: str, now: float | None = None, actor: str = ""
+    ) -> WriteReport:
         """把已遗忘的文件恢复在册：回到索引与召回，并记为刚被用到。"""
         name = (name or "").strip().lstrip("/")
         if not self.is_valid_name(name) or name.lower() == INDEX_FILENAME.lower():
             return WriteReport(False, f"文件名不合法：{self.path_rules()}")
         now = time.time() if now is None else now
         async with self._lock:
-            return await asyncio.to_thread(self._restore_sync, name, now)
+            return await asyncio.to_thread(self._restore_sync, name, now, actor)
 
-    def _restore_sync(self, name: str, now: float) -> WriteReport:
+    def _restore_sync(self, name: str, now: float, actor: str = "") -> WriteReport:
         src = self._forgotten_path(name)
         dst = self.root / name
         if not src.is_file():
@@ -1046,6 +1185,15 @@ class ScopeStore:
             src.replace(dst)
         except OSError as exc:
             return WriteReport(False, f"恢复 {name} 失败：{exc}")
+        self._history.record(
+            history.ACTION_RESTORE,
+            name,
+            actor,
+            "",
+            "",
+            history.content_sha1(content),
+            ts=now,
+        )
         self._drop_header(name)
         description, _ = parse_description(content)
         self._sync_index_line(name, description)
@@ -1060,8 +1208,8 @@ class ScopeStore:
         self._prune_forgotten_dir()
         return WriteReport(True, f"已恢复 {name}，索引行已同步")
 
-    async def delete_forgotten(self, name: str) -> WriteReport:
-        """彻底删除一个已遗忘的文件。"""
+    async def delete_forgotten(self, name: str, actor: str = "") -> WriteReport:
+        """彻底删除一个已遗忘的文件（先移进回收站，仍可恢复）。"""
         name = (name or "").strip().lstrip("/")
         if not self.is_valid_name(name):
             return WriteReport(False, f"文件名不合法：{self.path_rules()}")
@@ -1069,19 +1217,33 @@ class ScopeStore:
             path = self._forgotten_path(name)
             if not path.is_file():
                 return WriteReport(False, f"没有已遗忘的 {name}")
-            await asyncio.to_thread(path.unlink)
+            try:
+                await asyncio.to_thread(
+                    self._history.move_to_trash,
+                    path,
+                    name,
+                    history.ACTION_DELETE_FORGOTTEN,
+                    actor,
+                )
+            except OSError as exc:
+                return WriteReport(False, f"删除前保存到回收站失败，未删除 {name}：{exc}")
             await asyncio.to_thread(self._forget_usage, name)
             await asyncio.to_thread(self._prune_forgotten_dir)
         return WriteReport(True, f"已彻底删除 {name}")
 
-    def _discard_forgotten(self, name: str) -> None:
-        """在册文件刚被重写：同名的遗忘副本作废，使用统计里的遗忘标记清掉。"""
+    def _discard_forgotten(
+        self, name: str, actor: str = "", source: str = ""
+    ) -> None:
+        """在册文件刚被重写：同名的遗忘副本移进回收站，使用统计里的遗忘标记清掉。"""
         path = self._forgotten_path(name)
         if path.is_file():
             try:
-                path.unlink()
+                self._history.move_to_trash(
+                    path, name, history.ACTION_DISCARD_FORGOTTEN, actor, source
+                )
             except OSError:
-                pass
+                # 旧副本没留住就不删它；宁可留一份重复，也不丢内容
+                return
             self._prune_forgotten_dir()
         with self._usage_lock:
             data = self._load_usage()
@@ -1097,6 +1259,192 @@ class ScopeStore:
                 folder.rmdir()
         except OSError:
             pass
+
+    # ------------------------------------------------------------ 历史与回收站
+
+    def history_versions(self, name: str) -> list[history.HistoryVersion]:
+        """某个文件的历史版本（新的在前）；同步方法，管理页放进线程调用。"""
+        name = (name or "").strip().lstrip("/")
+        if not self.is_valid_name(name) or name.lower() == INDEX_FILENAME.lower():
+            return []
+        return self._history.list_versions(name)
+
+    def read_history(self, name: str, version: str) -> str | None:
+        """读某一版历史的原文；版本标识来自 history_versions。"""
+        name = (name or "").strip().lstrip("/")
+        if not self.is_valid_name(name) or name.lower() == INDEX_FILENAME.lower():
+            return None
+        return self._history.read_version(name, version)
+
+    async def restore_history(
+        self, name: str, version: str, actor: str = history.ACTOR_WEBUI
+    ) -> WriteReport:
+        """恢复某一版历史：先把当前在册文件存进历史，再写回这一版。"""
+        name = (name or "").strip().lstrip("/")
+        if not self.is_valid_name(name) or name.lower() == INDEX_FILENAME.lower():
+            return WriteReport(False, f"文件名不合法：{self.path_rules()}")
+        async with self._lock:
+            content = await asyncio.to_thread(
+                self._history.read_version, name, version
+            )
+            if content is None:
+                return WriteReport(False, f"没有这个历史版本：{version}")
+            path = self.root / name
+            current = await asyncio.to_thread(self._read_if_exists, path)
+            saved = None
+            if current is not None:
+                try:
+                    saved = await asyncio.to_thread(
+                        self._history.save_version,
+                        name,
+                        current,
+                        history.ACTION_RESTORE,
+                        actor,
+                    )
+                except OSError as exc:
+                    return WriteReport(False, f"当前版本保存失败，未恢复：{exc}")
+            await asyncio.to_thread(self._discard_forgotten_file, name, actor)
+            try:
+                await asyncio.to_thread(self._write_atomic, path, content)
+            except OSError as exc:
+                return WriteReport(False, f"恢复 {name} 失败：{exc}")
+            self._history.record(
+                history.ACTION_RESTORE,
+                name,
+                actor,
+                "",
+                history.content_sha1(current) if current is not None else "",
+                history.content_sha1(content),
+                ts=saved.ts if saved is not None else None,
+            )
+            self._drop_header(name)
+            description, _ = parse_description(content)
+            await asyncio.to_thread(self._sync_index_line, name, description)
+            await asyncio.to_thread(self.note_used, [name])
+        return WriteReport(True, f"已恢复 {name} 的历史版本，索引行已同步")
+
+    def trash_entries(self) -> list[history.TrashEntry]:
+        """回收站条目（新的在前）；同步方法。"""
+        return self._history.list_trash()
+
+    def read_trash(self, entry: str) -> str | None:
+        """读回收站条目的原文。"""
+        return self._history.read_trash(entry)
+
+    async def restore_trash(
+        self, entry: str, actor: str = history.ACTOR_WEBUI
+    ) -> WriteReport:
+        """从回收站恢复一条：同名在册文件先存进历史，再覆盖。"""
+        async with self._lock:
+            info = await asyncio.to_thread(self._history.trash_info, entry)
+            content = await asyncio.to_thread(self._history.read_trash, entry)
+            if info is None or content is None:
+                return WriteReport(False, "回收站里没有这个条目")
+            path = self.root / info.file
+            current = await asyncio.to_thread(self._read_if_exists, path)
+            saved = None
+            if current is not None:
+                try:
+                    saved = await asyncio.to_thread(
+                        self._history.save_version,
+                        info.file,
+                        current,
+                        history.ACTION_RESTORE,
+                        actor,
+                    )
+                except OSError as exc:
+                    return WriteReport(False, f"当前版本保存失败，未恢复：{exc}")
+            await asyncio.to_thread(self._discard_forgotten_file, info.file, actor)
+            try:
+                await asyncio.to_thread(
+                    self._write_file, path, content, info.mtime
+                )
+            except OSError as exc:
+                return WriteReport(False, f"恢复 {info.file} 失败：{exc}")
+            self._history.record(
+                history.ACTION_RESTORE,
+                info.file,
+                actor,
+                "",
+                history.content_sha1(current) if current is not None else "",
+                history.content_sha1(content),
+                ts=saved.ts if saved is not None else None,
+            )
+            await asyncio.to_thread(self._history.remove_entry, entry)
+            self._drop_header(info.file)
+            description, _ = parse_description(content)
+            await asyncio.to_thread(
+                self._sync_index_line, info.file, description
+            )
+            await asyncio.to_thread(self.note_used, [info.file])
+        return WriteReport(True, f"已从回收站恢复 {info.file}，索引行已同步")
+
+    async def delete_trash(
+        self, entry: str, actor: str = history.ACTOR_WEBUI
+    ) -> WriteReport:
+        """彻底删除一条回收站条目（真正删除字节）。"""
+        async with self._lock:
+            removed = await asyncio.to_thread(
+                self._history.delete_entry, entry, actor
+            )
+        if not removed:
+            return WriteReport(False, "回收站里没有这个条目")
+        return WriteReport(True, "已彻底删除回收站条目")
+
+    async def delete_file_completely(
+        self, name: str, actor: str = history.ACTOR_WEBUI
+    ) -> WriteReport:
+        """彻底删除一个文件及其全部历史、回收站条目（管理员要求遗忘时用）。"""
+        name = (name or "").strip().lstrip("/")
+        if not self.is_valid_name(name) or name.lower() == INDEX_FILENAME.lower():
+            return WriteReport(False, f"文件名不合法：{self.path_rules()}")
+        async with self._lock:
+            path = self.root / name
+            forgotten = self._forgotten_path(name)
+            active = await asyncio.to_thread(self._read_if_exists, path)
+            dormant = await asyncio.to_thread(self._read_if_exists, forgotten)
+            if active is not None:
+                try:
+                    await asyncio.to_thread(path.unlink)
+                except OSError as exc:
+                    return WriteReport(False, f"删除 {name} 失败：{exc}")
+            if dormant is not None:
+                try:
+                    await asyncio.to_thread(forgotten.unlink)
+                except OSError as exc:
+                    return WriteReport(False, f"删除已遗忘的 {name} 失败：{exc}")
+                await asyncio.to_thread(self._prune_forgotten_dir)
+            removed_history = await asyncio.to_thread(
+                self._history.remove_versions, name
+            )
+            removed_trash = await asyncio.to_thread(
+                self._history.remove_trash_for, name
+            )
+            if (
+                active is None
+                and dormant is None
+                and not removed_history
+                and not removed_trash
+            ):
+                return WriteReport(False, f"没有找到 {name}")
+            self._drop_header(name)
+            await asyncio.to_thread(self._remove_index_line, name)
+            await asyncio.to_thread(self._forget_usage, name)
+            self._history.record(
+                history.ACTION_PURGE_FILE,
+                name,
+                actor,
+                "",
+                history.content_sha1(
+                    active if active is not None else (dormant or "")
+                ),
+                "",
+            )
+        return WriteReport(
+            True,
+            f"已彻底删除 {name}（含 {removed_history} 个历史版本、"
+            f"{removed_trash} 个回收站条目）",
+        )
 
     # ------------------------------------------------------------ 原样导入导出
 
@@ -1138,6 +1486,7 @@ class ScopeStore:
         policy: str = CONFLICT_NEWER,
         index: str = "",
         dry_run: bool = False,
+        actor: str = "",
     ) -> list[ImportResult]:
         """原样落盘外来的记忆文件（迁移、恢复备份、撤销整理用）。
 
@@ -1146,11 +1495,12 @@ class ScopeStore:
         处理——newer 留 updated 较新的一份、skip 留现有的、overwrite 用导入的。
         在册的同名文件总是优先于已遗忘的导入件。目标原本没有索引时先写入
         带来的索引（保留分组与顺序），再按实际文件修正。
+        覆盖已有的在册或已遗忘文件前，旧内容先存进历史或回收站。
         dry_run 只给出每个文件的去向，不落盘。
         """
         async with self._lock:
             return await asyncio.to_thread(
-                self._import_sync, entries, policy, index, dry_run
+                self._import_sync, entries, policy, index, dry_run, actor
             )
 
     def _import_sync(
@@ -1159,6 +1509,7 @@ class ScopeStore:
         policy: str,
         index: str,
         dry_run: bool,
+        actor: str = "",
     ) -> list[ImportResult]:
         index_path = self.root / INDEX_FILENAME
         adopt_index = bool(index.strip()) and not index_path.is_file()
@@ -1192,7 +1543,7 @@ class ScopeStore:
                 if not entry.forgotten and self._forgotten_path(name).is_file():
                     # 导入件在册而目标这份已遗忘：把它恢复在册
                     self._write_file(self.root / name, entry.content, entry.mtime)
-                    self._discard_forgotten_file(name)
+                    self._discard_forgotten_file(name, actor)
                     self._drop_header(name)
                     written.append((name, entry.content))
                 if merged != current:
@@ -1206,11 +1557,53 @@ class ScopeStore:
                     uses=max(current.uses, incoming.uses),
                     forgotten_at=incoming.forgotten_at,
                 )
+            # 覆盖前先把旧内容留住：在册的进历史，已遗忘的进回收站
             if entry.forgotten:
-                self._write_file(self._forgotten_path(name), entry.content, entry.mtime)
+                target = self._forgotten_path(name)
+                if target.is_file():
+                    try:
+                        self._history.move_to_trash(
+                            target, name, history.ACTION_IMPORT, actor
+                        )
+                    except OSError:
+                        results[-1] = ImportResult(
+                            name, IMPORT_INVALID, "旧版本保存失败，未导入"
+                        )
+                        continue
+                self._write_file(target, entry.content, entry.mtime)
+                self._history.record(
+                    history.ACTION_IMPORT,
+                    name,
+                    actor,
+                    "",
+                    "",
+                    history.content_sha1(entry.content),
+                )
             else:
-                self._write_file(self.root / name, entry.content, entry.mtime)
-                self._discard_forgotten_file(name)
+                target = self.root / name
+                old = self._read_if_exists(target)
+                version = None
+                if old is not None:
+                    try:
+                        version = self._history.save_version(
+                            name, old, history.ACTION_IMPORT, actor
+                        )
+                    except OSError:
+                        results[-1] = ImportResult(
+                            name, IMPORT_INVALID, "旧版本保存失败，未导入"
+                        )
+                        continue
+                self._write_file(target, entry.content, entry.mtime)
+                self._history.record(
+                    history.ACTION_IMPORT,
+                    name,
+                    actor,
+                    "",
+                    history.content_sha1(old) if old is not None else "",
+                    history.content_sha1(entry.content),
+                    ts=version.ts if version is not None else None,
+                )
+                self._discard_forgotten_file(name, actor)
                 written.append((name, entry.content))
             self._drop_header(name)
             changes[name] = incoming
@@ -1276,12 +1669,15 @@ class ScopeStore:
             except OSError:
                 pass
 
-    def _discard_forgotten_file(self, name: str) -> None:
+    def _discard_forgotten_file(self, name: str, actor: str = "") -> None:
         path = self._forgotten_path(name)
         if path.is_file():
             try:
-                path.unlink()
+                self._history.move_to_trash(
+                    path, name, history.ACTION_DISCARD_FORGOTTEN, actor
+                )
             except OSError:
+                # 没留住就不删，宁可多一份重复
                 return
             self._prune_forgotten_dir()
 
@@ -1500,15 +1896,44 @@ class MemoryStore:
     """三层作用域的记忆库根：global（机器人自我）、session（每个会话）、
     people（每个平台的人物记忆）。作用域目录按需创建、ScopeStore 按键缓存。"""
 
-    def __init__(self, base_dir: Path):
+    def __init__(
+        self,
+        base_dir: Path,
+        history_keep_days: int = history.DEFAULT_KEEP_DAYS,
+        trash_keep_days: int = history.DEFAULT_KEEP_DAYS,
+    ):
         self.base_dir = base_dir
         self._scopes: dict[Path, ScopeStore] = {}
+        self.history_keep_days = max(0, int(history_keep_days))
+        self.trash_keep_days = max(0, int(trash_keep_days))
+
+    def set_retention(self, history_keep_days: int, trash_keep_days: int) -> None:
+        """更新保留期配置，已缓存的作用域一并生效。"""
+        try:
+            self.history_keep_days = max(0, int(history_keep_days))
+            self.trash_keep_days = max(0, int(trash_keep_days))
+        except (TypeError, ValueError):
+            return
+        for store in self._scopes.values():
+            store.set_retention(self.history_keep_days, self.trash_keep_days)
+
+    def _scope_label(self, path: Path) -> str:
+        try:
+            rel = path.relative_to(self.base_dir.resolve())
+        except ValueError:
+            return path.name
+        return "-".join(rel.parts) or path.name
 
     def _scope(self, path: Path) -> ScopeStore:
         path = path.resolve()
         store = self._scopes.get(path)
         if store is None:
-            store = ScopeStore(path)
+            store = ScopeStore(
+                path,
+                scope_label=self._scope_label(path),
+                scopes_trash_dir=self.base_dir / history.SCOPE_TRASH_DIRNAME,
+            )
+            store.set_retention(self.history_keep_days, self.trash_keep_days)
             self._scopes[path] = store
         return store
 
@@ -1550,6 +1975,25 @@ class MemoryStore:
         return sorted(
             p.name for p in root.iterdir() if p.is_dir() and is_scope_key(p.name)
         )
+
+    def cleanup_history(self, now: float | None = None) -> dict[str, dict[str, int]]:
+        """按保留期清理各作用域的历史与回收站（同步方法，放进线程执行）。"""
+        now = time.time() if now is None else now
+        stores = [self.global_scope()]
+        for key in self.session_keys():
+            store = self.session_scope_by_key(key)
+            if store is not None:
+                stores.append(store)
+        for key in self.people_keys():
+            store = self.people_scope_by_key(key)
+            if store is not None:
+                stores.append(store)
+        result: dict[str, dict[str, int]] = {}
+        for store in stores:
+            removed = store.cleanup_history(now)
+            if removed:
+                result[str(store.root)] = removed
+        return result
 
 
 def is_scope_key(key: str) -> bool:

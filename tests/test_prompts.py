@@ -419,6 +419,12 @@ def test_parse_memories_reads_source_ids():
     assert "source" not in render_memory_file(drafts[1])
 
 
+def test_memory_guidance_mentions_auto_history():
+    text = prompts.memory_guidance(True, True, True)
+    assert "覆盖或删除前插件会自动" in text
+    assert "不需要为了保险另存 backup" in text
+
+
 def test_memory_guidance_forgetting_note():
     plain = prompts.memory_guidance(True, True)
     with_forget = prompts.memory_guidance(True, True, True)
