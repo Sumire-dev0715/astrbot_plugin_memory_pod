@@ -359,10 +359,17 @@ def plan_sections(
             shared=item.shared,
             note=item.note,
         )
-        if sections and used + len(view.body) > TOTAL_CHARS:
+        # 标题与 description 也真的进了块，预算不能只算正文
+        cost = (
+            len(view.body)
+            + len(view.description)
+            + len(view.note)
+            + len(injection.render_title(view))
+        )
+        if sections and used + cost > TOTAL_CHARS:
             dropped.extend(items[index:])
             break
-        used += len(view.body)
+        used += cost
         sections.append(RecallSection(item, view.body, view.truncated, view))
     return sections, dropped
 

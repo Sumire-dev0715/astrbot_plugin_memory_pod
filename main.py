@@ -308,6 +308,28 @@ class MemoryBeyondPlugin(Star):
         for rt in targets:
             rt.clear_index()
 
+    def _invalidate_pinned(self, scope: str, files: list[str]) -> None:
+        """档案被删除或移入遗忘后，作废把它钉在开头块的快照。
+
+        普通修改不走这里：主流程要把最新内容附在本轮召回块里并注明，
+        直到下次快照刷新；删除/遗忘没有最新全文可附，继续注入旧内容
+        等于让用户删不掉。
+        """
+        refs = {f"{scope}/{file}" for file in files if file}
+        if not refs:
+            return
+        for rt in self._sessions.values():
+            if refs & set(rt.index_pinned):
+                rt.clear_index()
+
+    def _store_scope_label(self, store: memstore.ScopeStore) -> str:
+        """作用域目录属于哪一层（global / session / people）；认不出返回空串。"""
+        try:
+            rel = store.root.resolve().relative_to(self._store.base_dir.resolve())
+        except (OSError, ValueError):
+            return ""
+        return rel.parts[0] if rel.parts else ""
+
     def runtime_for_key(self, key: str) -> tuple[str, RuntimeSession] | None:
         """按会话目录名找到已加载的运行时（WebUI 改动后同步内存态用）。"""
         for umo, rt in self._sessions.items():
@@ -323,6 +345,12 @@ class MemoryBeyondPlugin(Star):
         found = self.runtime_for_key(key)
         if found is not None:
             self._invalidate_index_cache(found[0])
+            return
+        # key 也可能是 people 目录名（管理页编辑人物档案）：它不对应任何
+        # 会话运行时，但人物档案可能钉在私聊开头块里，一并作废。
+        for rt in self._sessions.values():
+            if any(ref.startswith("people/") for ref in rt.index_pinned):
+                rt.clear_index()
 
     def state_path_for_key(self, key: str) -> Path:
         return self._state_dir / f"{key}.json"
@@ -597,6 +625,9 @@ class MemoryBeyondPlugin(Star):
             return
         self._sharing = membership
         self._store.set_shared_people(membership)
+        # 成员表变化会改变 people 目录映射与共享标注；开头块里可能钉着旧
+        # 目录的档案，所有会话的快照都要重读。
+        self._invalidate_index_cache(None)
         if membership.active:
             logger.info(
                 LOG_PREFIX
@@ -1065,8 +1096,11 @@ class MemoryBeyondPlugin(Star):
         ):
             # 管理指令先估算过开头块时，快照可能还没在真实请求里记过"看过"；
             # 这里按快照里的内容摘要补记，内容已变则交给召回块的更新提示。
-            if note_seen and pin_key and not rt.index_seen_noted:
-                await self._note_pinned_seen(rt, event)
+            if note_seen:
+                if pin_key and not rt.index_seen_noted:
+                    await self._note_pinned_seen(rt, event)
+                # 钉在开头块的档案每轮都真的发给了模型，使用统计也要每轮记
+                await self._note_pinned_usage(rt, event)
             return rt.index_block
         global_index = None
         if global_on:
@@ -1096,6 +1130,8 @@ class MemoryBeyondPlugin(Star):
             rt.index_refs |= {
                 f"global/{name}" for name in injection.indexed_names(global_index)
             }
+        if note_seen:
+            await self._note_pinned_usage(rt, event)
         return rt.index_block
 
     def _pin_profile_key(self, event: AstrMessageEvent) -> tuple:
@@ -1158,6 +1194,28 @@ class MemoryBeyondPlugin(Star):
                 await self._note_shared_seen(event, label, store, name, content)
         return views, pinned, full
 
+    async def _note_pinned_usage(
+        self, rt: RuntimeSession, event: AstrMessageEvent
+    ) -> None:
+        """钉在开头块的档案每轮都算用到，和改造前每轮召回时一致。
+
+        不记的话，长期稳定的档案 uses 一直是 0，遗忘扫描会把它们当成
+        "从未用过"移出在册，整理时也会被标成从未用到。
+        """
+        umo = str(getattr(event, "unified_msg_origin", "") or "")
+        by_store: dict[memstore.ScopeStore, list[str]] = {}
+        for ref in rt.index_pinned:
+            scope, _, file = ref.partition("/")
+            store = (
+                self._people_scope(umo)
+                if scope == "people"
+                else self._session_scope(event)
+            )
+            if store.exists(file):
+                by_store.setdefault(store, []).append(file)
+        for store, names in by_store.items():
+            await asyncio.to_thread(store.note_used, names)
+
     async def _note_pinned_seen(
         self, rt: RuntimeSession, event: AstrMessageEvent
     ) -> None:
@@ -1196,6 +1254,9 @@ class MemoryBeyondPlugin(Star):
         """
         mode = self._str("recall_mode", "keyword").strip().lower()
         limit = self._int("recall_max_files", recall.DEFAULT_MAX_FILES)
+        if mode == "off" or limit <= 0:
+            # 关闭召回就什么都不做：不恢复已遗忘的身份文件，也不额外注入块
+            return None
         try:
             scopes: list[tuple[str, memstore.ScopeStore]] = [
                 ("session", self._store.session_scope(umo))
@@ -1216,8 +1277,6 @@ class MemoryBeyondPlugin(Star):
                 )
             pinned = dict(rt.index_pinned) if rt is not None else {}
             updates = await self._pinned_updates(stores, pinned)
-            if mode == "off":
-                limit = 0
             candidates: list[recall.Candidate] = []
             for label, store in scopes:
                 for header in await asyncio.to_thread(store.headers):
@@ -1241,7 +1300,7 @@ class MemoryBeyondPlugin(Star):
                 candidates,
                 query=query,
                 forced_files=forced,
-                limit=limit if mode != "off" else 0,
+                limit=limit,
                 data_notice=prompts.DATA_NOTICE,
                 model_choice=model_choice,
                 shared_people=self._sharing.is_member(platform_id),
@@ -1388,6 +1447,9 @@ class MemoryBeyondPlugin(Star):
                 f"长期未用的记忆：{', '.join(forgotten)}"
             )
             self._invalidate_index_cache(key)
+            # people 的 key 是 ""，上面的索引作废不会命中任何会话；
+            # 钉在私聊开头块的档案要单独作废，否则遗忘后还继续注入。
+            self._invalidate_pinned(self._store_scope_label(store), forgotten)
         return total
 
     # ============================================================ 定期整理
@@ -1498,6 +1560,14 @@ class MemoryBeyondPlugin(Star):
                 outcome = tidy.OUTCOME_APPLIED
                 message = f"自动应用了 {done} / {len(results)} 项修改"
                 self._invalidate_index_cache(cache_key)
+                self._invalidate_pinned(
+                    scope,
+                    [
+                        item["file"]
+                        for item in results
+                        if item.get("ok") and item.get("op") == "delete"
+                    ],
+                )
             # 计时从整理结束算起：这次自己写的文件不算下一轮的"新记忆"
             finished = time.time()
 
@@ -2316,6 +2386,9 @@ class MemoryBeyondPlugin(Star):
             if refusal:
                 return refusal
             report = await store.delete(file, actor=actor)
+            if report.ok:
+                # 删除后开头块不能再继续注入旧档案
+                self._invalidate_pinned(scope, [file])
         else:
             if not content.strip():
                 return "content 为空。写入需提供完整文件内容；如要删除请设 delete=true。"

@@ -48,6 +48,18 @@ def age_label(mtime: float, now: float | None = None) -> str:
     return f"{days} 天前"
 
 
+def clean_description(text: str) -> str:
+    """注入用的 description：折叠空白、限长，避免一条钩子撑大整个块。
+
+    与索引行的钩子一致；方括号改成全角，防止模型把描述里的括号误当结构。
+    """
+    description = " ".join((text or "").split())
+    description = description.replace("[", "［").replace("]", "］")
+    if len(description) > memstore.MAX_HOOK_CHARS:
+        description = description[: memstore.MAX_HOOK_CHARS] + "…"
+    return description
+
+
 def source_note(ref: str, source: str) -> str:
     """旁人转述时返回要写进标题的来源 ID；本人自己说的话返回空串。
 
@@ -112,9 +124,9 @@ def prepare_view(
 ) -> MemoryView:
     """把磁盘上的记忆文件变成注入视图：去 frontmatter、瘦身、取钩子与来源。"""
     doc = memstore.parse_memory(content or "")
-    description = " ".join(doc.description.split())
-    if not description:
-        description = " ".join(memstore.parse_description(content or "")[0].split())
+    # 没有 description 就不写这一行：从正文首行硬猜会和下面的正文重复，
+    # 没有 frontmatter 的文件尤其明显。
+    description = clean_description(doc.description)
     body, truncated, omitted = trim_body(doc.body, limit)
     return MemoryView(
         ref=ref,

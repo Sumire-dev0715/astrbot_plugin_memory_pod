@@ -9,7 +9,9 @@ import importlib
 import importlib.machinery
 import importlib.util
 import logging
+import os
 import sys
+import time
 import types
 from collections import OrderedDict
 from pathlib import Path
@@ -621,6 +623,12 @@ def test_private_profile_pinned_in_opening_and_excluded_from_recall(tmp_path):
     # 共享空间的"看过"覆盖开头块，按注入时的完整内容记
     raw = run(people.read("user-123.md"))
     assert plugin._seen.seen("Bot-A", "user-123.md") == pkg_sharing.content_sha1(raw)
+    # 钉在开头块的档案每轮都算用到：不会被遗忘扫描当成从未使用
+    assert people.usage_of("user-123.md").uses == 1
+    assert session.usage_of("user-123.md").uses == 1
+    run(plugin._index_block(rt, event, note_seen=True))  # 命中快照也算一轮
+    assert people.usage_of("user-123.md").uses == 2
+    assert session.usage_of("user-123.md").uses == 2
 
     # 默认配置下召回块只带相关会话记忆，发送者档案不再出现
     message = run(plugin._recall_message(event, umo, "开黑", rt))
@@ -648,15 +656,141 @@ def test_status_estimated_snapshot_records_seen_on_next_real_request(tmp_path):
     assert plugin._seen.seen("Bot-A", "user-123.md") == pkg_sharing.content_sha1(raw)
 
 
+def test_truncated_pinned_profile_is_not_marked_seen(tmp_path):
+    plugin = make_plugin(tmp_path, ["Bot-A=edit"])
+    event = FakeEvent("Bot-A", sender_id="123")
+    people = plugin._store.people_scope("Bot-A")
+    run(
+        people.write(
+            "user-123.md",
+            person_file(body="长" * (pkg_recall.FILE_CHARS + 100)),
+            actor="system",
+        )
+    )
+    rt = main.RuntimeSession(state=pkg_compress.SessionState())
+    opening = run(plugin._index_block(rt, event, note_seen=True))
+    assert "中间省略" in opening
+    # 只注入了头尾，不算看过完整版本
+    assert plugin._seen.seen("Bot-A", "user-123.md") == ""
+
+
+def test_deleting_pinned_profile_invalidates_opening_snapshot(tmp_path):
+    plugin = make_plugin(tmp_path, [])
+    event = FakeEvent("Bot-A", sender_id="123")
+    people = plugin._store.people_scope("Bot-A")
+    run(people.write("user-123.md", person_file(body="跨群身份事实"), actor="system"))
+    rt = main.RuntimeSession(state=pkg_compress.SessionState())
+    plugin._sessions[event.unified_msg_origin] = rt
+    opening = run(plugin._index_block(rt, event, note_seen=True))
+    assert "跨群身份事实" in opening
+
+    result = run(plugin.memory_write(event, "people", "user-123.md", delete=True))
+    assert "已删除" in result
+    assert rt.index_loaded is False
+    # 下一次开头块不再包含已删除的档案
+    refreshed = run(plugin._index_block(rt, event, note_seen=True))
+    assert refreshed is None or "跨群身份事实" not in refreshed
+
+
+def test_forgetting_pinned_profile_invalidates_opening_snapshot(tmp_path):
+    plugin = make_plugin(tmp_path, [])
+    plugin.config["enable_forgetting"] = True
+    plugin.config["forget_after_days"] = 1
+    event = FakeEvent("Bot-A", sender_id="123")
+    people = plugin._store.people_scope("Bot-A")
+    people.root.mkdir(parents=True, exist_ok=True)
+    path = people.root / "user-123.md"
+    path.write_text(person_file(body="跨群身份事实"), encoding="utf-8")
+    old = time.time() - 10 * 86400
+    os.utime(path, (old, old))
+
+    rt = main.RuntimeSession(state=pkg_compress.SessionState())
+    plugin._sessions[event.unified_msg_origin] = rt
+    opening = run(plugin._index_block(rt, event, note_seen=True))
+    assert "跨群身份事实" in opening
+
+    now = time.time()
+    # 模拟这条档案确实很久没被用到（开头块每轮记使用统计会刷新它）
+    run(asyncio.to_thread(people.note_used, ["user-123.md"], now - 10 * 86400))
+    run(plugin._forget_sweep([("", people)], now))
+    assert people.has_forgotten("user-123.md")
+    assert rt.index_loaded is False
+    refreshed = run(plugin._index_block(rt, event, note_seen=True))
+    assert refreshed is None or "跨群身份事实" not in refreshed
+
+
+def test_people_edit_invalidates_pinned_snapshot(tmp_path):
+    """管理页按 people 目录名改动时也要作废开头块快照。"""
+    plugin = make_plugin(tmp_path, [])
+    event = FakeEvent("Bot-A", sender_id="123")
+    people = plugin._store.people_scope("Bot-A")
+    run(people.write("user-123.md", person_file(body="旧身份"), actor="system"))
+    rt = main.RuntimeSession(state=pkg_compress.SessionState())
+    plugin._sessions[event.unified_msg_origin] = rt
+    assert "旧身份" in run(plugin._index_block(rt, event))
+
+    run(people.write("user-123.md", person_file(body="新身份"), actor="system"))
+    # 管理页传进来的 key 是 people 目录名 "Bot-A"，不对应任何会话运行时
+    plugin.invalidate_for_key("Bot-A")
+    assert rt.index_loaded is False
+    refreshed = run(plugin._index_block(rt, event))
+    assert "新身份" in refreshed and "旧身份" not in refreshed
+
+
+def test_sharing_membership_change_invalidates_pinned_snapshot(tmp_path):
+    plugin = make_plugin(tmp_path, ["Bot-A=edit"])
+    event = FakeEvent("Bot-A", sender_id="123")
+    people = plugin._store.people_scope("Bot-A")
+    run(people.write("user-123.md", person_file(body="共享身份事实"), actor="system"))
+    rt = main.RuntimeSession(state=pkg_compress.SessionState())
+    plugin._sessions[event.unified_msg_origin] = rt
+    assert "共享身份事实" in run(plugin._index_block(rt, event))
+
+    plugin.config["shared_people_bots"] = []
+    plugin._refresh_sharing()
+    assert rt.index_loaded is False
+    refreshed = run(plugin._index_block(rt, event))
+    assert refreshed is None or "共享身份事实" not in refreshed
+
+
+def test_recall_off_does_not_restore_or_attach_updated_profile(tmp_path):
+    plugin = make_plugin(tmp_path, [])
+    plugin.config["recall_mode"] = "off"
+    event = FakeEvent("Bot-A", sender_id="123")
+    umo = event.unified_msg_origin
+    session = plugin._store.session_scope(umo)
+    people = plugin._store.people_scope("Bot-A")
+    run(people.write("user-123.md", person_file(body="旧档案"), actor="system"))
+    run(session.write("user-123.md", person_file(body="身份"), actor="system"))
+
+    rt = main.RuntimeSession(state=pkg_compress.SessionState())
+    assert "旧档案" in run(plugin._index_block(rt, event))
+    run(people.write("user-123.md", person_file(body="新档案"), actor="system"))
+    assert run(plugin._recall_message(event, umo, "你好", rt)) is None
+
+    # 关闭召回时不再把已遗忘的身份文件移回在册
+    run(session.forget("user-123.md"))
+    assert session.has_forgotten("user-123.md")
+    assert run(plugin._recall_message(event, umo, "你好", rt)) is None
+    assert session.has_forgotten("user-123.md")
+    assert not session.exists("user-123.md")
+
+
 def test_group_chat_never_pins_profile(tmp_path):
     plugin = make_plugin(tmp_path, ["Bot-A=edit"])
     event = FakeEvent("Bot-A", sender_id="123", umo="Bot-A:GroupMessage:555")
     people = plugin._store.people_scope("Bot-A")
+    session = plugin._store.session_scope(event.unified_msg_origin)
     run(people.write("user-123.md", person_file(body="跨群身份事实"), actor="system"))
+    run(session.write("weekend-game.md", note_file("weekend-game", "开黑活动", "周六")))
 
     rt = main.RuntimeSession(state=pkg_compress.SessionState())
     opening = run(plugin._index_block(rt, event))
-    assert opening is None
+    # 群聊有索引块，但绝不含发送者档案区或钉住的 people 文件
+    assert opening is not None
+    assert pkg_injection.PROFILE_HEADING not in opening
+    assert "跨群身份事实" not in opening
+    assert "weekend-game.md" in opening
     assert rt.index_pinned == {}
     # 群聊行为不变：人物档案仍作为身份必选进入每轮召回
     message = run(plugin._recall_message(event, event.unified_msg_origin, "你好", rt))

@@ -200,6 +200,57 @@ def test_full_files_at_least_limit_keeps_all_selected_in_order(tmp_path):
     assert plain.files == plan.files
 
 
+def test_total_budget_counts_title_and_description():
+    items = [
+        recall.Recalled(
+            f"session/{name}.md",
+            memory(name, "描" * 500, "开" * 3000),
+            NOW,
+        )
+        for name in ("a", "b", "c", "d", "e")
+    ]
+    sections, dropped = recall.plan_sections(items)
+    # 每条正文 3000 字，加上限长后的 description 与标题，块内只放得下两条
+    assert len(sections) == 2
+    assert len(dropped) == 3
+    block = recall.render_recall_block(
+        sections, prompts.DATA_NOTICE, NOW, pointers=dropped
+    )
+    # 描述被截到 100 字，不会因为 5 条超长 description 把块撑到近两万字
+    assert len(block) < recall.TOTAL_CHARS + 2000
+
+
+def test_pointer_only_block_still_carries_data_notice(tmp_path):
+    stores, candidates = make_stores(
+        tmp_path,
+        [
+            ("session", "a.md", "开黑活动安排", "周六晚上"),
+            ("session", "b.md", "开黑活动记录", "周日下午"),
+        ],
+    )
+    plan = run(
+        recall.assemble_recall(
+            stores,
+            candidates,
+            query="开黑",
+            forced_files=[],
+            limit=5,
+            data_notice=prompts.DATA_NOTICE,
+            full_files=0,
+            indexed_refs={"session/a.md"},
+            now=NOW,
+        )
+    )
+    assert plan.sections == []
+    assert [item.ref for item in plan.pointers] == ["session/a.md", "session/b.md"]
+    assert plan.block.startswith(recall.RECALL_BLOCK_OPEN + "\n" + prompts.DATA_NOTICE)
+    assert "### session/a.md" not in plan.block
+    assert (
+        "可能也相关，需要细节时用 memory_read 读取："
+        "session/a.md、session/b.md（开黑活动记录）" in plan.block
+    )
+
+
 def test_block_only_keeps_one_data_notice_and_strips_frontmatter(tmp_path):
     stores, candidates = make_stores(
         tmp_path,

@@ -1,6 +1,6 @@
 """注入视图：去 frontmatter、头尾瘦身、标题、来源与开头块档案区。"""
 
-from core import injection, prompts
+from core import injection, memstore, prompts
 
 NOW = 1_800_000_000.0
 DAY = 86400
@@ -56,6 +56,27 @@ def test_body_at_limit_is_not_truncated():
     assert view.truncated is False
     assert view.omitted == 0
     assert view.body == "开" * injection.FILE_CHARS
+
+
+def test_long_description_is_capped_like_index_hooks():
+    content = memory("a", "描" * 500, "正文")
+    view = injection.prepare_view("session/a.md", content, NOW)
+    assert len(view.description) == memstore.MAX_HOOK_CHARS + 1
+    assert view.description.endswith("…")
+
+    bracketed = injection.prepare_view(
+        "session/a.md", memory("a", "a [b] 描述", "正文"), NOW
+    )
+    assert bracketed.description == "a ［b］ 描述"
+
+
+def test_missing_frontmatter_does_not_duplicate_first_body_line():
+    content = "第一行正文\n第二行正文"
+    view = injection.prepare_view("session/a.md", content, NOW)
+    assert view.description == ""
+    rendered = injection.render_view(view, NOW)
+    assert rendered.count("第一行正文") == 1
+    assert view.body == content
 
 
 def test_source_in_title_only_when_someone_else_told_it():

@@ -165,7 +165,7 @@ _SCOPE_GLOBAL = "- global：你（机器人）自己的全局记忆，所有会�
 
 _SCOPE_SESSION = "- session：当前会话（本群或本私聊）的记忆：这里的人（user）、进行中的事（project）、仅本会话适用的指导（feedback）、资源指针（reference）、每日日志（journal）。"
 
-_SCOPE_PEOPLE = "- people：某个人本身的记忆，同一平台的所有群聊和私聊共享：一人一个文件，文件名固定 user-<数字ID>.md，类型 user。只存换个群也成立、且是本人亲口说的事实：身份、职业与专长、常用称呼、长期偏好；他在本群的角色、本群里的约定、群内的小事、别人转述的私事仍写 session 的 user-<数字ID>.md。people 没有索引注入：正在说话和被提到的人的 people 文件会由召回自动附上，查别人直接 memory_read people 的 user-<数字ID>.md 或用 memory_search。"
+_SCOPE_PEOPLE = "- people：某个人本身的记忆，同一平台的所有群聊和私聊共享：一人一个文件，文件名固定 user-<数字ID>.md，类型 user。只存换个群也成立、且是本人亲口说的事实：身份、职业与专长、常用称呼、长期偏好；他在本群的角色、本群里的约定、群内的小事、别人转述的私事仍写 session 的 user-<数字ID>.md。people 没有索引注入：私聊里发送者的档案会钉在开头块，其他正在说话和被提到的人的 people 文件由召回自动附上（人数多时可能只给一行指针）；查别人直接 memory_read people 的 user-<数字ID>.md 或用 memory_search。"
 
 _SCOPES_SESSION_ONLY = """
 
