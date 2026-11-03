@@ -4,7 +4,7 @@ import asyncio
 import time
 from pathlib import Path
 
-from core import consolidate, journal, memstore, prompts, recall
+from core import consolidate, index_view, journal, memstore, prompts, recall
 from core.memstore import (
     INDEX_FILENAME,
     MemoryHeader,
@@ -396,6 +396,11 @@ def test_similar_memories_skips_journals_and_new_journal_has_no_hint():
 # ---------------------------------------------------------------- 截断
 
 
+def _compact(lines: list[str]) -> list[str]:
+    """注入视图里的紧凑行；MEMORY.md 本身仍是链接格式。"""
+    return [index_view.compact_index_line(line) for line in lines]
+
+
 def test_truncate_index_drops_whole_journal_block_first(monkeypatch):
     monkeypatch.setattr(memstore, "INDEX_MAX_LINES", 200)
     normal = [format_index_line(f"m{i}.md", f"钩子{i}") for i in range(198)]
@@ -409,10 +414,11 @@ def test_truncate_index_drops_whole_journal_block_first(monkeypatch):
     assert snap.truncated
     # 日志块要么完整显示，要么整块让位：不显示半截
     assert snap.loaded_lines == 198
-    assert all(line in snap.text for line in normal)
+    assert all(line in snap.text for line in _compact(normal))
     assert "daily-2026" not in snap.text
     assert "日志共" not in snap.text
-    assert "还有 3 行" in snap.text
+    # 汇总行说 3 篇日志，条数按篇数而不是行数算
+    assert "还有 3 条未加载" in snap.text
 
 
 def test_truncate_index_drops_type_only_journal_block(monkeypatch):
@@ -425,6 +431,7 @@ def test_truncate_index_drops_type_only_journal_block(monkeypatch):
     assert snap.loaded_lines == 199
     assert "notes.md" not in snap.text
     assert "日志共" not in snap.text
+    assert "还有 1 条未加载" in snap.text
 
 
 def test_truncate_index_ignores_trailing_blank_lines(monkeypatch):
@@ -440,7 +447,7 @@ def test_truncate_index_ignores_trailing_blank_lines(monkeypatch):
     snap = _truncate_index(raw)
     assert snap.truncated
     assert snap.loaded_lines == 5
-    assert all(line in snap.text for line in normal)
+    assert all(line in snap.text for line in _compact(normal))
     assert "daily-2026" not in snap.text
     assert "日志共" not in snap.text
 
@@ -454,14 +461,16 @@ def test_truncate_index_drops_journal_block_under_byte_limit(monkeypatch):
             for day in (1, 2, 3)
         ]
     )
-    normal_bytes = sum(len(line.encode("utf-8")) + 1 for line in normal)
+    normal_bytes = sum(
+        len(line.encode("utf-8")) + 1 for line in _compact(normal)
+    )
     first_block_bytes = len(block[0].encode("utf-8")) + 1
     monkeypatch.setattr(memstore, "INDEX_MAX_BYTES", normal_bytes + first_block_bytes)
     snap = _truncate_index("\n".join(normal + block))
     assert snap.truncated
     # 字节上限只允许装下第一条日志行：整块让位，不显示半截
     assert snap.loaded_lines == len(normal)
-    assert all(line in snap.text for line in normal)
+    assert all(line in snap.text for line in _compact(normal))
     assert "日志共" not in snap.text
 
 
@@ -473,7 +482,7 @@ def test_truncate_index_keeps_journal_block_when_it_fits():
     raw = "\n".join(normal + block)
     snap = _truncate_index(raw)
     assert not snap.truncated
-    assert snap.text == raw
+    assert snap.text == "\n".join(_compact(normal + block))
 
 
 # ---------------------------------------------------------------- 记忆规范

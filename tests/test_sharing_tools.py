@@ -843,6 +843,33 @@ def test_pin_snapshot_is_stable_and_updated_profile_wins(tmp_path):
     assert "新版本档案" in refreshed and "旧版本档案" not in refreshed
 
 
+def test_index_snapshot_does_not_follow_usage_changes(tmp_path, monkeypatch):
+    """超限丢行只在生成快照时读一次使用统计，缓存期间不跟每轮召回漂移。"""
+    plugin = make_plugin(tmp_path, [])
+    plugin.config["pin_private_profile"] = False
+    monkeypatch.setattr(pkg_memstore, "INDEX_MAX_LINES", 3)
+    event = FakeEvent("Bot-A", sender_id="123")
+    session = plugin._store.session_scope(event.unified_msg_origin)
+    for name in ("a", "b", "c", "d"):
+        run(session.write(f"{name}.md", note_file(name, f"{name} 描述", "正文")))
+    # a 最久没用：第一次生成快照时丢 a
+    session.note_used(["a.md"], 100.0)
+
+    rt = main.RuntimeSession(state=pkg_compress.SessionState())
+    first = run(plugin._index_block(rt, event))
+    assert "a.md" not in first
+    assert "还有 1 条未加载，可用 memory_search 找到" in first
+
+    # 使用统计变了，但快照缓存期间注入文本逐字不变
+    session.note_used(["b.md"], 50.0)
+    assert run(plugin._index_block(rt, event)) == first
+
+    # 快照刷新（压缩、切换对话或管理页改动后）才按新统计重新决定丢谁
+    rt.clear_index()
+    refreshed = run(plugin._index_block(rt, event))
+    assert "b.md" not in refreshed and "a.md" in refreshed
+
+
 def test_updated_profile_does_not_use_recall_full_quota(tmp_path):
     plugin = make_plugin(tmp_path, ["Bot-A=edit"])
     plugin.config["recall_full_files"] = 1

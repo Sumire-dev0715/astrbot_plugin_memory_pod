@@ -6,6 +6,7 @@ from core.memstore import (
     INDEX_FILENAME,
     INDEX_MAX_LINES,
     MAX_HOOK_CHARS,
+    MemoryHeader,
     MemoryStore,
     ScopeStore,
     _truncate_index,
@@ -358,18 +359,41 @@ def test_index_health_over_limit_still_writes(tmp_path, monkeypatch):
 
 
 def test_truncate_index_appends_notice():
-    raw = "\n".join(f"- line {i}" for i in range(INDEX_MAX_LINES + 50))
-    snap = _truncate_index(raw)
+    names = [f"m{i}.md" for i in range(INDEX_MAX_LINES + 50)]
+    raw = "\n".join(format_index_line(name, "钩子") for name in names)
+    headers = [
+        MemoryHeader(
+            file=name,
+            name=name[:-3],
+            description="钩子",
+            type="project",
+            mtime=float(i),
+            size=0,
+            updated=float(i),
+        )
+        for i, name in enumerate(names)
+    ]
+    snap = _truncate_index(raw, headers=headers)
     assert snap.truncated
     assert snap.loaded_lines == INDEX_MAX_LINES
-    assert "50 行" in snap.text
-    assert "memory_search" in snap.text
+    # 注入时渲染成紧凑行；按 updated 从旧到新丢掉最旧的 50 条，顺序不变
+    assert snap.text.splitlines()[0] == "- m50.md — 钩子"
+    assert "- m249.md — 钩子" in snap.text
+    assert "m0.md" not in snap.text
+    assert "还有 50 条未加载，可用 memory_search 找到" in snap.text
+    assert "50 行" not in snap.text
 
 
 def test_truncate_index_small_untouched():
     snap = _truncate_index("- a\n- b")
     assert not snap.truncated
     assert snap.text == "- a\n- b"
+
+
+def test_truncate_index_compacts_but_keeps_headings():
+    snap = _truncate_index("# 分组\n- [名称](a.md) — 描述\n- b.md")
+    assert not snap.truncated
+    assert snap.text == "# 分组\n- a.md — 描述\n- b.md"
 
 
 def test_load_index_missing(tmp_path):

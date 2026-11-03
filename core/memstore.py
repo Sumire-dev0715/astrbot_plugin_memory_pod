@@ -7,9 +7,12 @@
     global/            —— 机器人自我的全局记忆（偏好、行为准则），所有会话共享注入
     session/<会话键>/  —— 当前会话（UMO）的记忆：本群 / 本私聊里的人和事
 
-索引自动注入通道有 200 行 / 25KB 上限，超出从底部截断；截断时在末尾追加
-一行说明还有多少行未加载、可用搜索工具找到——否则模型根本不知道自己有
-记忆没看到。
+索引自动注入通道有 200 行 / 25KB 上限。超过时不再从底部截断：先整块丢
+日志，再按最近一次用到的时间从旧到新丢非日志条目（没有使用统计的按
+updated 算），feedback 类最后丢；剩下的行保持原顺序，末尾注明还有多少条
+未加载、可用搜索工具找到——否则模型根本不知道自己有记忆没看到。注入时
+行格式渲染成 ``- 文件.md — 描述``，MEMORY.md 本身仍是
+``- [名称](文件.md) — 描述``（见 core/index_view.py）。
 
 索引由插件自动维护，不开放直接写入：每次写入记忆文件时，从 frontmatter
 的 description 提取钩子、同步增改对应索引行；删除文件时同步移除索引行。
@@ -43,7 +46,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import history, insights, journal, sharing
+from . import history, index_view, insights, journal, sharing
 
 INDEX_FILENAME = "MEMORY.md"
 INDEX_MAX_LINES = 200
@@ -529,35 +532,40 @@ class IndexReport:
 
 
 def _truncate_index(
-    raw: str, journal_files: set[str] | None = None
+    raw: str,
+    journal_files: set[str] | None = None,
+    headers: list[MemoryHeader] | None = None,
+    usage: dict[str, Usage] | None = None,
 ) -> IndexSnapshot:
-    lines = raw.splitlines()
-    total = len(lines)
-    kept: list[str] = []
-    used_bytes = 0
-    for line in lines:
-        line_bytes = len(line.encode("utf-8")) + 1
-        if len(kept) >= INDEX_MAX_LINES or used_bytes + line_bytes > INDEX_MAX_BYTES:
-            break
-        kept.append(line)
-        used_bytes += line_bytes
-    loaded = len(kept)
-    # 日志块要整块显示或整块让位：截断落在块中间时，把已经装下的
-    # 半截日志行也去掉，避免模型看到一份缺头少尾的日志目录。
-    span = journal.block_span(lines, journal_files)
-    if loaded < total and span is not None:
-        start, end = span
-        if start < loaded <= end:
-            kept = kept[:start]
-            loaded = len(kept)
-    text = "\n".join(kept)
-    if loaded < total:
-        text += (
-            f"\n……（索引超出加载上限，还有 {total - loaded} 行未在此显示；"
-            "未显示的记忆可用 memory_search 工具检索。"
-            "请把相关记忆合并进同一个文件、删除多余文件以精简索引）"
-        )
-    return IndexSnapshot(text=text, total_lines=total, loaded_lines=loaded)
+    """渲染注入文本：紧凑行，超限按 3.6 第 4 条丢行。
+
+    使用统计由调用方在生成快照时传入，这里不读盘；没有统计的文件按
+    updated 排序（MemoryHeader.idle_since 的规则）。
+    """
+    known = headers or []
+    file_types = {header.file: header.type for header in known}
+    idle_times: dict[str, float] = {}
+    for header in known:
+        used = (usage or {}).get(header.file)
+        last_used = used.last_used if used is not None else 0.0
+        idle_times[header.file] = last_used or header.updated
+    # 索引里还挂着、磁盘上已经没有的文件：有统计就按统计，否则当最旧
+    for name, used in (usage or {}).items():
+        if name not in idle_times and used.last_used:
+            idle_times[name] = used.last_used
+    view = index_view.render_for_injection(
+        raw,
+        journal_files=journal_files,
+        file_types=file_types,
+        idle_times=idle_times,
+        max_lines=INDEX_MAX_LINES,
+        max_bytes=INDEX_MAX_BYTES,
+    )
+    return IndexSnapshot(
+        text=view.text,
+        total_lines=view.total_lines,
+        loaded_lines=view.loaded_lines,
+    )
 
 
 def append_text(content: str, old: str, new: str) -> tuple[str, str]:
@@ -2096,7 +2104,7 @@ class ScopeStore:
             actual = lines[span[0] : span[1] + 1] if span is not None else []
             if actual != journal.build_block(self._journal_entries(headers)):
                 missing = sorted(set(missing) | journals)
-        snap = _truncate_index(raw, journals)
+        snap = _truncate_index(raw, journals, headers)
         return IndexReport(
             exists=True,
             lines=snap.total_lines,
@@ -2176,16 +2184,22 @@ class ScopeStore:
     # ------------------------------------------------------------ 索引加载
 
     async def load_index(self) -> IndexSnapshot:
+        """读取并渲染注入用的索引快照。
+
+        使用统计在这里读一次，供超限时的丢行顺序使用；快照由调用方缓存，
+        之后的轮次不再重读，记忆不变时注入文本逐字不变。
+        """
         raw = await self.read(INDEX_FILENAME)
         if raw is None:
             return IndexSnapshot(text="", total_lines=0, loaded_lines=0)
         headers = await asyncio.to_thread(self.headers)
+        usage = await asyncio.to_thread(self.usage)
         journals = {
             header.file
             for header in headers
             if journal.is_journal(header.file, header.type)
         }
-        return _truncate_index(raw, journals)
+        return _truncate_index(raw, journals, headers, usage)
 
     # ------------------------------------------------------------ 全文搜索
 

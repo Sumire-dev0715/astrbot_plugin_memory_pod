@@ -9,6 +9,8 @@
   user-<ID>.md 存在就一定带上——聊天里最常用的记忆就是"正在说话的人"；
 - 相关性：关键词模式按词重叠打分（英文按词、中文按相邻两字），名称与
   描述命中权重更高；模型模式把记忆清单交给摘要模型挑选，失败退回关键词。
+  挑选提示词里清单在前、本轮消息在后，写入日期用绝对日期：同一会话里
+  记忆没变时清单逐字不变，模型服务可以复用这段前缀。
 
 每条召回记忆的标题带类型与写入时间；正文去掉 frontmatter，超过单条上限
 时保留开头与结尾（3.6 第 3 条）。记忆是写入时的观察，不是现状。
@@ -32,10 +34,17 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from dataclasses import dataclass
 
 from . import injection, journal
-from .injection import DAY_SECONDS, FILE_CHARS, TOTAL_CHARS, age_days, age_label
+from .injection import (
+    DAY_SECONDS,
+    FILE_CHARS,
+    TOTAL_CHARS,
+    age_days,
+    age_label,  # noqa: F401 - core.consolidate 从这里导入
+)
 from .memstore import MemoryHeader, ScopeStore
 
 RECALL_BLOCK_OPEN = "<memory_beyond_recall>"
@@ -238,23 +247,36 @@ def similar_memories(
 
 # ---------------------------------------------------------------- 模型挑选
 
-SELECTOR_PROMPT = """你在帮一个聊天机器人挑选记忆。下面是它的记忆清单（每行：编号、作用域/文件名、类型、写入时间、一句话描述），以及它刚收到的一条新消息。
-
-请选出机器人回复这条消息时**确实用得上**的记忆，最多 {limit} 条。只选有把握有用的；拿不准就不选；一条都用不上就输出空数组。
-
-记忆清单：
+SELECTOR_PROMPT = """记忆清单（每行：编号、作用域/文件名、类型、写入日期、一句话描述）：
 {manifest}
 
-新消息：
-{query}
+你在帮一个聊天机器人挑选记忆。请从上面的清单里挑出机器人回复下面这条新消息时**确实用得上**的记忆，最多 {limit} 条。只选有把握有用的；拿不准就不选；一条都用不上就输出空数组。
 
-只输出一个 JSON 数组，元素是所选记忆的「作用域/文件名」，例如 ["session/user-12345678.md"]，不要输出其他内容。"""
+只输出一个 JSON 数组，元素是所选记忆的「作用域/文件名」，例如 ["session/user-12345678.md"]，不要输出其他内容。
+
+新消息：
+{query}"""
+
+
+def _selector_date(updated: float) -> str:
+    """候选清单里的写入日期：绝对日期，不随"现在"漂移。
+
+    用相对时间（3 天前）会让同一份记忆隔天换一行、破坏提示词前缀缓存；
+    绝对日期在记忆不变时逐字稳定。
+    """
+    if not updated or updated <= 0:
+        return "未知"
+    return time.strftime("%Y-%m-%d", time.localtime(updated))
 
 
 def build_selector_prompt(
-    candidates: list[Candidate], query: str, limit: int, now: float | None = None
+    candidates: list[Candidate], query: str, limit: int
 ) -> str:
-    """拼摘要模型挑选用的清单；日志是流水账，不交给模型挑选。"""
+    """拼摘要模型挑选用的清单；日志是流水账，不交给模型挑选。
+
+    清单在前、本轮消息在后，方便模型服务复用清单这一段稳定的前缀；
+    清单里的写入日期用绝对日期，同一会话里记忆没变时逐字不变。
+    """
     lines = []
     visible = [
         cand
@@ -266,7 +288,7 @@ def build_selector_prompt(
         description = header.description or "（无描述）"
         lines.append(
             f"{i}. {cand.ref}｜{header.type or '未标注'}｜"
-            f"{age_label(header.updated, now)}｜{description}"
+            f"写入 {_selector_date(header.updated)}｜{description}"
         )
     return SELECTOR_PROMPT.format(
         limit=limit, manifest="\n".join(lines), query=(query or "").strip()[:2000]

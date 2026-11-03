@@ -1,3 +1,5 @@
+import time
+
 from core import recall
 from core.memstore import MemoryHeader
 from core.recall import Candidate, Recalled
@@ -97,11 +99,33 @@ def test_select_by_keywords_ignores_weak_body_matches():
 # ---------------------------------------------------------------- 模型挑选
 
 
-def test_selector_prompt_lists_refs_and_age():
+def test_selector_prompt_lists_refs_and_write_date():
     cands = [cand("user-1.md", "阿杰", mtime=NOW - 3 * DAY)]
-    prompt = recall.build_selector_prompt(cands, "你好", 3, now=NOW)
-    assert "1. session/user-1.md｜user｜3 天前｜阿杰" in prompt
+    prompt = recall.build_selector_prompt(cands, "你好", 3)
+    expected_date = time.strftime("%Y-%m-%d", time.localtime(NOW - 3 * DAY))
+    assert f"1. session/user-1.md｜user｜写入 {expected_date}｜阿杰" in prompt
     assert "最多 3 条" in prompt
+    # 写入日期用绝对日期，不随"现在"变成"3 天前"
+    assert "天前" not in prompt
+    # 候选清单在前、本轮消息在后：清单是稳定的前缀
+    assert prompt.index("记忆清单") < prompt.index("新消息：")
+    assert prompt.endswith("你好")
+
+
+def test_selector_prompt_is_stable_while_memories_are_unchanged():
+    cands = [
+        cand("a.md", "每周六开黑"),
+        cand("b.md", scope="global", mtime=NOW - 40 * DAY),
+    ]
+    first = recall.build_selector_prompt(cands, "这周六开黑吗", 5)
+    later = recall.build_selector_prompt(cands, "这周六开黑吗", 5)
+    assert first == later
+    # 清单部分不随"现在"变化；换一条消息只改清单之后的部分
+    other_query = recall.build_selector_prompt(cands, "今天吃什么", 5)
+    manifest = first.split("新消息：", 1)[0]
+    assert other_query.split("新消息：", 1)[0] == manifest
+    # 候选顺序就是调用方给它的顺序，不因时间重新排序
+    assert manifest.index("session/a.md") < manifest.index("global/b.md")
 
 
 def test_parse_selector_response_accepts_refs_and_bare_names():

@@ -2,9 +2,8 @@
 
 日志是每日流水账，不是稳定事实。它照常以 Markdown 文件保存、照常参与
 遗忘，但在索引里不占单独一行：非日志行保持原顺序，日志折叠成索引末尾
-的一个块——最近两篇各占一行，再加一行汇总。放在末尾是因为注入通道超出
-200 行 / 25KB 时从底部截断，日志块应该最先让位；截断落在块中间时整块
-一起略去，不显示半截日志目录。
+的一个块——最近两篇各占一行，再加一行汇总。注入通道超出 200 行 / 25KB
+时日志块整块最先让位（见 core/index_view.py），不显示半截日志目录。
 
 判定规则（任一成立即为日志）：
 - frontmatter 的 type 是 journal；
@@ -117,6 +116,15 @@ def build_block(entries: list[JournalEntry]) -> list[str]:
 
 def is_summary_line(line: str) -> bool:
     return line.startswith(_SUMMARY_PREFIX) and _SUMMARY_MARK in line
+
+
+_SUMMARY_COUNT_RE = re.compile(r"^- 日志共 (\d+) 篇")
+
+
+def summary_count(line: str) -> int:
+    """日志块汇总行里的日志篇数；不是汇总行返回 0。"""
+    match = _SUMMARY_COUNT_RE.match(line or "")
+    return int(match.group(1)) if match else 0
 
 
 def _is_entry_line(line: str, journal_files: set[str] | None = None) -> bool:
