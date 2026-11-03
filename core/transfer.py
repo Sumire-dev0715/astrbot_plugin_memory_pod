@@ -537,10 +537,14 @@ class MemoryTransfer:
                 report["to"] = {**self.describe(dst), "umo": new_umo}
             items.append(report)
         if include_people:
+            # 来源按旧的物理目录找；目标是共享成员时 people_key 会映射到
+            # _shared，不能直接用 safe_key(dst_platform) 搬进已停用的旧目录
             src = ScopeRef(SCOPE_PEOPLE, safe_key(src_platform))
-            dst = ScopeRef(SCOPE_PEOPLE, safe_key(dst_platform))
+            dst = ScopeRef(SCOPE_PEOPLE, self.store.people_key(dst_platform))
             src_store = self.scope_store(src)
-            if await asyncio.to_thread(_has_memories, src_store):
+            if src.key != dst.key and await asyncio.to_thread(
+                _has_memories, src_store
+            ):
                 report = await self.transfer(
                     src, dst, mode=mode, policy=policy, dry_run=dry_run
                 )

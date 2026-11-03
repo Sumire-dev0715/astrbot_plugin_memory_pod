@@ -668,7 +668,12 @@ class ScopeStore:
         path = self._resolve(name)
         if path is None or not path.is_file():
             return None
-        return await asyncio.to_thread(path.read_text, "utf-8")
+        try:
+            return await asyncio.to_thread(path.read_text, "utf-8")
+        except (OSError, UnicodeDecodeError):
+            # 非 UTF-8 文件不能当记忆正文展示；管理页仍会按文件名列出，
+            # 可以删除，统计类路径用 errors="replace" 单独读
+            return None
 
     def list_files(self) -> list[str]:
         """作用域内的记忆文件（不含自动维护的 MEMORY.md 索引）。"""
@@ -780,9 +785,11 @@ class ScopeStore:
 
         source 是本次写入的来源 ID（通常是当前发送者），并入文件的 source 戳；
         actor 是这次变更的执行者（工具调用记平台 ID），写进审计。
-        expected_sha1 非 None 时做覆盖前版本检查：持锁读到在册旧内容的哈希
-        必须与它一致，否则拒绝写入。检查与写入在同一把锁里，并发的两次
-        覆盖只有先到的那次能通过。
+        expected_sha1 非 None 时做覆盖前版本检查：持锁读到在册旧内容（没有
+        在册时用同名的已遗忘副本）的哈希必须与它一致，否则拒绝写入。检查与
+        写入在同一把锁里，并发的两次覆盖只有先到的那次能通过；空串表示这个
+        机器人没有看过任何版本——新建文件放行，覆盖已有内容一律拒绝，这样
+        两边同时新建同名文件时后到的一方不会悄悄盖掉先写的。
         forbid_overwrite 为 true 时只允许新建：持锁确认在册或已遗忘的同名
         文件都不存在，避免 append 级成员在并发下绕过"只能新建"。
         """
@@ -809,14 +816,15 @@ class ScopeStore:
                     previous = await asyncio.to_thread(
                         self._read_for_update, self._forgotten_path(name)
                     )
-            except OSError as exc:
+            except (OSError, UnicodeDecodeError) as exc:
                 return WriteReport(
                     False, f"读取 {name} 的现有内容失败，未写入：{exc}"
                 )
             if forbid_overwrite and (active is not None or previous is not None):
                 return WriteReport(False, sharing.APPEND_OVERWRITE_REFUSAL)
             if expected_sha1 is not None:
-                actual = history.content_sha1(active) if active is not None else ""
+                base = active if active is not None else previous
+                actual = history.content_sha1(base) if base is not None else ""
                 if actual != expected_sha1:
                     return WriteReport(
                         False, sharing.version_conflict_message(name)
@@ -837,6 +845,13 @@ class ScopeStore:
     def _read_if_exists(path: Path) -> str | None:
         try:
             return path.read_text("utf-8") if path.is_file() else None
+        except (OSError, UnicodeDecodeError):
+            return None
+
+    @staticmethod
+    def _read_bytes_if_exists(path: Path) -> bytes | None:
+        try:
+            return path.read_bytes() if path.is_file() else None
         except OSError:
             return None
 
@@ -911,11 +926,17 @@ class ScopeStore:
                 )
             if mode == "section":
                 # section 只替换一节，正文其余行的 CRLF 要原样留在磁盘上
-                content = await asyncio.to_thread(
-                    self._read_text_preserve, path
-                )
+                try:
+                    content = await asyncio.to_thread(
+                        self._read_text_preserve, path
+                    )
+                except (OSError, UnicodeDecodeError) as exc:
+                    return WriteReport(False, f"读取 {name} 失败，未修改：{exc}")
             else:
-                content = await asyncio.to_thread(path.read_text, "utf-8")
+                try:
+                    content = await asyncio.to_thread(path.read_text, "utf-8")
+                except (OSError, UnicodeDecodeError) as exc:
+                    return WriteReport(False, f"读取 {name} 失败，未修改：{exc}")
             if expected_sha1 is not None:
                 # 版本记录来自 memory_read（文本模式已归一为 LF），
                 # section 这里读的是原始换行，比较前按同一口径归一
@@ -1201,7 +1222,10 @@ class ScopeStore:
         path = self._forgotten_path(name)
         if not path.is_file():
             return None
-        return await asyncio.to_thread(path.read_text, "utf-8")
+        try:
+            return await asyncio.to_thread(path.read_text, "utf-8")
+        except (OSError, UnicodeDecodeError):
+            return None
 
     def forgotten_headers(self) -> list[MemoryHeader]:
         """已遗忘文件的头信息（同步方法，不缓存：这份清单只给管理页与搜索）。"""
@@ -1275,8 +1299,15 @@ class ScopeStore:
     def _move_to_forgotten(self, name: str, now: float, actor: str = "") -> bool:
         src = self.root / name
         dst = self._forgotten_path(name)
+        # 审计只记哈希；非 UTF-8 文件照样要能遗忘，不能因解码失败卡住整轮扫描
         try:
             content = src.read_text("utf-8")
+            before_sha1 = history.content_sha1(content)
+        except UnicodeDecodeError:
+            try:
+                before_sha1 = hashlib.sha1(src.read_bytes()).hexdigest()
+            except OSError:
+                return False
         except OSError:
             return False
         try:
@@ -1294,7 +1325,7 @@ class ScopeStore:
             name,
             actor,
             "",
-            history.content_sha1(content),
+            before_sha1,
             "",
             ts=now,
         )
@@ -1328,6 +1359,17 @@ class ScopeStore:
             return WriteReport(False, f"同名记忆 {name} 仍在册，无法恢复；请先处理在册的那份")
         try:
             content = src.read_text("utf-8")
+            description = parse_description(content)[0]
+            after_sha1 = history.content_sha1(content)
+        except UnicodeDecodeError:
+            # 非 UTF-8 文件按原始字节移回在册（它是被人放进来或损坏的，
+            # 插件不擅自改写）；索引行只能记文件名，不解析正文
+            description = ""
+            try:
+                after_sha1 = hashlib.sha1(src.read_bytes()).hexdigest()
+            except OSError as exc:
+                return WriteReport(False, f"恢复 {name} 失败：{exc}")
+        try:
             src.replace(dst)
         except OSError as exc:
             return WriteReport(False, f"恢复 {name} 失败：{exc}")
@@ -1337,11 +1379,10 @@ class ScopeStore:
             actor,
             "",
             "",
-            history.content_sha1(content),
+            after_sha1,
             ts=now,
         )
         self._drop_header(name)
-        description, _ = parse_description(content)
         self._sync_index_line(name, description)
         with self._usage_lock:
             data = self._load_usage()
@@ -1438,8 +1479,15 @@ class ScopeStore:
             if content is None:
                 return WriteReport(False, f"没有这个历史版本：{version}")
             path = self.root / name
+            current: str | None = None
+            current_bytes: bytes | None = None
             try:
                 current = await asyncio.to_thread(self._read_for_update, path)
+            except UnicodeDecodeError:
+                # 在册文件不是 UTF-8：按原始字节留一份历史，再用这一版覆盖
+                current_bytes = await asyncio.to_thread(
+                    self._read_bytes_if_exists, path
+                )
             except OSError as exc:
                 return WriteReport(False, f"读取现有 {name} 失败，未恢复：{exc}")
             saved = None
@@ -1454,17 +1502,37 @@ class ScopeStore:
                     )
                 except OSError as exc:
                     return WriteReport(False, f"当前版本保存失败，未恢复：{exc}")
+            elif current_bytes is not None:
+                try:
+                    saved = await asyncio.to_thread(
+                        self._history.save_version,
+                        name,
+                        current_bytes,
+                        history.ACTION_RESTORE,
+                        actor,
+                    )
+                except OSError as exc:
+                    return WriteReport(False, f"当前版本保存失败，未恢复：{exc}")
             await asyncio.to_thread(self._discard_forgotten_file, name, actor)
             try:
                 await asyncio.to_thread(self._write_atomic, path, content)
             except OSError as exc:
                 return WriteReport(False, f"恢复 {name} 失败：{exc}")
+            before_sha1 = (
+                history.content_sha1(current)
+                if current is not None
+                else (
+                    hashlib.sha1(current_bytes).hexdigest()
+                    if current_bytes is not None
+                    else ""
+                )
+            )
             self._history.record(
                 history.ACTION_RESTORE,
                 name,
                 actor,
                 "",
-                history.content_sha1(current) if current is not None else "",
+                before_sha1,
                 history.content_sha1(content),
                 ts=saved.ts if saved is not None else None,
             )
@@ -1493,7 +1561,16 @@ class ScopeStore:
         async with self._lock:
             info = await asyncio.to_thread(self._history.trash_info, entry)
             content = await asyncio.to_thread(self._history.read_trash, entry)
-            if info is None or content is None:
+            if info is None:
+                return WriteReport(False, "回收站里没有这个条目")
+            if content is None:
+                # 非 UTF-8 条目：不能拿替换字符改写原字节，按文本恢复不安全
+                if await asyncio.to_thread(self._history.read_trash_bytes, entry) is not None:
+                    return WriteReport(
+                        False,
+                        f"回收站里的 {info.file} 不是 UTF-8 文本，无法按文本恢复；"
+                        "可以彻底删除这条回收站记录，或从回收站目录手工取回原始字节",
+                    )
                 return WriteReport(False, "回收站里没有这个条目")
             # 其他写入路径都拒绝 MEMORY.md；回收站文件名正则本身允许它
             if info.file.lower() == INDEX_FILENAME.lower():
@@ -1501,8 +1578,14 @@ class ScopeStore:
                     False, "MEMORY.md 不能从回收站恢复，请在「索引」页处理"
                 )
             path = self.root / info.file
+            current: str | None = None
+            current_bytes: bytes | None = None
             try:
                 current = await asyncio.to_thread(self._read_for_update, path)
+            except UnicodeDecodeError:
+                current_bytes = await asyncio.to_thread(
+                    self._read_bytes_if_exists, path
+                )
             except OSError as exc:
                 return WriteReport(
                     False, f"读取现有 {info.file} 失败，未恢复：{exc}"
@@ -1519,6 +1602,17 @@ class ScopeStore:
                     )
                 except OSError as exc:
                     return WriteReport(False, f"当前版本保存失败，未恢复：{exc}")
+            elif current_bytes is not None:
+                try:
+                    saved = await asyncio.to_thread(
+                        self._history.save_version,
+                        info.file,
+                        current_bytes,
+                        history.ACTION_RESTORE,
+                        actor,
+                    )
+                except OSError as exc:
+                    return WriteReport(False, f"当前版本保存失败，未恢复：{exc}")
             await asyncio.to_thread(self._discard_forgotten_file, info.file, actor)
             try:
                 await asyncio.to_thread(
@@ -1526,12 +1620,21 @@ class ScopeStore:
                 )
             except OSError as exc:
                 return WriteReport(False, f"恢复 {info.file} 失败：{exc}")
+            before_sha1 = (
+                history.content_sha1(current)
+                if current is not None
+                else (
+                    hashlib.sha1(current_bytes).hexdigest()
+                    if current_bytes is not None
+                    else ""
+                )
+            )
             self._history.record(
                 history.ACTION_RESTORE,
                 info.file,
                 actor,
                 "",
-                history.content_sha1(current) if current is not None else "",
+                before_sha1,
                 history.content_sha1(content),
                 ts=saved.ts if saved is not None else None,
             )
@@ -2290,13 +2393,31 @@ class MemoryStore:
         """某个平台的人物记忆：一人一个文件，该平台的所有群聊和私聊共享。
         按平台分目录是因为不同平台的数字 ID 可能撞号。
 
-        共享人物空间的成员统一指向 people/_shared/；成员表只在这一处生效，
-        main.py、管理页、导出导入与整理的调用点都自动走同一套映射。
+        共享人物空间的成员统一指向 people/_shared/；成员表只在 people_key()
+        这一处生效（people_scope 也走它），main.py、管理页、导出导入、整理
+        与迁移的调用点都自动走同一套映射。
         safe_key 的输出不会以 _ 开头，_shared 不会和任何平台目录撞名。
         """
+        return self._scope(self.base_dir / "people" / self.people_key(platform))
+
+    def people_key(self, platform: str) -> str:
+        """平台 ID 对应的人物目录名：共享成员统一 _shared，否则 safe_key。
+
+        迁移脚本、平台改名迁移与「迁移到某个平台的人物记忆」需要目录名而不
+        是 ScopeStore，也走这里，避免绕过共享映射把数据搬进已经停用的旧目录。
+        """
         if self._shared_people.is_member(platform):
-            return self._scope(self.base_dir / "people" / sharing.SHARED_KEY)
-        return self._scope(self.base_dir / "people" / safe_key(platform or "unknown"))
+            return sharing.SHARED_KEY
+        return safe_key(platform or "unknown")
+
+    def is_shared_people_scope(self, store: ScopeStore) -> bool:
+        """这个作用域是否就是共享人物目录（权限判定 fail-closed 用）。"""
+        try:
+            return store.root.resolve() == (
+                self.base_dir / "people" / sharing.SHARED_KEY
+            ).resolve()
+        except OSError:
+            return False
 
     def people_scope_by_key(self, key: str) -> ScopeStore | None:
         """按目录名取人物作用域；目录名不合法返回 None。"""
@@ -2346,6 +2467,16 @@ class MemoryStore:
             removed = store.cleanup_history(now)
             if removed:
                 result[str(store.root)] = removed
+        # 整作用域归档（.trash-scopes）同样是删除后的字节，按回收站保留期清理
+        archives = history.cleanup_scope_archives(
+            self.base_dir / history.SCOPE_TRASH_DIRNAME,
+            self.trash_keep_days,
+            now,
+        )
+        if archives:
+            result[str(self.base_dir / history.SCOPE_TRASH_DIRNAME)] = {
+                "archives": archives
+            }
         return result
 
 

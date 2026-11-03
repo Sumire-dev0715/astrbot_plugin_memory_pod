@@ -859,13 +859,18 @@ class MemoryDashboard:
     async def file_purge(self) -> dict:
         """彻底删除在册/已遗忘文件及其全部历史、回收站条目（要求遗忘时用）。"""
         body = await _body()
-        _, key, store = self._scope_from_body(body)
+        scope, key, store = self._scope_from_body(body)
         name = self._file_name(body.get("file"))
         report = await store.delete_file_completely(
             name, actor=history.ACTOR_WEBUI
         )
         if not report.ok:
             raise ApiError(report.message)
+        # 整理记录与待确认方案里也留着改动前原文；彻底删除要一并清掉，
+        # 否则撤销整理会把刚删掉的正文写回来
+        await asyncio.to_thread(
+            self.plugin._tidy.remove_file, tidy.scope_id(scope, key), name
+        )
         self._changed(key)
         return _ok({"file": name}, report.message)
 
@@ -1287,9 +1292,12 @@ class MemoryDashboard:
                 raise ApiError("会话标识的格式是 平台ID:消息类型:会话ID")
             dst = transfer.ScopeRef(SCOPE_SESSION, memstore.safe_key(dst_umo))
         elif target.get("scope") == SCOPE_PEOPLE and target.get("platform"):
-            # 还没有人物记忆的平台：按平台 ID 算出目录名
+            # 还没有人物记忆的平台：按平台 ID 算出目录名；共享成员统一进
+            # _shared，和 MemoryStore.people_scope() 使用同一个映射入口
             platform = transfer.check_platform(target.get("platform"))
-            dst = transfer.ScopeRef(SCOPE_PEOPLE, memstore.safe_key(platform))
+            dst = transfer.ScopeRef(
+                SCOPE_PEOPLE, self.plugin._store.people_key(platform)
+            )
         else:
             dst = self._ref(target)
         raw_files = body.get("files")

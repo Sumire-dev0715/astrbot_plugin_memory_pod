@@ -298,6 +298,39 @@ class Recalled:
     shared: bool = False
 
 
+@dataclass(frozen=True)
+class RecallSection:
+    """召回块里实际附上的一条：正文是否被单条上限截断由 truncated 标明。
+
+    调用方据此判断"这条全文真的给模型看了"；不要再去块文本里找标题，
+    别的文件正文里可以伪造同样的标题行。
+    """
+
+    item: Recalled
+    content: str
+    truncated: bool
+
+
+def plan_recall(items: list[Recalled]) -> list[RecallSection]:
+    """按字符预算决定哪些条目真正进入召回块（超预算的整条略去）。
+
+    单条超长只截断该条；预算按截断后的正文计算。build_recall_block 与
+    "哪些文件算看过"都从这份结果出发，两边不会跑偏。
+    """
+    sections: list[RecallSection] = []
+    used = 0
+    for item in items:
+        content = item.content.strip()
+        truncated = len(content) > FILE_CHARS
+        if truncated:
+            content = content[:FILE_CHARS] + "\n…（已截断，完整内容用 memory_read 读取）"
+        if sections and used + len(content) > TOTAL_CHARS:
+            break
+        used += len(content)
+        sections.append(RecallSection(item, content, truncated))
+    return sections
+
+
 def freshness_note(written: float, now: float | None = None) -> str:
     """超过一天的记忆附上时效提醒；今天、昨天写的不打扰。"""
     days = age_days(written, now)
@@ -314,18 +347,14 @@ def build_recall_block(
 ) -> str | None:
     """拼召回块；超出字符预算的条目整条略去（截断只发生在单条内部）。"""
     sections: list[str] = []
-    used = 0
-    for item in items:
-        content = item.content.strip()
-        if len(content) > FILE_CHARS:
-            content = content[:FILE_CHARS] + "\n…（已截断，完整内容用 memory_read 读取）"
-        if sections and used + len(content) > TOTAL_CHARS:
-            break
-        used += len(content)
+    for section in plan_recall(items):
+        item = section.item
         shared = "多个机器人共享，" if item.shared else ""
         title = f"### {item.ref}（{shared}{age_label(item.written, now)}写入）"
         note = freshness_note(item.written, now)
-        sections.append("\n".join(part for part in (title, note, content) if part))
+        sections.append(
+            "\n".join(part for part in (title, note, section.content) if part)
+        )
     if not sections:
         return None
     body = "\n\n".join(sections)

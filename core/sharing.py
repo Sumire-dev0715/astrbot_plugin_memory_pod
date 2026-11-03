@@ -53,6 +53,14 @@ APPEND_EDIT_REFUSAL = (
     "你在共享人物空间里只有追加权限（append）：memory_edit 只能用 mode=append。"
     "要修改已有文字请追加一条更正，或让有 edit 权限的机器人处理。"
 )
+# 目录映射按 unified_msg_origin 的平台前缀，权限按事件的 platform_id：
+# 两者对不上或取不到 platform_id 时无法确认成员身份，共享目录一律拒绝写入。
+# 宁可暂时挡住一次合法写入，也不能让 read/append 级成员借身份缺失整文件改写。
+IDENTITY_REFUSAL = (
+    "无法确认当前机器人在共享人物空间里的身份（取不到事件 platform_id，"
+    "或它不在共享成员列表里），为避免越权，这次没有写入 people。"
+    "请稍后重试；如持续出现，请检查 AstrBot 适配器与 shared_people_bots 配置。"
+)
 
 
 def version_conflict_message(file: str) -> str:

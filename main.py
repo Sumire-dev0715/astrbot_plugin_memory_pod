@@ -608,6 +608,61 @@ class MemoryBeyondPlugin(Star):
         """共享人物空间里这个机器人的权限；非成员返回 None（不受限制）。"""
         return self._sharing.permission(platform_id)
 
+    def _people_access(
+        self, event: AstrMessageEvent, store: memstore.ScopeStore
+    ) -> tuple[str, str | None, str]:
+        """共享人物空间的 (actor, 权限, 拒绝原因)。
+
+        目录映射按 unified_msg_origin 的平台前缀，写权限按事件的 platform_id。
+        platform_id 取不到、或它不是成员时无法确认身份，共享目录一律
+        fail-closed；非成员自己的 people 目录不受影响（权限仍为 None）。
+        """
+        actor = self._event_actor(event)
+        if not self._store.is_shared_people_scope(store):
+            return actor, self._people_permission(actor), ""
+        permission = self._sharing.permission(actor)
+        if permission is None:
+            return actor, None, sharing.IDENTITY_REFUSAL
+        return actor, permission, ""
+
+    def _can_restore_people(
+        self, actor: str, store: memstore.ScopeStore
+    ) -> bool:
+        """能否把一条已遗忘的人物记忆恢复在册。
+
+        共享空间里只有 edit 级成员能改变目录状态；read / append 级成员
+        读到遗忘副本只返回内容。身份不明（非成员）同样不能恢复。
+        """
+        if not self._store.is_shared_people_scope(store):
+            return True
+        return self._sharing.permission(actor) == sharing.PERMISSION_EDIT
+
+    def _can_maintain_people(
+        self, umo: str, store: memstore.ScopeStore
+    ) -> bool:
+        """自动遗忘扫描能否处理这个人物作用域。
+
+        共享空间里只有 edit 级成员或非成员自己的目录触发扫描；append / read
+        级成员只读不写，不该因为他们的会话让共享文件对所有人退出索引。
+        """
+        if not self._store.is_shared_people_scope(store):
+            return True
+        return self._people_permission(self._platform_of(umo)) in (
+            None,
+            sharing.PERMISSION_EDIT,
+        )
+
+    def _shared_people_actor(self, umo: str, store: memstore.ScopeStore) -> str:
+        """共享人物作用域对应的机器人 platform_id；不是共享空间返回空串。
+
+        提取写盘不在工具调用现场，没有事件的 platform_id，用 UMO 前缀定位
+        同一个成员身份，保证 SeenVersions 的键与工具层一致。
+        """
+        if not self._store.is_shared_people_scope(store):
+            return ""
+        platform_id = self._platform_of(umo)
+        return platform_id if self._sharing.is_member(platform_id) else ""
+
     def _can_extract_people(self, umo: str) -> bool:
         """后台 / 压缩联动提取能否写 people。
 
@@ -1055,14 +1110,12 @@ class MemoryBeyondPlugin(Star):
                 await asyncio.to_thread(stores[label].note_used, names)
             block = recall.build_recall_block(items, prompts.DATA_NOTICE)
             if block:
-                # 召回实际附上的全文才算"看过"：被预算挤掉或按长度截断的不算，
-                # 之后的整文件覆盖仍要求先 memory_read 取回完整内容
-                for item in items:
-                    if (
-                        item.shared
-                        and len(item.content.strip()) <= recall.FILE_CHARS
-                        and f"### {item.ref}（" in block
-                    ):
+                # 召回实际附上的全文才算"看过"：以拼块时的同一份计划为准，
+                # 被预算挤掉或按长度截断的不算。不再去块文本里找
+                # "### ref（" —— 别的记忆正文可以伪造相同的标题行。
+                for section in recall.plan_recall(items):
+                    item = section.item
+                    if item.shared and not section.truncated:
                         scope, _, file = item.ref.partition("/")
                         await self._note_shared_seen(
                             event, scope, stores[scope], file, item.content
@@ -1080,16 +1133,14 @@ class MemoryBeyondPlugin(Star):
     ) -> None:
         """身份必选的人物文件若已被遗忘，这个人又出现了——先恢复再召回。
 
-        read 级成员不能恢复共享人物文件（恢复会把文件移回在册，属于写操作），
-        已遗忘的文件继续保持遗忘，等有写权限的机器人或管理员处理。
+        共享人物空间里只有 edit 级成员能恢复（恢复会把文件移回在册，对
+        所有成员可见）；read / append 级成员与身份不明的请求都跳过，已遗忘
+        的文件继续保持遗忘，等有写权限的机器人或管理员处理。
         """
-        read_only_people = (
-            self._people_permission(actor) == sharing.PERMISSION_READ
-        )
         for label, store in scopes:
             if label not in recall.FORCED_SCOPES:
                 continue
-            if label == "people" and read_only_people:
+            if label == "people" and not self._can_restore_people(actor, store):
                 continue
             for name in forced:
                 if store.exists(name) or not store.has_forgotten(name):
@@ -1116,7 +1167,11 @@ class MemoryBeyondPlugin(Star):
         if self._global_on():
             targets.append((None, self._global_scope()))
         if self._people_on():
-            targets.append(("", self._people_scope(umo)))
+            people_store = self._people_scope(umo)
+            # 共享空间里 append / read 级成员不触发遗忘扫描：那会把文件对所有
+            # 成员移出索引，属于写操作
+            if self._can_maintain_people(umo, people_store):
+                targets.append(("", people_store))
         due = [
             (key, store)
             for key, store in targets
@@ -1307,9 +1362,14 @@ class MemoryBeyondPlugin(Star):
         scope: memstore.ScopeStore,
         transcript: str,
         people: memstore.ScopeStore | None = None,
+        seen_actor: str = "",
     ) -> tuple[str, dict[str, set[str]]]:
         """抽取前给模型看的已有记忆：相关的附全文（可合并改写），其余只列名字；
         人物记忆开启时，对话里说话人的人物文件也附全文（文件名前缀 people/）。
+
+        seen_actor 非空时，附上全文的人物文件同时记进 SeenVersions：这些
+        内容模型确实看过，真正落盘时的共享版本检查据此放行；期间被别的
+        机器人改过则拒绝覆盖。
 
         返回 (提示词片段, 各作用域允许被改写的文件名集合)。
         """
@@ -1347,6 +1407,10 @@ class MemoryBeyondPlugin(Star):
                     )
                 )
                 updatable["people"].add(name)
+                if seen_actor:
+                    await asyncio.to_thread(
+                        self._seen.note, seen_actor, name, content
+                    )
         listed = [
             prompts.ExistingMemory(h.file, h.description)
             for h in headers
@@ -1375,10 +1439,15 @@ class MemoryBeyondPlugin(Star):
 
         已存在的文件只有在抽取时附过全文（模型据此合并）才允许改写，
         其余同名条目跳过——看不到原文就覆盖会丢内容。
+
+        共享人物空间里提取写入沿用工具层的覆盖前版本检查：提示词读到的全文
+        到真正写入之间若有别的机器人改过，宁可跳过这一条，也不整文件覆盖。
         """
         stores = {"session": self._store.session_scope(umo)}
+        shared_people_actor = ""
         if people is not None:
             stores["people"] = people
+            shared_people_actor = self._shared_people_actor(umo, people)
         stored = 0
         for draft in drafts:
             label = draft.scope if draft.scope in stores else "session"
@@ -1388,12 +1457,36 @@ class MemoryBeyondPlugin(Star):
                     draft.filename
                 ):
                     continue
+                expected = None
+                if label == "people" and shared_people_actor:
+                    expected = await asyncio.to_thread(
+                        self._seen.seen, shared_people_actor, draft.filename
+                    )
                 report = await scope.write(
-                    draft.filename, prompts.render_memory_file(draft), actor=actor
+                    draft.filename,
+                    prompts.render_memory_file(draft),
+                    actor=actor,
+                    expected_sha1=expected,
                 )
                 if report.ok:
                     # 索引行由 write 按 frontmatter description 自动同步
                     stored += 1
+                    if label == "people" and shared_people_actor:
+                        # 自己刚写的版本算看过；同一批里再改同一文件不会被误拦
+                        written = await scope.read(draft.filename)
+                        if written is not None:
+                            await asyncio.to_thread(
+                                self._seen.note,
+                                shared_people_actor,
+                                draft.filename,
+                                written,
+                            )
+                elif label == "people" and shared_people_actor:
+                    logger.info(
+                        LOG_PREFIX
+                        + f"{source}跳过共享人物记忆 {draft.filename}："
+                        + report.message
+                    )
             except OSError as exc:
                 logger.warning(
                     LOG_PREFIX + f"{source}写入记忆 {label}/{draft.filename} 失败：{exc}"
@@ -1446,7 +1539,10 @@ class MemoryBeyondPlugin(Star):
             people_on = people is not None
             scope = self._store.session_scope(umo)
             existing, updatable = await self._existing_for_extract(
-                scope, transcript, people
+                scope,
+                transcript,
+                people,
+                self._shared_people_actor(umo, people) if people is not None else "",
             )
             prompt = prompts.build_background_extract_prompt(
                 transcript, existing, people_on
@@ -1511,6 +1607,7 @@ class MemoryBeyondPlugin(Star):
                 self._store.session_scope(umo),
                 transcript,
                 people,
+                self._shared_people_actor(umo, people) if people is not None else "",
             )
         max_chars = max(
             200, self._int("summary_max_chars", prompts.SUMMARY_MAX_CHARS_DEFAULT)
@@ -1929,19 +2026,25 @@ class MemoryBeyondPlugin(Star):
         if store is None:
             return refused
         file = (file or "").strip()
-        permission = (
-            self._people_permission(self._event_actor(event))
-            if scope == "people"
-            else None
-        )
+        permission = None
+        identity_unknown = False
+        if scope == "people":
+            _, permission, identity_refusal = self._people_access(event, store)
+            identity_unknown = bool(identity_refusal)
         content = await store.read(file)
         restored = False
         forgotten_read = False
+        forgotten_mode = ""
         if content is None and self._forgetting_on() and store.has_forgotten(file):
-            if permission == sharing.PERMISSION_READ:
-                # read 级成员不能把文件移回在册（那是一次写操作），只读遗忘副本
+            if (
+                permission in (sharing.PERMISSION_READ, sharing.PERMISSION_APPEND)
+                or identity_unknown
+            ):
+                # read / append 级成员（以及身份不明的请求）不能把文件移回
+                # 在册：恢复是一次对所有成员可见的写操作，只读遗忘副本
                 content = await store.read_forgotten(file)
                 forgotten_read = content is not None
+                forgotten_mode = permission or ""
             else:
                 # 模型主动读一条已遗忘的记忆：读取即恢复在册
                 report = await store.restore(file, actor=self._event_actor(event))
@@ -1967,10 +2070,21 @@ class MemoryBeyondPlugin(Star):
             ) or store.mtime(file)
             notes = []
             if forgotten_read:
-                notes.append(
-                    "（这条记忆当前处于已遗忘状态；你在这个共享人物空间里只有读取权限，"
-                    "只返回内容，未恢复在册）"
-                )
+                if forgotten_mode == sharing.PERMISSION_APPEND:
+                    notes.append(
+                        "（这条记忆当前处于已遗忘状态；你在共享人物空间里只有追加权限，"
+                        "只返回内容，未恢复在册）"
+                    )
+                elif identity_unknown:
+                    notes.append(
+                        "（这条记忆当前处于已遗忘状态；无法确认你在共享人物空间的"
+                        "身份，只返回内容，未恢复在册）"
+                    )
+                else:
+                    notes.append(
+                        "（这条记忆当前处于已遗忘状态；你在这个共享人物空间里只有"
+                        "读取权限，只返回内容，未恢复在册）"
+                    )
             if restored:
                 notes.append("（这条记忆此前因长期未用已被遗忘，刚刚已恢复在册）")
             note = recall.freshness_note(written) if written else ""
@@ -2005,7 +2119,12 @@ class MemoryBeyondPlugin(Star):
         if scope == "people" and not memstore.is_person_file(file):
             return PEOPLE_FILE_RULE
         actor = self._event_actor(event)
-        permission = self._people_permission(actor) if scope == "people" else None
+        if scope == "people":
+            actor, permission, identity_refusal = self._people_access(event, store)
+            if identity_refusal:
+                return identity_refusal
+        else:
+            permission = None
         if delete:
             # append 与 read 级成员都不能删除共享人物记忆
             refusal = sharing.write_refusal(
@@ -2026,14 +2145,12 @@ class MemoryBeyondPlugin(Star):
             )
             if refusal:
                 return refusal
+            # 共享空间的版本检查放进 store.write 的锁里：先看自己最近读过的
+            # 版本，空串表示没看过——新建放行，覆盖（含并发新建时被对方抢先
+            # 写入）由 store 持锁拒绝。这样并发新建不会绕开检查。
             expected = None
-            if scope == "people" and self._sharing.is_member(actor) and existed:
-                expected = await asyncio.to_thread(
-                    self._seen.seen, actor, file
-                )
-                if not expected:
-                    # 没有可比较的版本：先读当前内容再覆盖
-                    return sharing.version_conflict_message(file)
+            if scope == "people" and self._store.is_shared_people_scope(store):
+                expected = await asyncio.to_thread(self._seen.seen, actor, file)
             report = await store.write(
                 file,
                 content,
@@ -2098,27 +2215,25 @@ class MemoryBeyondPlugin(Star):
         mode = (mode or "replace").strip().lower()
         if mode not in ("replace", "append", "section"):
             return "mode 只能是 replace（默认）、append 或 section。"
-        permission = (
-            self._people_permission(self._event_actor(event))
-            if scope == "people"
-            else None
-        )
+        if scope == "people":
+            actor, permission, identity_refusal = self._people_access(event, store)
+            if identity_refusal:
+                return identity_refusal
+        else:
+            actor, permission = self._event_actor(event), None
         refusal = sharing.edit_refusal(permission, mode)
         if refusal:
             return refusal
-        actor = self._event_actor(event)
         expected = None
         if (
             scope == "people"
-            and self._sharing.is_member(actor)
+            and self._store.is_shared_people_scope(store)
             and mode == "section"
             and (file or "").strip()
         ):
-            # section 不是逐字替换，可能基于过期内容整节覆盖；
-            # 共享空间里沿用 memory_write 的覆盖前版本检查
+            # section 不是逐字替换，可能基于过期内容整节覆盖；共享空间里沿用
+            # memory_write 的覆盖前版本检查。空串表示没读过，锁内会拒绝。
             expected = await asyncio.to_thread(self._seen.seen, actor, file)
-            if not expected:
-                return sharing.version_conflict_message(file)
         report = await store.edit(
             file,
             old_text,
@@ -2315,7 +2430,18 @@ class MemoryBeyondPlugin(Star):
                 "可缩小 scope 或增加搜索词）"
             )
         if forgotten:
-            text += "\n标注「已遗忘」的是长期没用到而移出索引的记忆，用 memory_read 读取即自动恢复。"
+            text += "\n标注「已遗忘」的是长期没用到而移出索引的记忆，用 memory_read 读取即自动恢复"
+            permission = (
+                self._people_permission(self._event_actor(event))
+                if any(label == "people" for label, _ in shown_forgotten)
+                else None
+            )
+            if permission in (sharing.PERMISSION_READ, sharing.PERMISSION_APPEND):
+                text += (
+                    "；其中共享人物记忆你只有读取/追加权限，memory_read 只返回内容，"
+                    "不会恢复在册"
+                )
+            text += "。"
         return text
 
     @staticmethod

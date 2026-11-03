@@ -17,7 +17,9 @@ forgotten/ 下已遗忘的）和使用统计原样复制过去，写入时间与
 落盘，会按 3.1 节在 _shared/.audit.jsonl 记一行 actor=transfer 的审计；
 共享目录里原本没有这份文件，所以不需要额外的历史版本。
 
-脚本只打印条数、来源和冲突文件名，不打印任何记忆正文。
+脚本只打印文件名、条数、来源和冲突，不打印任何记忆正文。预演会列出计划
+复制的文件名；--apply 之前会再次提醒：规格要求先人工确认 user-1085188139.md
+怎么拆，脚本不会拆分文件里的关系 / 健康 / 性 / 家庭等 session 私有内容。
 """
 
 from __future__ import annotations
@@ -204,6 +206,16 @@ async def _run(args: argparse.Namespace) -> int:
     if not plan.files:
         print("没有找到可迁移的人物记忆")
         return 0
+    if not args.apply:
+        names = "、".join(entry.name for entry in plan.entries) or "（无）"
+        print(f"计划复制的文件（{len(plan.entries)} 个）：{names}")
+    else:
+        print(
+            "注意：迁移按整份 user-*.md 复制，不会拆分文件内容。"
+            "若某个文件里有与某个机器人的关系、健康、性、家庭矛盾等只应在"
+            "原私聊可见的段落，请先停止 --apply，按 PLAN 第 6 节人工拆分到"
+            "对应会话的 session；复制之后所有共享成员机器人都能读到整份文件。"
+        )
 
     results = await target.import_files(
         plan.entries,

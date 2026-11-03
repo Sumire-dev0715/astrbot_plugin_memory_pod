@@ -123,10 +123,13 @@ def looks_like_manual_backup(name: str) -> bool:
     return stem.startswith("zz-") or any(marker in stem for marker in _BACKUP_MARKERS)
 
 
-def _write_atomic(path: Path, content: str) -> None:
+def _write_atomic(path: Path, content: str | bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(content, encoding="utf-8")
+    if isinstance(content, bytes):
+        tmp.write_bytes(content)
+    else:
+        tmp.write_text(content, encoding="utf-8")
     tmp.replace(path)
 
 
@@ -281,13 +284,17 @@ class HistoryLog:
     def save_version(
         self,
         file: str,
-        content: str,
+        content: str | bytes,
         action: str,
         actor: str = "",
         source: str = "",
         ts: float | None = None,
     ) -> HistoryVersion:
-        """把旧内容存成一个历史版本；返回版本信息（审计由调用方在写完后记）。"""
+        """把旧内容存成一个历史版本；返回版本信息（审计由调用方在写完后记）。
+
+        content 可以是 bytes：非 UTF-8 的在册文件被覆盖或恢复前，也按原始
+        字节留一份副本，不因解码失败丢掉旧内容。
+        """
         ts = _now() if ts is None else ts
         ts = round(ts * 1000) / 1000
         folder = self.history_root / file
@@ -303,13 +310,18 @@ class HistoryLog:
                 st = path.stat()
             except OSError:
                 st = None
+        size = (
+            len(content)
+            if isinstance(content, bytes)
+            else len(content.encode("utf-8"))
+        )
         return HistoryVersion(
             file=file,
             version=version,
             action=action,
             ts=ts,
             mtime=st.st_mtime if st else ts,
-            size=st.st_size if st else len(content.encode("utf-8")),
+            size=st.st_size if st else size,
             actor=actor,
             source=source,
         )
@@ -369,7 +381,8 @@ class HistoryLog:
         path = self.history_root / file / f"{version}.md"
         try:
             return path.read_text("utf-8") if path.is_file() else None
-        except OSError:
+        except (OSError, UnicodeDecodeError):
+            # 非 UTF-8 的历史副本（记录非文本文件时按字节留的）不能当文本查看
             return None
 
     def remove_versions(self, file: str) -> int:
@@ -476,6 +489,19 @@ class HistoryLog:
         path = self.trash_root / entry
         try:
             return path.read_text("utf-8") if path.is_file() else None
+        except (OSError, UnicodeDecodeError):
+            # 非 UTF-8 条目按字节保留在回收站里：不抛异常，管理页可以删除；
+            # 恢复时由调用方给出明确说明，不拿替换字符改写原文件
+            return None
+
+    def read_trash_bytes(self, entry: str) -> bytes | None:
+        """按原始字节读回收站条目（非 UTF-8 文件的查看/恢复判断用）。"""
+        entry = self._trash_name(entry)
+        if not entry:
+            return None
+        path = self.trash_root / entry
+        try:
+            return path.read_bytes() if path.is_file() else None
         except OSError:
             return None
 
@@ -710,3 +736,42 @@ def move_scope(
         },
     )
     return dest
+
+
+def cleanup_scope_archives(
+    scopes_dir: Path, keep_days: int, now: float | None = None
+) -> int:
+    """按回收站保留期清理 .trash-scopes 里的作用域归档，返回删掉的数量。
+
+    purge（/mb_reset、清除会话）把整个目录移到归档，里面是在册文件、历史
+    与回收站；这些字节同样受 trash_keep_days 约束。0 表示永久保留。
+    名称日期非法或不是归档的目录一律不碰。
+    """
+    try:
+        keep_days = max(0, int(keep_days))
+    except (TypeError, ValueError):
+        return 0
+    if keep_days <= 0 or not scopes_dir.is_dir():
+        return 0
+    now = _now() if now is None else now
+    cutoff = now - keep_days * DAY
+    removed = 0
+    try:
+        entries = list(scopes_dir.iterdir())
+    except OSError:
+        return 0
+    for path in entries:
+        if not path.is_dir():
+            continue
+        match = _ARCHIVE_NAME_RE.match(path.name)
+        if match is None:
+            continue
+        ts = _parse_stamp(match.group(2))
+        if ts is None or ts >= cutoff:
+            continue
+        shutil.rmtree(path, ignore_errors=True)
+        if not path.exists():
+            removed += 1
+    _rmdir_if_empty(scopes_dir)
+    return removed
+
