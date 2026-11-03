@@ -1074,46 +1074,33 @@ class MemoryBeyondPlugin(Star):
                     candidates.append(recall.Candidate(label, header))
             if not candidates:
                 return None
-            chosen = None
+            model_choice = None
             if mode == "llm" and query.strip():
                 # 人物文件只走身份必选，不让模型从别的群的人里挑
-                chosen = await self._select_by_model(
+                model_choice = await self._select_by_model(
                     umo, [c for c in candidates if c.scope != "people"], query, limit
                 )
-                if chosen is not None:
-                    keyword_forced = recall.select_by_keywords(
-                        candidates, "", forced, limit
-                    )
-                    merged = keyword_forced + [c for c in chosen if c not in keyword_forced]
-                    chosen = merged[:limit]
-            if chosen is None:
-                chosen = recall.select_by_keywords(candidates, query, forced, limit)
             platform_id = self._event_actor(event)
-            shared_people = self._sharing.is_member(platform_id)
-            items: list[recall.Recalled] = []
-            used: dict[str, list[str]] = {}
-            for cand in chosen:
-                content = await stores[cand.scope].read(cand.header.file)
-                if content:
-                    is_shared = shared_people and cand.scope == "people"
-                    items.append(
-                        recall.Recalled(
-                            cand.ref,
-                            content,
-                            cand.header.updated,
-                            shared=is_shared,
-                        )
-                    )
-                    used.setdefault(cand.scope, []).append(cand.header.file)
+            # 挑选、读文件、截断与渲染统一在 core.recall 里，测量脚本共用
+            plan = await recall.assemble_recall(
+                stores,
+                candidates,
+                query=query,
+                forced_files=forced,
+                limit=limit,
+                data_notice=prompts.DATA_NOTICE,
+                model_choice=model_choice,
+                shared_people=self._sharing.is_member(platform_id),
+            )
             # 被召回就算用到：使用统计是遗忘与整理的依据
-            for label, names in used.items():
+            for label, names in plan.used.items():
                 await asyncio.to_thread(stores[label].note_used, names)
-            block = recall.build_recall_block(items, prompts.DATA_NOTICE)
+            block = plan.block
             if block:
                 # 召回实际附上的全文才算"看过"：以拼块时的同一份计划为准，
                 # 被预算挤掉或按长度截断的不算。不再去块文本里找
                 # "### ref（" —— 别的记忆正文可以伪造相同的标题行。
-                for section in recall.plan_recall(items):
+                for section in plan.sections:
                     item = section.item
                     if item.shared and not section.truncated:
                         scope, _, file = item.ref.partition("/")

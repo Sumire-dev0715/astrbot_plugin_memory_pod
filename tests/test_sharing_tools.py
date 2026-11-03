@@ -216,6 +216,18 @@ def person_file(name="user-123", body="身份：测试用户，工程师"):
     )
 
 
+def note_file(name="note", description="合成记忆", body="合成正文"):
+    return (
+        "---\n"
+        f"name: {name}\n"
+        f"description: {description}\n"
+        "metadata:\n"
+        "  type: user\n"
+        "---\n\n"
+        f"{body}\n"
+    )
+
+
 def make_plugin(tmp_path, members):
     plugin = object.__new__(main.MemoryBeyondPlugin)
     plugin.context = FakeContext()
@@ -530,6 +542,73 @@ def test_recall_only_counts_the_full_text_it_actually_attaches(tmp_path):
         )
     )
     assert result == pkg_sharing.version_conflict_message("user-123.md")
+
+
+def test_recall_message_delegates_to_core_pipeline(tmp_path, monkeypatch):
+    """main 的 _recall_message 把挑选、读文件、截断、渲染交给 core.recall。"""
+    plugin = make_plugin(tmp_path, [])
+    event = FakeEvent("Bot-A", sender_id="123")
+    umo = event.unified_msg_origin
+    session = plugin._store.session_scope(umo)
+    run(
+        session.write(
+            "weekend-game.md",
+            note_file("weekend-game", "每周六晚上的开黑活动", "晚上八点集合"),
+        )
+    )
+
+    calls = {}
+    real = pkg_recall.assemble_recall
+
+    async def spy(stores, candidates, **kwargs):
+        calls["stores"] = sorted(stores)
+        calls["refs"] = [c.ref for c in candidates]
+        calls["kwargs"] = kwargs
+        return await real(stores, candidates, **kwargs)
+
+    monkeypatch.setattr(pkg_recall, "assemble_recall", spy)
+    message = run(plugin._recall_message(event, umo, "这周六还开黑吗"))
+    assert message is not None and "weekend-game.md" in message["content"]
+    assert calls["stores"] == ["people", "session"]
+    assert "session/weekend-game.md" in calls["refs"]
+    assert calls["kwargs"]["query"] == "这周六还开黑吗"
+    assert calls["kwargs"]["forced_files"] == ["user-123.md"]
+    assert calls["kwargs"]["limit"] == 5
+    assert calls["kwargs"]["model_choice"] is None
+    assert calls["kwargs"]["shared_people"] is False
+    assert calls["kwargs"]["data_notice"] == pkg_prompts.DATA_NOTICE
+
+
+def test_recall_message_passes_model_choice_to_core_pipeline(tmp_path, monkeypatch):
+    plugin = make_plugin(tmp_path, [])
+    plugin.config["recall_mode"] = "llm"
+    event = FakeEvent("Bot-A", sender_id="123")
+    umo = event.unified_msg_origin
+    session = plugin._store.session_scope(umo)
+    run(session.write("a.md", note_file("a", "开黑活动", "周六晚上")))
+    run(session.write("b.md", note_file("b", "点歌清单", "周杰伦")))
+
+    seen = {}
+
+    async def fake_select(umo_arg, candidates, query, limit):
+        seen["model_candidates"] = [(c.scope, c.header.file) for c in candidates]
+        return [c for c in candidates if c.header.file == "b.md"]
+
+    plugin._select_by_model = fake_select
+    real = pkg_recall.assemble_recall
+
+    async def spy(stores, candidates, **kwargs):
+        seen["model_choice"] = kwargs["model_choice"]
+        return await real(stores, candidates, **kwargs)
+
+    monkeypatch.setattr(pkg_recall, "assemble_recall", spy)
+    message = run(plugin._recall_message(event, umo, "周六开黑"))
+    # 人物文件只走身份必选，不交给模型挑
+    assert all(scope != "people" for scope, _ in seen["model_candidates"])
+    assert [c.ref for c in seen["model_choice"]] == ["session/b.md"]
+    assert message is not None
+    assert "session/b.md" in message["content"]
+    assert "session/a.md" not in message["content"]
 
 
 # ---------------------------------------------------------------- 提取门控

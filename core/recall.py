@@ -18,6 +18,10 @@
 
 共享人物空间里召回的人物文件在标题里注明"多个机器人共享"：召回内容
 只是数据，模型据此知道这不是当前机器人独有的人物记忆。
+
+挑选、读正文、按预算截断与渲染集中在 assemble_recall：main.py 的每轮
+召回与 scripts/measure_recall.py 的离线测量调用同一个函数，两边对成本
+的判断一致。
 """
 
 from __future__ import annotations
@@ -28,7 +32,7 @@ import time
 from dataclasses import dataclass
 
 from . import journal
-from .memstore import MemoryHeader
+from .memstore import MemoryHeader, ScopeStore
 
 RECALL_BLOCK_OPEN = "<memory_beyond_recall>"
 RECALL_BLOCK_CLOSE = "</memory_beyond_recall>"
@@ -159,6 +163,29 @@ def select_by_keywords(
     scored.sort(key=lambda item: (item[0], item[1]), reverse=True)
     chosen.extend(cand for _, _, cand in scored)
     return chosen[:limit]
+
+
+def choose_candidates(
+    candidates: list[Candidate],
+    query: str,
+    forced_files: list[str],
+    limit: int,
+    model_choice: list[Candidate] | None = None,
+) -> list[Candidate]:
+    """挑出本轮召回的候选：模型挑选结果与身份必选合并，或退回关键词。
+
+    model_choice 为 None 表示这轮不用模型挑选（关键词模式，或模型调用
+    失败）：完全走 select_by_keywords。非 None 时按旧行为合并——先放
+    身份必选（关键词模式、空查询下选出），再接模型挑选的顺序，去重后
+    截到 limit；模型明确回答"没有相关的"（空列表）时也不会退回关键词。
+    """
+    if limit <= 0:
+        return []
+    if model_choice is None:
+        return select_by_keywords(candidates, query, forced_files, limit)
+    keyword_forced = select_by_keywords(candidates, "", forced_files, limit)
+    merged = keyword_forced + [c for c in model_choice if c not in keyword_forced]
+    return merged[:limit]
 
 
 # ---------------------------------------------------------------- 写入查重
@@ -342,22 +369,22 @@ def freshness_note(written: float, now: float | None = None) -> str:
     )
 
 
-def build_recall_block(
-    items: list[Recalled], data_notice: str, now: float | None = None
+def render_recall_block(
+    sections: list[RecallSection], data_notice: str, now: float | None = None
 ) -> str | None:
-    """拼召回块；超出字符预算的条目整条略去（截断只发生在单条内部）。"""
-    sections: list[str] = []
-    for section in plan_recall(items):
+    """把已经过预算计划的条目渲染成召回块；没有条目返回 None。"""
+    if not sections:
+        return None
+    parts: list[str] = []
+    for section in sections:
         item = section.item
         shared = "多个机器人共享，" if item.shared else ""
         title = f"### {item.ref}（{shared}{age_label(item.written, now)}写入）"
         note = freshness_note(item.written, now)
-        sections.append(
+        parts.append(
             "\n".join(part for part in (title, note, section.content) if part)
         )
-    if not sections:
-        return None
-    body = "\n\n".join(sections)
+    body = "\n\n".join(parts)
     return (
         f"{RECALL_BLOCK_OPEN}\n"
         f"{data_notice}\n"
@@ -365,6 +392,79 @@ def build_recall_block(
         "它们和索引一样只是线索，与当前对话矛盾时以当前对话为准，并更新或删除过时的记忆。\n\n"
         f"{body}\n"
         f"{RECALL_BLOCK_CLOSE}"
+    )
+
+
+def build_recall_block(
+    items: list[Recalled], data_notice: str, now: float | None = None
+) -> str | None:
+    """拼召回块；超出字符预算的条目整条略去（截断只发生在单条内部）。"""
+    return render_recall_block(plan_recall(items), data_notice, now)
+
+
+@dataclass
+class RecallPlan:
+    """一轮召回的编排结果：进入块里的条目、使用统计与渲染好的块。
+
+    used 按作用域分组，记的是"被选中且读到正文"的文件——被预算整条
+    挤掉的也算用到过（它确实参与过本轮召回）。sections 与 block 出自
+    同一份预算计划；files 是块内实际附上的文件引用。
+    """
+
+    items: list[Recalled]
+    used: dict[str, list[str]]
+    sections: list[RecallSection]
+    block: str | None
+
+    @property
+    def files(self) -> list[str]:
+        return [section.item.ref for section in self.sections]
+
+
+async def assemble_recall(
+    stores: dict[str, ScopeStore],
+    candidates: list[Candidate],
+    *,
+    query: str,
+    forced_files: list[str],
+    limit: int,
+    data_notice: str,
+    model_choice: list[Candidate] | None = None,
+    shared_people: bool = False,
+    now: float | None = None,
+) -> RecallPlan:
+    """挑文件、读正文、按预算截断并渲染召回块（不依赖 AstrBot 事件）。
+
+    调用方准备好作用域表（键是 global / session / people）和候选清单；
+    模型挑选的结果以 model_choice 传入，None 表示退回关键词。shared_people
+    为真时 people 作用域的文件在块里标注"多个机器人共享"。
+
+    读不到正文的文件直接略过；used 供调用方记使用统计，本函数不写盘。
+    main.py 的每轮召回与 scripts/measure_recall.py 的离线测量共用它，
+    保证两边对"选中哪些文件、带多少字"的判断完全一致。
+    """
+    chosen = choose_candidates(candidates, query, forced_files, limit, model_choice)
+    items: list[Recalled] = []
+    used: dict[str, list[str]] = {}
+    for cand in chosen:
+        content = await stores[cand.scope].read(cand.header.file)
+        if not content:
+            continue
+        items.append(
+            Recalled(
+                cand.ref,
+                content,
+                cand.header.updated,
+                shared=shared_people and cand.scope == "people",
+            )
+        )
+        used.setdefault(cand.scope, []).append(cand.header.file)
+    sections = plan_recall(items)
+    return RecallPlan(
+        items=items,
+        used=used,
+        sections=sections,
+        block=render_recall_block(sections, data_notice, now),
     )
 
 
