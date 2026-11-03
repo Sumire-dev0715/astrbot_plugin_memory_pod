@@ -30,6 +30,51 @@ def memory(name, description, body, mem_type="user"):
     )
 
 
+def legacy_plan_and_block(items, data_notice, now):
+    """重构前 core.recall 的 plan_recall + build_recall_block 原样抄录。
+
+    故意不调用重构后的 recall.plan_recall / recall.render_recall_block：
+    对照实现必须是独立的第二份代码，否则同源循环证明不了"逐字相同"。
+    只复用这次重构没有改动的常量与时效文案（FILE_CHARS、TOTAL_CHARS、
+    age_label、freshness_note、块标记）。原文抄自重构前提交 6e6a11f 的
+    core/recall.py。
+    """
+    sections = []
+    used = 0
+    for item in items:
+        content = item.content.strip()
+        truncated = len(content) > recall.FILE_CHARS
+        if truncated:
+            content = (
+                content[: recall.FILE_CHARS]
+                + "\n…（已截断，完整内容用 memory_read 读取）"
+            )
+        if sections and used + len(content) > recall.TOTAL_CHARS:
+            break
+        used += len(content)
+        sections.append((item, content, truncated))
+    parts = []
+    for item, content, _ in sections:
+        shared = "多个机器人共享，" if item.shared else ""
+        title = f"### {item.ref}（{shared}{recall.age_label(item.written, now)}写入）"
+        note = recall.freshness_note(item.written, now)
+        parts.append(
+            "\n".join(part for part in (title, note, content) if part)
+        )
+    block = None
+    if parts:
+        body = "\n\n".join(parts)
+        block = (
+            f"{recall.RECALL_BLOCK_OPEN}\n"
+            f"{data_notice}\n"
+            "以下是插件按本轮消息自动召回的相关记忆全文，可直接参考；"
+            "它们和索引一样只是线索，与当前对话矛盾时以当前对话为准，并更新或删除过时的记忆。\n\n"
+            f"{body}\n"
+            f"{recall.RECALL_BLOCK_CLOSE}"
+        )
+    return [(item.ref, content, truncated) for item, content, truncated in sections], block
+
+
 def make_store(tmp_path, files, mtime=NOW):
     """按 (作用域, 文件名, 描述, 正文) 建合成记忆库；返回 (MemoryStore, 作用域表)。"""
     root = tmp_path / "memories"
@@ -93,14 +138,14 @@ async def legacy_recall(
                 )
             )
             used.setdefault(cand.scope, []).append(cand.header.file)
-    block = recall.build_recall_block(items, data_notice, now=now)
-    return chosen, items, used, block
+    sections, block = legacy_plan_and_block(items, data_notice, now)
+    return chosen, items, used, sections, block
 
 
 async def compare(stores, candidates, **kwargs):
     """新实现与参照实现的结果必须逐字一致。"""
     plan = await recall.assemble_recall(stores, candidates, **kwargs)
-    chosen, items, used, block = await legacy_recall(
+    chosen, items, used, sections, block = await legacy_recall(
         stores, candidates, **kwargs
     )
     assert [item.ref for item in plan.items] == [item.ref for item in items]
@@ -108,6 +153,11 @@ async def compare(stores, candidates, **kwargs):
     assert [item.shared for item in plan.items] == [item.shared for item in items]
     assert plan.used == used
     assert plan.block == block
+    # 截断与否、块内顺序逐条相同：截断/预算回归会让这里先红
+    assert [
+        (section.item.ref, section.content, section.truncated)
+        for section in plan.sections
+    ] == sections
     assert plan.files == [section.item.ref for section in plan.sections]
     return plan, chosen
 

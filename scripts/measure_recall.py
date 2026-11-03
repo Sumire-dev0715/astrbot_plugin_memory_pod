@@ -12,13 +12,19 @@
 口径：
 - 每轮取 archive/<会话目录>/<归档ID>.json 里的一条 user 消息，按 created_at
   顺序在同一会话内串联；归档之间、会话之间不串轮。
-- 作用域与生产一致：session 用存档里的 umo，people 用 umo 的平台前缀，
-  global 按参数开启。默认与 dev 配置一致：人物记忆开、全局记忆关、遗忘关、
-  关键词模式、每轮最多 5 个文件（recall.DEFAULT_MAX_FILES）。
+- 作用域：session 用会话目录名还原出的 umo（还原不出来再用存档里的 umo），
+  people 用 umo 的平台前缀，global 按参数开启。默认与 dev 配置一致：人物
+  记忆开、全局记忆关、遗忘关、关键词模式、每轮最多 5 个文件
+  （recall.DEFAULT_MAX_FILES）。
 - 召回块调用 core.recall.assemble_recall，与 main.py 每轮召回是同一个函数，
-  所以"选中哪些文件、带多少字"的判断与线上完全一致。
+  "选中哪些文件、带多少字、怎么截断"的编排与线上一致。
+- 存档只保留角色与文本（core/archive.py 的 _simplify），没有 @ 段、每条消息
+  的时间和共享成员表：@ 提到的人无法还原（正文里的数字 ID 仍会被识别）；
+  人物作用域按平台目录读取，不套用 shared_people_bots 映射；时效提醒按归档
+  时间计算。dev 配置下这些差异不影响改造前后的同口径对比。
 - 发送者 ID 优先从消息开头的 [发送者：…] 标注取（prompts.sender_ids_in），
-  取不到时用私聊会话键里的用户 ID。
+  取不到时用私聊会话键里的用户 ID；旧版本回存进历史的索引块、摘要块不是
+  用户发言，不计入轮次。
 - 开头块是会话索引块（prompts.build_index_block）的字数；其中人物档案指
   以全文形式钉在开头块里的人物文件字数——3.6 第 1 条（pin_private_profile）
   之前为 0，人物档案仍在每轮召回块里。
@@ -36,6 +42,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import math
+import statistics
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -55,6 +62,7 @@ class Report:
     rounds: int = 0
     sessions: int = 0
     archives: int = 0
+    # 读不出来、或因 umo 无法还原而整会话跳过的归档文件数
     skipped_archives: int = 0
     # 每轮的数字，按回放顺序追加（会话之间也连续）
     recall_chars: list[int] = field(default_factory=list)
@@ -81,13 +89,32 @@ def percentile(values: list[int], q: float) -> float:
     return float(ordered[index])
 
 
-def _load_archives(data_dir: Path) -> list[tuple[str, list[dict]]]:
-    """读出 archive/ 下每个会话的归档，按 created_at 从旧到新排序。"""
+def median(values: list[int]) -> float:
+    """中位数：偶数个样本取中间两个值的平均（统计惯例，不是最近秩）。"""
+    return float(statistics.median(values)) if values else 0.0
+
+
+def _as_float(value) -> float:
+    """把存档里不可信的字段安全转成时间戳；坏值按 0 处理，不抛异常。"""
+    try:
+        return float(value or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _load_archives(data_dir: Path) -> tuple[list[tuple[str, list[dict]]], int]:
+    """读出 archive/ 下每个会话的归档，按 created_at 从旧到新排序。
+
+    返回 (会话归档列表, 读不出来的归档文件数)。ArchiveStore.load 对文件名
+    不合规或 JSON 损坏的归档返回 None，这里计数而不是静默丢掉——轮数的
+    分母要能对上磁盘上的文件数。
+    """
     root = data_dir / "archive"
     if not root.is_dir():
-        return []
+        return [], 0
     store = archive.ArchiveStore(root)
     sessions: list[tuple[str, list[dict]]] = []
+    skipped = 0
     for folder in sorted(root.iterdir()):
         if not folder.is_dir():
             continue
@@ -96,26 +123,42 @@ def _load_archives(data_dir: Path) -> list[tuple[str, list[dict]]]:
             data = store.load(folder.name, path.stem)
             if isinstance(data, dict) and isinstance(data.get("messages"), list):
                 entries.append(data)
+            else:
+                skipped += 1
         if not entries:
             continue
         entries.sort(
             key=lambda item: (
-                float(item.get("created_at") or 0.0),
+                _as_float(item.get("created_at")),
                 str(item.get("id") or ""),
             )
         )
         sessions.append((folder.name, entries))
     sessions.sort(key=lambda item: item[0])
-    return sessions
+    return sessions, skipped
 
 
 def _session_umo(key: str, archives: list[dict]) -> str:
-    """会话的 umo：存档里记的最可靠；没有时按目录名尝试还原。"""
+    """会话的 umo。
+
+    目录名能还原且 safe_key 对得上时以目录名为准：平台改名迁移把旧 umo 的
+    归档文件搬进新目录，payload 里的 umo 却还是旧的，生产的会话作用域按
+    当前 umo 取名，测量也要读新目录下的会话记忆（registry.umo_from_key
+    的 docstring 同样要求用 safe_key 核对）。还原不出来时退回 payload 里
+    safe_key 与目录名一致的 umo；都对不上才退回第一个非空 umo。
+    """
+    candidate = registry.umo_from_key(key)
+    if candidate and memstore.safe_key(candidate) == key:
+        return candidate
+    for data in archives:
+        umo = str(data.get("umo") or "").strip()
+        if umo and memstore.safe_key(umo) == key:
+            return umo
     for data in archives:
         umo = str(data.get("umo") or "").strip()
         if umo:
             return umo
-    return registry.umo_from_key(key)
+    return ""
 
 
 def _round_query(text: str, umo: str) -> tuple[str, str]:
@@ -135,16 +178,25 @@ def _round_query(text: str, umo: str) -> tuple[str, str]:
 
 
 def _user_messages(archives: list[dict]) -> list[tuple[str, float]]:
-    """按时间顺序取出所有非空用户消息（正文与归档时间）。"""
+    """按时间顺序取出所有非空用户消息（正文与归档时间）。
+
+    旧版本把插件注入的索引块、摘要块当普通 user 消息回存进历史，它们不是
+    用户发言，不能算一轮（否则轮数偏大、均值被拉低）。
+    """
     messages: list[tuple[str, float]] = []
     for data in archives:
-        at = float(data.get("created_at") or 0.0)
+        at = _as_float(data.get("created_at"))
         for message in data.get("messages") or []:
             if not isinstance(message, dict) or message.get("role") != "user":
                 continue
             text = str(message.get("text") or "").strip()
-            if text:
-                messages.append((text, at))
+            if not text:
+                continue
+            if text.startswith(prompts.INDEX_BLOCK_OPEN) or text.startswith(
+                prompts.SUMMARY_BLOCK_OPEN
+            ):
+                continue
+            messages.append((text, at))
     return messages
 
 
@@ -157,7 +209,9 @@ async def _measure(
 ) -> Report:
     report = Report()
     store = memstore.MemoryStore(data_dir / "memories")
-    for key, archives in _load_archives(data_dir):
+    sessions, skipped = _load_archives(data_dir)
+    report.skipped_archives += skipped
+    for key, archives in sessions:
         umo = _session_umo(key, archives)
         if not umo:
             report.skipped_archives += len(archives)
@@ -243,9 +297,10 @@ def format_report(report: Report) -> str:
     return "\n".join(
         [
             f"轮数：{report.rounds}（会话 {report.sessions}，存档 {report.archives}）",
+            f"跳过的存档：{report.skipped_archives}",
             "每轮召回字数："
             f"平均 {_mean(report.recall_chars):.1f}，"
-            f"中位数 {percentile(report.recall_chars, 0.5):.0f}，"
+            f"中位数 {median(report.recall_chars):.0f}，"
             f"P90 {percentile(report.recall_chars, 0.9):.0f}",
             f"平均全文文件数：{_mean(report.full_files):.2f}",
             f"平均召回文件数（含截断）：{_mean(report.recall_files):.2f}",
@@ -254,7 +309,7 @@ def format_report(report: Report) -> str:
             f"{ratio:.1f}%（共 {report.adjacent_pairs} 对）",
             "开头块字数："
             f"平均 {_mean(report.opening_chars):.1f}，"
-            f"中位数 {percentile(report.opening_chars, 0.5):.0f}，"
+            f"中位数 {median(report.opening_chars):.0f}，"
             f"P90 {percentile(report.opening_chars, 0.9):.0f}"
             f"（其中人物档案 平均 {_mean(report.profile_chars):.1f}）",
         ]
@@ -302,11 +357,20 @@ def main(argv: list[str] | None = None) -> int:
             "本次仍按改造前口径统计",
             file=sys.stderr,
         )
-    report = measure(
-        args.data_dir,
-        people=not args.no_people,
-        global_memory=args.global_memory,
-    )
+    try:
+        report = measure(
+            args.data_dir,
+            people=not args.no_people,
+            global_memory=args.global_memory,
+        )
+    except Exception as exc:  # noqa: BLE001 - 只报异常类型，避免把正文带进 traceback
+        # 隐私底线：归档/记忆里可能夹着正文，异常文本也可能带着它，不打印详情
+        print(
+            f"测量失败（{type(exc).__name__}）；"
+            "请用 Python 直接调用 measure() 排查（本工具默认不输出正文与堆栈）",
+            file=sys.stderr,
+        )
+        return 1
     print(format_report(report))
     return 0
 

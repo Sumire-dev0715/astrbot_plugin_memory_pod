@@ -153,6 +153,7 @@ def test_report_text_has_numbers_only(tmp_path):
     build_data(tmp_path)
     text = script.format_report(script.measure(tmp_path))
     assert "轮数：3" in text
+    assert "跳过的存档：0" in text
     assert "每轮召回字数：平均" in text
     assert "平均全文文件数" in text
     assert "截断次数：2" in text
@@ -235,21 +236,131 @@ def test_global_memory_flag(tmp_path):
     assert extended.opening_chars[0] > plain.opening_chars[0]
 
 
-def test_percentile_nearest_rank():
+def test_percentile_nearest_rank_and_median():
     assert script.percentile([], 0.9) == 0.0
     assert script.percentile([10], 0.9) == 10.0
     assert script.percentile([1, 2, 3, 4, 5], 0.9) == 5.0
     assert script.percentile(list(range(10)), 0.9) == 8.0
-    assert script.percentile([4, 1, 3, 2], 0.5) == 2.0
+    # 中位数按统计惯例：偶数个样本取中间两个的平均，不是最近秩
+    assert script.median([4, 1, 3, 2]) == 2.5
+    assert script.median([1, 2, 3]) == 2.0
+    assert script.median([]) == 0.0
 
 
-def test_cli_prints_report_and_accepts_recall_full_files(tmp_path, capsys):
+def test_injected_blocks_are_not_counted_as_rounds(tmp_path):
+    write_archive(
+        tmp_path,
+        "20260109-000000-000",
+        [
+            {
+                "role": "user",
+                "text": prompts.INDEX_BLOCK_OPEN
+                + "\n旧索引\n"
+                + prompts.INDEX_BLOCK_CLOSE,
+            },
+            {
+                "role": "user",
+                "text": prompts.SUMMARY_BLOCK_OPEN
+                + "\n旧摘要\n"
+                + prompts.SUMMARY_BLOCK_CLOSE,
+            },
+            {"role": "assistant", "text": "好"},
+            {"role": "user", "text": "你好"},
+        ],
+    )
+    report = script.measure(tmp_path)
+    assert report.rounds == 1
+
+
+def test_unreadable_archive_is_counted_as_skipped(tmp_path):
+    write_archive(
+        tmp_path, "20260107-000000-000", [{"role": "user", "text": "你好"}]
+    )
+    (tmp_path / "archive" / KEY / "bad_id.json").write_text(
+        "{不是 JSON", encoding="utf-8"
+    )
+    report = script.measure(tmp_path)
+    assert report.rounds == 1
+    assert report.archives == 1
+    assert report.skipped_archives == 1
+    assert "跳过的存档：1" in script.format_report(report)
+
+
+def test_session_without_umo_is_counted_as_skipped(tmp_path):
+    write_archive(
+        tmp_path,
+        "20260108-000000-000",
+        [{"role": "user", "text": "你好"}],
+        umo=None,
+        key="无法还原的目录名",
+    )
+    report = script.measure(tmp_path)
+    assert report.rounds == 0
+    assert report.skipped_archives == 1
+    assert "跳过的存档：1" in script.format_report(report)
+
+
+def test_session_umo_prefers_folder_key_after_platform_rename(tmp_path):
+    """平台改名迁移后归档 payload 里还是旧 umo，测量要读新目录的会话记忆。"""
+    new_umo = "Bot-B:GroupMessage:555555"
+    key = memstore.safe_key(new_umo)
+    write_file(
+        tmp_path / "memories" / "session" / key / "weekend-game.md",
+        memory("weekend-game", "开黑活动", "周六晚上"),
+    )
+    write_archive(
+        tmp_path,
+        "20260110-000000-000",
+        [{"role": "user", "text": "开黑吗"}],
+        umo="Bot-A:FriendMessage:100123",
+        key=key,
+    )
+    report = script.measure(tmp_path)
+    assert report.sessions == 1
+    assert report.rounds == 1
+    assert report.recall_files == [1]
+
+
+def test_malformed_created_at_does_not_crash_or_leak(tmp_path, capsys):
+    write_archive(
+        tmp_path, "20260106-000000-000", [{"role": "user", "text": "你好"}]
+    )
+    path = tmp_path / "archive" / KEY / "20260106-000000-000.json"
+    data = json.loads(path.read_text("utf-8"))
+    data["created_at"] = "对话正文秘密SECRET"
+    path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+    report = script.measure(tmp_path)
+    assert report.rounds == 1
+    assert "SECRET" not in script.format_report(report)
+
+    assert script.main(["--data-dir", str(tmp_path)]) == 0
+    captured = capsys.readouterr()
+    assert "SECRET" not in captured.out + captured.err
+
+
+def test_cli_hides_exception_details(tmp_path, capsys, monkeypatch):
+    (tmp_path / "memories").mkdir()
+
+    def boom(_data_dir, **_kwargs):
+        raise RuntimeError("记忆正文SECRET")
+
+    monkeypatch.setattr(script, "measure", boom)
+    assert script.main(["--data-dir", str(tmp_path)]) == 1
+    captured = capsys.readouterr()
+    assert "SECRET" not in captured.out + captured.err
+    assert "RuntimeError" in captured.err
+
+
+def test_cli_prints_report_and_accepts_inert_recall_full_files(tmp_path, capsys):
     build_data(tmp_path)
     assert script.main(["--data-dir", str(tmp_path)]) == 0
     plain = capsys.readouterr()
     assert "轮数：3" in plain.out
     assert plain.err == ""
 
+    # 分档召回属于 3.6 第 2 条，本项只保留参数入口：接受并明确告知未生效，
+    # 输出与不传时相同。实现分档后这里要改成三种取值各测一次。
     assert script.main(["--data-dir", str(tmp_path), "--recall-full-files", "2"]) == 0
     extended = capsys.readouterr()
     assert extended.out == plain.out
