@@ -40,7 +40,8 @@ CONSOLIDATE_PROMPT = """你是聊天机器人的记忆整理助手。下面是�
 - 合并重复：同一个人（同一个数字 ID）或同一件事分散在几个文件里的，合并进一个文件——记人的文件统一命名为 user-<数字ID>.md——并删除其余文件；
 - 修正过时与矛盾：同一事实前后矛盾时以较新的为准，删去明显已失效的内容；正文里的相对日期（明天、下周）按写入时间换算成绝对日期；
 - 精简：长期没被用到、内容又明显只是一次性的条目（如早已过去的临时安排）可以删除；有长期价值的即使没用过也保留；
-- 规范格式：type 只能是 user、feedback、project、reference 之一；description 写成一句能让人判断"何时该读全文"的钩子；feedback 与 project 类正文附 **Why:** 与 **How to apply:** 两行；
+- 日志（journal）是每日流水账：保持 journal 类型和 daily-<日期>.md 文件名，不要删除日志文件，也不要把它合并进其他记忆；只在确有重复或过期内容时精简正文；
+- 规范格式：type 只能是 user、feedback、project、reference、journal 之一；description 写成一句能让人判断"何时该读全文"的钩子；feedback 与 project 类正文附 **Why:** 与 **How to apply:** 两行；
 - 不编造：只能重组、精简、改写已有信息，不得添加文件里没有的事实；
 - 拿不准的不动。不需要整理就输出空数组。
 

@@ -285,6 +285,27 @@ def save(dash, **fields):
     return call(dash, "file/save", body=body)
 
 
+def test_file_save_accepts_journal_type(plugin, dash):
+    store = session_store(plugin)
+    data = ok(
+        save(
+            dash,
+            file="daily-2026-11-03.md",
+            type="journal",
+            description="今日日志",
+            body="今天去开黑。",
+        )
+    )
+    assert data["file"] == "daily-2026-11-03.md"
+    doc = pkg_memstore.parse_memory(
+        asyncio.run(store.read("daily-2026-11-03.md"))
+    )
+    assert doc.type == "journal"
+    index = asyncio.run(store.read(pkg_memstore.INDEX_FILENAME))
+    assert "- [daily-2026-11-03](daily-2026-11-03.md)" in index
+    assert "日志共 1 篇" in index
+
+
 def test_file_save_create_edit_rename(plugin, dash):
     store = session_store(plugin)
     data = ok(save(dash, file="user-1", description=" 阿杰\n 群主 ", body="\n正文\n"))

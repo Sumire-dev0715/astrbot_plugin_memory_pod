@@ -339,8 +339,9 @@ DEFAULT_SUMMARY_PROMPT = """你是聊天机器人的记忆助手。下面这段�
 {transcript}"""
 
 EXTRACT_RULES = """数组元素格式：
-{"type": "user、feedback、project、reference 之一", "name": "kebab-case-slug", "description": "一句话钩子", "content": "事实正文", "source": "说出这件事的人的数字 ID（取自发送者标注），多人用逗号分隔，拿不准留空"}
+{"type": "user、feedback、project、reference 之一（journal 日志由每日流程维护，这里不要输出 journal）", "name": "kebab-case-slug", "description": "一句话钩子", "content": "事实正文", "source": "说出这件事的人的数字 ID（取自发送者标注），多人用逗号分隔，拿不准留空"}
 - user：关于某个人的事实，name 必须用 user-<数字ID>（以发送者标注中的数字 ID 为锚，昵称只写进正文附注）；feedback：对你（机器人）做事方式的指导，正文附 **Why:** 与 **How to apply:** 两行；project：进行中的事、目标、约束（相对日期换算为绝对日期）；reference：外部资源的指针（链接、公告、文档位置）
+- journal 日志不在这里抽取：不要新建日志，也不要改写已有的日志文件；日志是每日流水账，不是需要长期保留的稳定事实
 - 只收长期有效、跨对话仍有价值的事实；只对这段对话有意义的不收，寒暄闲聊不收，与对话主线无关的他人隐私不收
 - 没有值得保留的就输出空数组 []"""
 

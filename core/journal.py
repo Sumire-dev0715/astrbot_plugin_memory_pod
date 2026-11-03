@@ -20,6 +20,7 @@ memory_read 读取，或用 memory_search 搜索。
 from __future__ import annotations
 
 import re
+import time
 from dataclasses import dataclass
 
 JOURNAL_TYPE = "journal"
@@ -38,7 +39,7 @@ class JournalEntry:
 
     name: str
     description: str = ""
-    # 文件名里的日期（YYYY-MM-DD），没有日期规则的文件为空
+    # 文件名里的日期（YYYY-MM-DD）；没有日期规则时由 updated 推算
     date: str = ""
     # 没有日期时按最近修改排序
     updated: float = 0.0
@@ -71,7 +72,17 @@ def _index_line(entry: JournalEntry) -> str:
 
 
 def _entry_date(entry: JournalEntry) -> str:
-    return entry.date or journal_date(entry.name)
+    """日志日期：优先文件名日期，没有日期规则时按最近修改推算。
+
+    用于汇总日期区间，也做"最近两篇"排序的次键；以 type: journal 标注、
+    文件名不带日期的日志因此也能进入汇总区间。
+    """
+    date = entry.date or journal_date(entry.name)
+    if date:
+        return date
+    if entry.updated > 0:
+        return time.strftime("%Y-%m-%d", time.localtime(entry.updated))
+    return ""
 
 
 def _summary_line(entries: list[JournalEntry]) -> str:
@@ -94,7 +105,9 @@ def build_block(entries: list[JournalEntry]) -> list[str]:
         return []
     ordered = sorted(
         entries,
-        key=lambda entry: (_entry_date(entry), entry.updated, entry.name),
+        # 最近 = 最近一次写入；文件名日期只做次排序键与汇总区间，
+        # 这样 type: journal 但文件名不带日期的日志也能排进最近两篇。
+        key=lambda entry: (entry.updated, _entry_date(entry), entry.name),
         reverse=True,
     )
     lines = [_index_line(entry) for entry in ordered[:RECENT_ENTRIES]]
@@ -143,16 +156,22 @@ def fold_index(lines: list[str], entries: list[JournalEntry]) -> list[str]:
     return kept + build_block(entries)
 
 
-def block_start(lines: list[str], journal_files: set[str] | None = None) -> int | None:
-    """索引末尾日志块的起始行号；末尾不是完整日志块时返回 None。
+def block_span(
+    lines: list[str], journal_files: set[str] | None = None
+) -> tuple[int, int] | None:
+    """索引末尾日志块的范围 (起始行, 汇总行)；末尾不是完整日志块时返回 None。
 
-    供截断使用：日志块要么完整显示，要么整块让位。journal_files 是当前
-    在册日志的文件名集合，用来认出以 type: journal 标注、文件名不带日期
-    的日志；不传时只按日期文件名识别。
+    末尾的空行（手工编辑或外部写入留下）不影响识别。供截断与索引体检
+    使用：日志块要么完整显示，要么整块让位。journal_files 是当前在册
+    日志的文件名集合，用来认出以 type: journal 标注、文件名不带日期的
+    日志；不传时只按日期文件名识别。
     """
-    if not lines or not is_summary_line(lines[-1]):
+    end = len(lines) - 1
+    while end >= 0 and not lines[end].strip():
+        end -= 1
+    if end < 0 or not is_summary_line(lines[end]):
         return None
-    start = len(lines) - 1
+    start = end
     while start > 0 and _is_entry_line(lines[start - 1], journal_files):
         start -= 1
-    return start
+    return start, end

@@ -130,6 +130,39 @@ def test_propose_nothing_to_do(scope):
     assert "「开黑群」" in call.calls[0]
 
 
+def test_propose_ignores_journal_operations(scope):
+    run(
+        scope.write(
+            "daily-2026-11-03.md",
+            compose_memory("daily-2026-11-03", "日志", "journal", "流水"),
+        )
+    )
+    ops = [
+        {"op": "delete", "file": "daily-2026-11-03.md", "reason": "一次性"},
+        {
+            "op": "write",
+            "file": "daily-2026-11-03.md",
+            "type": "project",
+            "description": "改成项目",
+            "content": "挪作他用",
+            "reason": "测试",
+        },
+        {
+            "op": "write",
+            "file": "c.md",
+            "type": "user",
+            "description": "丙",
+            "content": "新的",
+            "reason": "拆分",
+        },
+    ]
+    call = model(wrap(ops))
+    proposal = run(tidy.propose(scope, "x", call))
+    # 日志不参与整理：删除和改写日志的操作都被丢弃
+    assert [op.file for op in proposal.operations] == ["c.md"]
+    assert "日志（journal）是每日流水账" in call.calls[0]
+
+
 def test_propose_errors(scope, tmp_path):
     with pytest.raises(tidy.TidyError, match="超时"):
         run(tidy.propose(scope, "x", model("")))

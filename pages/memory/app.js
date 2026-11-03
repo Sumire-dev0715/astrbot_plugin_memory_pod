@@ -4,7 +4,7 @@
   const bridge = window.AstrBotPluginPage || null;
   const I18N_PREFIX = "pages.memory.";
   const SVG_NS = "http://www.w3.org/2000/svg";
-  const TYPES = ["user", "feedback", "project", "reference"];
+  const TYPES = ["user", "feedback", "project", "reference", "journal"];
   const PARTS = ["overhead", "tools", "index", "summary", "recall", "history"];
   const FILE_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,120}\.md$/;
   const FRONT_RE = /^---\s*\n([\s\S]*?)\n---\s*\n?/;
@@ -65,10 +65,12 @@
     type_feedback: "指导",
     type_project: "事项",
     type_reference: "资料",
+    type_journal: "日志",
     typeHint_user: "某个人是谁：身份、偏好、专长",
     typeHint_feedback: "对机器人做事方式的指导：纠正过的错误、确认过的做法",
     typeHint_project: "进行中的事、目标与约束",
     typeHint_reference: "外部资源在哪里：链接、公告、文档",
+    typeHint_journal: "每日流水账：不占单独索引行，不参与自动召回与查重",
     typeMissing: "无类型",
     noDescription: "（没有描述）",
     noMemoriesTitle: "还没有记忆",

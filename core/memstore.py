@@ -535,10 +535,12 @@ def _truncate_index(
     loaded = len(kept)
     # 日志块要整块显示或整块让位：截断落在块中间时，把已经装下的
     # 半截日志行也去掉，避免模型看到一份缺头少尾的日志目录。
-    start = journal.block_start(lines, journal_files)
-    if loaded < total and start is not None and start < loaded:
-        kept = kept[:start]
-        loaded = len(kept)
+    span = journal.block_span(lines, journal_files)
+    if loaded < total and span is not None:
+        start, end = span
+        if start < loaded <= end:
+            kept = kept[:start]
+            loaded = len(kept)
     text = "\n".join(kept)
     if loaded < total:
         text += (
@@ -1849,32 +1851,39 @@ class ScopeStore:
     def index_report(self) -> IndexReport:
         """索引体检（同步方法）：体积、截断、缺行与悬空行。
 
-        日志只要求出现在末尾折叠块里，不要求每篇都有索引行，因此不算缺行。
+        日志不按单篇登记，但要求出现在末尾折叠块里；折叠块缺失或与磁盘上
+        的日志对不上时，把日志文件一并报成缺行，提示重建索引。
         """
         index_path = self.root / INDEX_FILENAME
         files = set(self.list_files())
+        headers = self.headers()
         journals = {
             header.file
-            for header in self.headers()
+            for header in headers
             if journal.is_journal(header.file, header.type)
         }
         if not index_path.is_file():
-            return IndexReport(
-                False, 0, 0, False, sorted(files - journals), []
-            )
+            return IndexReport(False, 0, 0, False, sorted(files), [])
         raw = index_path.read_text("utf-8")
         listed: list[str] = []
         for line in raw.splitlines():
             match = _INDEX_TARGET_RE.search(line)
             if match and match.group(1) not in listed:
                 listed.append(match.group(1))
+        missing = sorted((files - journals) - set(listed))
+        if journals:
+            lines = raw.splitlines()
+            span = journal.block_span(lines, journals)
+            actual = lines[span[0] : span[1] + 1] if span is not None else []
+            if actual != journal.build_block(self._journal_entries(headers)):
+                missing = sorted(set(missing) | journals)
         snap = _truncate_index(raw, journals)
         return IndexReport(
             exists=True,
             lines=snap.total_lines,
             size=len(raw.encode("utf-8")),
             truncated=snap.truncated,
-            missing=sorted((files - journals) - set(listed)),
+            missing=missing,
             dangling=[name for name in listed if name not in files],
         )
 

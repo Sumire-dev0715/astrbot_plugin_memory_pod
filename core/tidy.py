@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Awaitable, Callable
 
-from . import consolidate, history
+from . import consolidate, history, journal
 from .memstore import (
     CONFLICT_OVERWRITE,
     CONFLICT_SKIP,
@@ -319,6 +319,18 @@ async def propose(
     ops = consolidate.parse_operations(text, existing)
     if ops is None:
         raise TidyError("模型返回的整理方案无法解析，请重试")
+    # 日志只作整理参考，不允许整理改写或删除：流水账过时与否不该由一次
+    # 自动复盘决定；误改也能撤销，但日志本就不该进入这套合并逻辑。
+    journal_files = {
+        header.file
+        for header in headers
+        if journal.is_journal(header.file, header.type)
+    }
+    ops = [
+        op
+        for op in ops
+        if op.file not in journal_files and not journal.is_journal(op.file, op.type)
+    ]
     # 记下复盘时各目标文件的写入时间，应用时据此识别期间被改过的文件
     for op in ops:
         op.base_mtime = store.mtime(op.file) or 0.0

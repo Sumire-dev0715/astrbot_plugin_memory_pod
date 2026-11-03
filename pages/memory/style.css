@@ -24,6 +24,8 @@
   --t-project-soft: #e3f5ec;
   --t-reference: #8250c4;
   --t-reference-soft: #f1e9fb;
+  --t-journal: #5b6b8c;
+  --t-journal-soft: #e9edf5;
   --p-overhead: #8a93a8;
   --p-tools: #c27a12;
   --p-index: #8250c4;
@@ -62,6 +64,8 @@
   --t-project-soft: #1d3529;
   --t-reference: #b38ae8;
   --t-reference-soft: #31254a;
+  --t-journal: #9fb0d0;
+  --t-journal-soft: #283143;
   --p-overhead: #727b90;
   --p-tools: #e0a84a;
   --p-index: #b38ae8;
@@ -463,6 +467,11 @@ svg.icon {
 .tag.reference {
   background: var(--t-reference-soft);
   color: var(--t-reference);
+}
+
+.tag.journal {
+  background: var(--t-journal-soft);
+  color: var(--t-journal);
 }
 
 .tag.warn {

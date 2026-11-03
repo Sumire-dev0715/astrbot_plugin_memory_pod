@@ -1218,6 +1218,7 @@ class MemoryBeyondPlugin(Star):
             prompts.ExistingMemory(h.file, h.description)
             for h in headers
             if h.file not in updatable["session"]
+            and not journal.is_journal(h.file, h.type)
         ]
         if not full and not listed:
             return "", updatable
