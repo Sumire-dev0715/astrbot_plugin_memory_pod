@@ -519,7 +519,9 @@ class IndexReport:
     dangling: list[str]
 
 
-def _truncate_index(raw: str) -> IndexSnapshot:
+def _truncate_index(
+    raw: str, journal_files: set[str] | None = None
+) -> IndexSnapshot:
     lines = raw.splitlines()
     total = len(lines)
     kept: list[str] = []
@@ -533,7 +535,7 @@ def _truncate_index(raw: str) -> IndexSnapshot:
     loaded = len(kept)
     # 日志块要整块显示或整块让位：截断落在块中间时，把已经装下的
     # 半截日志行也去掉，避免模型看到一份缺头少尾的日志目录。
-    start = journal.block_start(lines)
+    start = journal.block_start(lines, journal_files)
     if loaded < total and start is not None and start < loaded:
         kept = kept[:start]
         loaded = len(kept)
@@ -1866,7 +1868,7 @@ class ScopeStore:
             match = _INDEX_TARGET_RE.search(line)
             if match and match.group(1) not in listed:
                 listed.append(match.group(1))
-        snap = _truncate_index(raw)
+        snap = _truncate_index(raw, journals)
         return IndexReport(
             exists=True,
             lines=snap.total_lines,
@@ -1949,7 +1951,13 @@ class ScopeStore:
         raw = await self.read(INDEX_FILENAME)
         if raw is None:
             return IndexSnapshot(text="", total_lines=0, loaded_lines=0)
-        return _truncate_index(raw)
+        headers = await asyncio.to_thread(self.headers)
+        journals = {
+            header.file
+            for header in headers
+            if journal.is_journal(header.file, header.type)
+        }
+        return _truncate_index(raw, journals)
 
     # ------------------------------------------------------------ 全文搜索
 

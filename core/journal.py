@@ -27,8 +27,6 @@ JOURNAL_TYPE = "journal"
 RECENT_ENTRIES = 2
 
 JOURNAL_DATE_RE = re.compile(r"^(?:daily|journal)-(\d{4}-\d{2}-\d{2})")
-# 索引行里的日志文件名（daily-<日期>.md / journal-<日期>.md）
-_JOURNAL_LINE_RE = re.compile(r"\]\((?:daily|journal)-\d{4}-\d{2}-\d{2}\.md\)")
 _TARGET_RE = re.compile(r"\]\(([^()\s]+\.md)\)")
 _SUMMARY_PREFIX = "- 日志共 "
 _SUMMARY_MARK = "不自动召回"
@@ -108,8 +106,10 @@ def is_summary_line(line: str) -> bool:
     return line.startswith(_SUMMARY_PREFIX) and _SUMMARY_MARK in line
 
 
-def _is_entry_line(line: str) -> bool:
-    return bool(_JOURNAL_LINE_RE.search(line))
+def _is_entry_line(line: str, journal_files: set[str] | None = None) -> bool:
+    match = _TARGET_RE.search(line)
+    target = match.group(1) if match else ""
+    return is_journal_name(target) or bool(journal_files and target in journal_files)
 
 
 def split_index(
@@ -143,15 +143,16 @@ def fold_index(lines: list[str], entries: list[JournalEntry]) -> list[str]:
     return kept + build_block(entries)
 
 
-def block_start(lines: list[str]) -> int | None:
+def block_start(lines: list[str], journal_files: set[str] | None = None) -> int | None:
     """索引末尾日志块的起始行号；末尾不是完整日志块时返回 None。
 
-    供截断使用：日志块要么完整显示，要么整块让位。块由若干日志索引行和
-    末尾的汇总行组成。
+    供截断使用：日志块要么完整显示，要么整块让位。journal_files 是当前
+    在册日志的文件名集合，用来认出以 type: journal 标注、文件名不带日期
+    的日志；不传时只按日期文件名识别。
     """
     if not lines or not is_summary_line(lines[-1]):
         return None
     start = len(lines) - 1
-    while start > 0 and _is_entry_line(lines[start - 1]):
+    while start > 0 and _is_entry_line(lines[start - 1], journal_files):
         start -= 1
     return start

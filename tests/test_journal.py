@@ -272,6 +272,18 @@ def test_truncate_index_drops_whole_journal_block_first(monkeypatch):
     assert "还有 3 行" in snap.text
 
 
+def test_truncate_index_drops_type_only_journal_block(monkeypatch):
+    monkeypatch.setattr(memstore, "INDEX_MAX_LINES", 200)
+    normal = [format_index_line(f"m{i}.md", f"钩子{i}") for i in range(199)]
+    block = journal.build_block([journal.JournalEntry("notes.md", "日志")])
+    raw = "\n".join(normal + block)
+    # notes.md 不按文件名算日志，靠当前在册日志文件名集合认出来
+    snap = _truncate_index(raw, {"notes.md"})
+    assert snap.loaded_lines == 199
+    assert "notes.md" not in snap.text
+    assert "日志共" not in snap.text
+
+
 def test_truncate_index_keeps_journal_block_when_it_fits():
     normal = [format_index_line(f"m{i}.md", f"钩子{i}") for i in range(3)]
     block = journal.build_block(
