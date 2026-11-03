@@ -2078,7 +2078,7 @@ class MemoryBeyondPlugin(Star):
         replace_all: bool = False,
         mode: str = "replace",
     ) -> str:
-        """修改一个已有的长期记忆文件。默认 replace 模式：把 old_text 替换成 new_text，文件其余内容原样保留；改一处、补一句、更新 description 时用它，不要用 memory_write 整文件重写（重写容易丢内容）。replace 时 old_text 必须与文件现有内容逐字一致（空格、换行、标点都算）且只出现一次，所以先用 memory_read 读出当前内容再复制片段；new_text 留空等于删掉这段。append 模式：old_text 留空时把 new_text 追加到文件末尾，old_text 是某个小节标题行（如 ## 作息与习惯）时追加到该小节末尾。section 模式：old_text 是一个小节标题行，new_text 替换这一节标题下的正文，标题行保留，范围到下一个同级或更高级标题为止；标题不存在或出现多次时报错，并列出文件里的所有标题。每次修改前插件自动保存旧版；修改后会检查 [[文件名]] 链接和文件长度并在回执里提醒。
+        """修改一个已有的长期记忆文件。默认 replace 模式：把 old_text 替换成 new_text，文件其余内容原样保留；改一处、补一句、更新 description 时用它，不要用 memory_write 整文件重写（重写容易丢内容）。replace 时 old_text 必须与文件现有内容逐字一致（空格、换行、标点都算）且只出现一次，所以先用 memory_read 读出当前内容再复制片段；new_text 留空等于删掉这段。append 模式：old_text 留空时把 new_text 追加到文件末尾，old_text 是某个小节标题行（如 ## 作息与习惯）时追加到该小节末尾。section 模式：old_text 是一个小节标题行，new_text 替换这一节标题下的正文，标题行保留，范围到下一个同级或更高级标题为止；标题不存在或出现多次时报错，并列出文件里的所有标题。共享人物空间里 section 模式会做覆盖前版本检查：先用 memory_read 读当前版本，其他机器人改过之后要先重读，否则会拒绝覆盖。每次修改前插件自动保存旧版；修改后会检查 [[文件名]] 链接和文件长度并在回执里提醒。
 
         Args:
             scope(string): 作用域，global（机器人自我的全局记忆）、session（当前会话的记忆）或 people（人物记忆，一人一个 user-<数字ID>.md；通常同一平台所有会话共享，启用共享人物空间时是多个成员机器人共用的 _shared 目录）
@@ -2106,14 +2106,28 @@ class MemoryBeyondPlugin(Star):
         refusal = sharing.edit_refusal(permission, mode)
         if refusal:
             return refusal
+        actor = self._event_actor(event)
+        expected = None
+        if (
+            scope == "people"
+            and self._sharing.is_member(actor)
+            and mode == "section"
+            and (file or "").strip()
+        ):
+            # section 不是逐字替换，可能基于过期内容整节覆盖；
+            # 共享空间里沿用 memory_write 的覆盖前版本检查
+            expected = await asyncio.to_thread(self._seen.seen, actor, file)
+            if not expected:
+                return sharing.version_conflict_message(file)
         report = await store.edit(
             file,
             old_text,
             new_text,
             replace_all,
             source=self._sender_identity(event)[0],
-            actor=self._event_actor(event),
+            actor=actor,
             mode=mode,
+            expected_sha1=expected,
         )
         if report.ok:
             # 自己刚改过的版本算看过，后续整文件覆盖不会被版本检查误拦
@@ -2177,6 +2191,7 @@ class MemoryBeyondPlugin(Star):
         调试日志。
         """
         try:
+            file = (file or "").strip().lstrip("/")
             content = await store.read(file)
             if content is None:
                 return ""
@@ -2184,6 +2199,9 @@ class MemoryBeyondPlugin(Star):
             available: set[str] = set()
             for visible in self._visible_stores(event):
                 available.update(visible.list_files())
+                if self._forgetting_on():
+                    # 已遗忘文件仍可被 memory_read 恢复，链接到它不算悬空
+                    available.update(visible.forgotten_files())
             notes: list[str] = []
             missing = insights.dangling_links(
                 memstore.extract_links(doc.body), available
@@ -2263,21 +2281,37 @@ class MemoryBeyondPlugin(Star):
         # 各作用域合并后统一排序，最多 8 条；日志排在非日志后面，
         # 避免 daily-* 按文件名占满名额把真正的记忆挤掉
         hits.sort(key=lambda item: insights.search_key(item[1]))
-        lines = [
-            self._format_search_hit(label, hit)
-            for label, hit in hits[: memstore.MAX_SEARCH_RESULTS]
-        ]
-        forgotten: list[str] = []
+        forgotten_hits: list[tuple[str, insights.SearchHit]] = []
         if self._forgetting_on():
             for label, store in stores:
-                for hit in await store.search_forgotten(query, mode):
-                    forgotten.append(f"[{label}·已遗忘] {hit}")
+                for hit in await store.search_forgotten_hits(query, mode):
+                    forgotten_hits.append((label, hit))
+        # 已遗忘结果也用同一套排序；它们排在活跃结果之后，并计入
+        # 同一个 8 条上限，避免整体结果超长或 daily-* 在遗忘块里挤掉记忆
+        forgotten_hits.sort(key=lambda item: insights.search_key(item[1]))
+        shown_active = hits[: memstore.MAX_SEARCH_RESULTS]
+        remaining = max(0, memstore.MAX_SEARCH_RESULTS - len(shown_active))
+        shown_forgotten = forgotten_hits[:remaining]
+        lines = [
+            self._format_search_hit(label, hit)
+            for label, hit in shown_active
+        ]
+        forgotten = [
+            self._format_forgotten_hit(label, hit)
+            for label, hit in shown_forgotten
+        ]
+        hidden = (
+            len(hits)
+            + len(forgotten_hits)
+            - len(shown_active)
+            - len(shown_forgotten)
+        )
         if not lines and not forgotten:
             return f"没有找到匹配「{query}」的记忆。"
         text = "搜索结果（用 memory_read 读取完整内容）：\n" + "\n".join(lines + forgotten)
-        if len(hits) > memstore.MAX_SEARCH_RESULTS:
+        if hidden:
             text += (
-                f"\n（另有 {len(hits) - memstore.MAX_SEARCH_RESULTS} 条结果未显示；"
+                f"\n（另有 {hidden} 条结果未显示；"
                 "可缩小 scope 或增加搜索词）"
             )
         if forgotten:
@@ -2298,6 +2332,12 @@ class MemoryBeyondPlugin(Star):
         )
         snippets = hit.snippets or ("（正文匹配）",)
         return head + "\n" + "\n".join(f"  {line}" for line in snippets)
+
+    @staticmethod
+    def _format_forgotten_hit(label: str, hit: insights.SearchHit) -> str:
+        """已遗忘结果沿用原来的单行标注与片段格式。"""
+        snippet = hit.snippets[0] if hit.snippets else "（正文匹配）"
+        return f"[{label}·已遗忘] {hit.file}: {snippet}"
 
     # ============================================================ 管理指令
 
@@ -2401,7 +2441,11 @@ class MemoryBeyondPlugin(Star):
         )
         session_store = self._session_scope(event)
         session_files = session_store.list_files()
-        long_files = await session_store.long_files()
+        try:
+            long_files = await session_store.long_files()
+        except Exception:  # noqa: BLE001 - 状态命令不能因单个文件读失败而崩掉
+            logger.debug(LOG_PREFIX + "会话长文件扫描失败", exc_info=True)
+            long_files = []
         configured_id = self._str("summary_provider_id").strip() or "（未配置，用当前对话提供商）"
         tidy_id = self._str("consolidate_provider_id").strip() or "（未配置，同摘要提供商）"
 

@@ -69,6 +69,13 @@ def test_memory_guidance_people_variants():
     assert people_only[:600] == both[:600]
 
 
+def test_memory_guidance_mentions_new_edit_and_search_modes():
+    text = prompts.memory_guidance(True, True)
+    assert "mode=section" in text
+    assert "mode=any" in text
+    assert "[[链接]]" in text and "长" in text
+
+
 def test_extract_rules_scope_only_with_people():
     assert '"scope"' not in prompts.extract_rules(False)
     assert prompts.extract_rules(True).startswith(prompts.EXTRACT_RULES)

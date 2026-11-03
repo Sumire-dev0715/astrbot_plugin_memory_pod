@@ -752,6 +752,72 @@ def test_edit_permission_section_mode_keeps_heading_and_history(tmp_path):
     assert "身份：工程师" in store.read_history("user-123.md", versions[0].version)
 
 
+def test_section_edit_requires_fresh_read_in_shared_space(tmp_path):
+    plugin = make_plugin(tmp_path, ["Bot-A=edit", "Bot-B=edit"])
+    bot_a = FakeEvent("Bot-A", umo="Bot-A:FriendMessage:1")
+    bot_b = FakeEvent("Bot-B", umo="Bot-B:FriendMessage:2")
+    store = plugin._people_scope(bot_a.unified_msg_origin)
+    body = "## 作息\n\n早睡\n"
+    assert "已写入" in run(
+        plugin.memory_write(bot_a, "people", "user-123.md", person_file(body=body))
+    )
+
+    # 没读过当前版本，不能直接整节覆盖
+    no_read = run(
+        plugin.memory_edit(
+            bot_b,
+            "people",
+            "user-123.md",
+            old_text="## 作息",
+            new_text="晚睡",
+            mode="section",
+        )
+    )
+    assert "已发生变化" in no_read
+    assert "早睡" in run(store.read("user-123.md"))
+
+    # B 读过后 A 又改了同一节：B 基于旧版本的 section 要被拒绝
+    run(plugin.memory_read(bot_b, "people", "user-123.md"))
+    assert "已替换" in run(
+        plugin.memory_edit(
+            bot_a,
+            "people",
+            "user-123.md",
+            old_text="## 作息",
+            new_text="早睡早起",
+            mode="section",
+        )
+    )
+    stale = run(
+        plugin.memory_edit(
+            bot_b,
+            "people",
+            "user-123.md",
+            old_text="## 作息",
+            new_text="晚睡",
+            mode="section",
+        )
+    )
+    assert "已发生变化" in stale
+    content = run(store.read("user-123.md"))
+    assert "早睡早起" in content and "晚睡" not in content
+
+    # 重新读取当前版本后就能改
+    run(plugin.memory_read(bot_b, "people", "user-123.md"))
+    fresh = run(
+        plugin.memory_edit(
+            bot_b,
+            "people",
+            "user-123.md",
+            old_text="## 作息",
+            new_text="晚睡",
+            mode="section",
+        )
+    )
+    assert "已替换" in fresh
+    assert "晚睡" in run(store.read("user-123.md"))
+
+
 def test_dangling_link_hint_only_checks_visible_scopes(tmp_path):
     plugin = make_plugin(tmp_path, ["Bot-A=edit", "Bot-B=edit"])
     bot_a = FakeEvent("Bot-A", umo="Bot-A:FriendMessage:1")
@@ -820,6 +886,55 @@ def test_dangling_link_hint_sees_enabled_global_but_not_disabled_people(tmp_path
     assert "[[user-1]]" in hidden and "找不到" in hidden
 
 
+def test_dangling_link_hint_does_not_see_other_session_of_same_bot(tmp_path):
+    plugin = make_plugin(tmp_path, [])
+    event_a = FakeEvent("Bot-A", umo="Bot-A:FriendMessage:1")
+    event_b = FakeEvent("Bot-A", umo="Bot-A:FriendMessage:2")
+    assert "已写入" in run(
+        plugin.memory_write(
+            event_a, "session", "only-in-a.md", person_file("only-in-a", "只在本会话")
+        )
+    )
+    result = run(
+        plugin.memory_write(
+            event_b,
+            "session",
+            "b.md",
+            person_file("b", "见 [[only-in-a]]。"),
+        )
+    )
+    assert "[[only-in-a]]" in result and "找不到" in result
+
+
+def test_dangling_link_hint_treats_forgotten_file_as_existing(tmp_path):
+    plugin = make_plugin(tmp_path, [])
+    plugin.config["enable_forgetting"] = True
+    event = FakeEvent("Bot-A")
+    store = plugin._session_scope(event)
+    assert "已写入" in run(
+        plugin.memory_write(
+            event, "session", "old.md", person_file("old", "旧记忆")
+        )
+    )
+    assert run(store.forget("old.md")).ok
+
+    linked = run(
+        plugin.memory_write(
+            event, "session", "new.md", person_file("new", "见 [[old]]。")
+        )
+    )
+    assert "[[old]]" not in linked
+
+    # 关闭遗忘后 memory_read 无法恢复该文件，链接才算悬空
+    plugin.config["enable_forgetting"] = False
+    hidden = run(
+        plugin.memory_write(
+            event, "session", "other.md", person_file("other", "见 [[old]]。")
+        )
+    )
+    assert "[[old]]" in hidden and "找不到" in hidden
+
+
 def test_write_and_edit_receipts_mention_links_and_long_files(tmp_path):
     plugin = make_plugin(tmp_path, [])
     event = FakeEvent("Bot-A")
@@ -866,6 +981,22 @@ def test_write_and_edit_receipts_mention_links_and_long_files(tmp_path):
     assert "[[nope]]" in edited and "找不到" in edited
 
 
+def test_long_file_hint_normalizes_file_name_for_journal_detection(tmp_path):
+    plugin = make_plugin(tmp_path, [])
+    event = FakeEvent("Bot-A")
+    for name in ("/daily-2026-11-04.md", " daily-2026-11-05.md "):
+        result = run(
+            plugin.memory_write(
+                event,
+                "session",
+                name,
+                person_file("daily", "2026-01-01 " * 20),
+            )
+        )
+        assert "已写入" in result
+        assert "偏长" not in result
+
+
 def test_memory_search_tool_mode_ranking_and_format(tmp_path):
     plugin = make_plugin(tmp_path, [])
     event = FakeEvent("Bot-A")
@@ -906,6 +1037,31 @@ def test_memory_search_tool_not_crowded_out_by_daily_files(tmp_path):
     assert result.index("important.md") < result.index("daily-2026-01-01.md")
 
 
+def test_memory_search_tool_forgotten_results_use_same_ranking_and_cap(tmp_path):
+    plugin = make_plugin(tmp_path, [])
+    plugin.config["enable_forgetting"] = True
+    event = FakeEvent("Bot-A")
+    store = plugin._session_scope(event)
+    run(store.write("important.md", person_file("important", "项目 事实")))
+    for day in range(1, 10):
+        run(
+            store.write(
+                f"daily-2026-01-{day:02d}.md",
+                person_file(f"daily-2026-01-{day:02d}", "项目 日志"),
+            )
+        )
+    for name in store.list_files():
+        assert run(store.forget(name)).ok
+
+    result = run(plugin.memory_search(event, "项目", scope="session"))
+    assert "important.md" in result
+    entries = [
+        line for line in result.splitlines() if line.startswith("[session")
+    ]
+    assert len(entries) == pkg_memstore.MAX_SEARCH_RESULTS == 8
+    assert entries[0].startswith("[session·已遗忘] important.md")
+
+
 def test_mb_status_lists_long_session_files(tmp_path):
     plugin = make_plugin(tmp_path, [])
     event = FakeEvent("Bot-A")
@@ -922,9 +1078,46 @@ def test_mb_status_lists_long_session_files(tmp_path):
             event, "session", "short.md", person_file("short", "短正文")
         )
     )
+    assert "已写入" in run(
+        plugin.memory_write(
+            event,
+            "session",
+            "dense.md",
+            person_file("dense", "2026-01-01 " * 16),
+        )
+    )
+    assert "已写入" in run(
+        plugin.memory_write(
+            event,
+            "session",
+            "daily-2026-11-03.md",
+            person_file("daily-2026-11-03", "2026-01-01 " * 20),
+        )
+    )
     text = _status_text(plugin, event)
     line = next(
         item for item in text.splitlines() if item.startswith("会话长文件：")
     )
     assert "big.md" in line and "超过 8KB" in line
+    assert "dense.md" in line and "16 个日期" in line
     assert "short.md" not in line
+    # 日志只看体积：日期虽多但文件不大，不列入长文件
+    assert "daily-2026-11-03.md" not in line
+
+
+def test_mb_status_survives_non_utf8_session_file(tmp_path):
+    plugin = make_plugin(tmp_path, [])
+    event = FakeEvent("Bot-A")
+    store = plugin._session_scope(event)
+    assert "已写入" in run(
+        plugin.memory_write(
+            event, "session", "ok.md", person_file("ok", "短正文")
+        )
+    )
+    # 直接放一个非 UTF-8 的大文件：状态页只做统计，不能因解码失败而崩掉
+    (store.root / "bad.md").write_bytes(b"\xff" * (9 * 1024))
+    text = _status_text(plugin, event)
+    line = next(
+        item for item in text.splitlines() if item.startswith("会话长文件：")
+    )
+    assert "bad.md" in line and "超过 8KB" in line

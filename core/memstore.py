@@ -53,7 +53,6 @@ INDEX_WARN_RATIO = 0.8
 MEMORY_FILE_SUFFIX = ".md"
 MAX_FILE_BYTES = 64 * 1024
 MAX_SEARCH_RESULTS = 8
-MAX_SEARCH_EXCERPT = 160
 MAX_HOOK_CHARS = 100
 
 # 召回打分只看文件开头这么多字符，避免个别大文件拖慢每轮的扫描
@@ -84,7 +83,6 @@ _HOOK_WS_RE = re.compile(r"\s+")
 _LINK_RE = re.compile(r"\[\[([^\[\]\n]{1,120})\]\]")
 _INDEX_TARGET_RE = re.compile(r"\]\(([^()\s]+\.md)\)")
 _BLOCK_SCALAR_RE = re.compile(r"^[>|][+-]?$")
-_HEADING_RE = re.compile(r"^(#{1,6})\s+\S")
 
 
 def _indent(line: str) -> int:
@@ -261,8 +259,9 @@ def compose_memory(
 def _rewrite_metadata(inner: str, fields: dict[str, str]) -> str:
     """把 fields 写进 frontmatter 的 metadata 块：同名旧行替换，其余行原样；
     没有 metadata 块就在末尾补一个。只认 metadata 的直接子键，更深的
-    缩进（块标量的续行）不碰。"""
-    lines = inner.split("\n")
+    缩进（块标量的续行）不碰。frontmatter 用 CRLF 时保持 CRLF。"""
+    newline = "\r\n" if "\r\n" in inner else "\n"
+    lines = inner.splitlines()
     out: list[str] = []
     placed = False
     i = 0
@@ -304,7 +303,13 @@ def _rewrite_metadata(inner: str, fields: dict[str, str]) -> str:
             out.pop()
         out.append("metadata:")
         out.extend(f"  {k}: {v}" for k, v in fields.items())
-    return "\n".join(out)
+    result = newline.join(out)
+    # 正则捕获到的 frontmatter 内层在 CRLF 文件里以 \r 结尾（\n 属于
+    # 闭合行的匹配）；splitlines() 会把它丢掉，这里补回去，避免在
+    # 闭合的 --- 前混进一个孤立的 LF
+    if inner.endswith("\r"):
+        result += "\r"
+    return result
 
 
 def stamp_memory(
@@ -555,64 +560,6 @@ def _truncate_index(
     return IndexSnapshot(text=text, total_lines=total, loaded_lines=loaded)
 
 
-def _headings(lines: list[str]) -> list[str]:
-    """文件里的全部小节标题行（去掉首尾空白），用于报错时列出现有标题。"""
-    return [line.strip() for line in lines if _HEADING_RE.match(line.strip())]
-
-
-def _append_to_section(
-    content: str, heading: str, text: str
-) -> tuple[str, str]:
-    """把 text 追加到 heading 这个小节的末尾。
-
-    返回 (新内容, 错误)；出错时新内容为空串。heading 必须与文件里的某个
-    标题行逐字一致（去掉首尾空白后比较）且只出现一次；范围到下一个同级
-    或更高级标题为止。小节没有正文时直接接在标题下面。
-    """
-    lines = content.splitlines()
-    target = (heading or "").strip()
-    matches = [
-        i
-        for i, line in enumerate(lines)
-        if line.strip() == target and _HEADING_RE.match(line.strip())
-    ]
-    if not matches:
-        existing = "；".join(_headings(lines)) or "（文件里没有标题行）"
-        return "", (
-            "old_text 必须是文件里的小节标题行（如 ## 作息与习惯），"
-            f"没找到 {target!r}。现有标题：{existing}"
-        )
-    if len(matches) > 1:
-        return "", (
-            f"标题 {target!r} 在文件里出现了 {len(matches)} 处，"
-            "无法确定追加到哪一节；请先整理重复的标题。"
-        )
-    start = matches[0]
-    level = len(_HEADING_RE.match(lines[start].strip()).group(1))
-    end = len(lines)
-    for i in range(start + 1, len(lines)):
-        match = _HEADING_RE.match(lines[i].strip())
-        if match and len(match.group(1)) <= level:
-            end = i
-            break
-    # 小节末尾的空白行留给下一个标题，追加内容接在最后一处正文之后
-    insert_at = end
-    while insert_at > start + 1 and not lines[insert_at - 1].strip():
-        insert_at -= 1
-    block = [line for line in text.strip("\n").strip().splitlines()]
-    if not block:
-        return "", "new_text 不能为空。"
-    new_lines = lines[:insert_at]
-    if new_lines and new_lines[-1].strip():
-        new_lines.append("")
-    new_lines.extend(block)
-    if insert_at < len(lines) and new_lines[-1].strip():
-        new_lines.append("")
-    new_lines.extend(lines[insert_at:])
-    trailing = "\n" if content.endswith("\n") else ""
-    return "\n".join(new_lines) + trailing, ""
-
-
 def append_text(content: str, old: str, new: str) -> tuple[str, str]:
     """追加重载：old 为空追加到文件末尾；否则 old 是小节标题行，追加到该节末尾。"""
     text = (new or "").replace("\r\n", "\n").strip("\n").strip()
@@ -620,7 +567,7 @@ def append_text(content: str, old: str, new: str) -> tuple[str, str]:
         return "", "new_text 不能为空：追加模式要提供要补进去的文字。"
     heading = (old or "").replace("\r\n", "\n").strip()
     if heading:
-        return _append_to_section(content, heading, new)
+        return insights.append_section(content, heading, new)
     base = (content or "").rstrip()
     if not base:
         return text + "\n", ""
@@ -894,6 +841,12 @@ class ScopeStore:
             return None
 
     @staticmethod
+    def _read_text_preserve(path: Path) -> str:
+        """保留原始换行符地读文本；section 编辑要原样保留小节之外的 CRLF。"""
+        with open(path, "r", encoding="utf-8", newline="") as fh:
+            return fh.read()
+
+    @staticmethod
     def _read_for_update(path: Path) -> str | None:
         """覆盖前读取旧内容：不存在返回 None；存在但读不出来抛 OSError。
 
@@ -913,6 +866,7 @@ class ScopeStore:
         source: str = "",
         actor: str = "",
         mode: str = "replace",
+        expected_sha1: str | None = None,
     ) -> WriteReport:
         """局部修改：默认 replace 把 old 替换成 new；append 追加内容；section 换小节正文。
 
@@ -922,6 +876,8 @@ class ScopeStore:
         下一个同级或更高级标题为止；标题不存在或重复时报错并列出全部标题。
         三种模式都持锁读改写，写入前同样把旧内容存进历史；替换后的全文照样过
         体积守门并同步索引行，改了 description 索引钩子随之更新。
+        expected_sha1 非 None 时做覆盖前版本检查（共享空间的 section 模式用）：
+        持锁读到在册内容的哈希必须与它一致，否则拒绝写入。
         """
         mode = (mode or "").strip().lower()
         if mode not in ("replace", "append", "section"):
@@ -938,7 +894,7 @@ class ScopeStore:
                 "MEMORY.md 索引由插件自动维护，不可直接修改。"
                 "要改某条索引行，改对应记忆文件 frontmatter 里的 description 即可。",
             )
-        # 文件统一以 \n 落盘，模型传来的片段带 \r\n 也能对上
+        # 模型传来的片段带 \r\n 时统一成 \n 再匹配；文件本身的换行风格保持不动
         old = (old or "").replace("\r\n", "\n")
         new = (new or "").replace("\r\n", "\n")
         if mode == "replace":
@@ -953,7 +909,23 @@ class ScopeStore:
                 return WriteReport(
                     False, f"文件不存在：{name}（新建文件请用 memory_write）"
                 )
-            content = await asyncio.to_thread(path.read_text, "utf-8")
+            if mode == "section":
+                # section 只替换一节，正文其余行的 CRLF 要原样留在磁盘上
+                content = await asyncio.to_thread(
+                    self._read_text_preserve, path
+                )
+            else:
+                content = await asyncio.to_thread(path.read_text, "utf-8")
+            if expected_sha1 is not None:
+                # 版本记录来自 memory_read（文本模式已归一为 LF），
+                # section 这里读的是原始换行，比较前按同一口径归一
+                compare = content
+                if mode == "section":
+                    compare = content.replace("\r\n", "\n").replace("\r", "\n")
+                if history.content_sha1(compare) != expected_sha1:
+                    return WriteReport(
+                        False, sharing.version_conflict_message(name)
+                    )
             if mode == "append":
                 updated, error = append_text(content, old, new)
                 if error:
@@ -2165,16 +2137,41 @@ class ScopeStore:
         self, query: str, mode: str = insights.SEARCH_ALL
     ) -> list[str]:
         """同样的搜索，只搜已遗忘的文件；标注与单行片段保持原样。"""
-        return await self._search_in(
-            query, self.forgotten_files(), self.read_forgotten, mode
-        )
+        hits = await self.search_forgotten_hits(query, mode)
+        return [
+            f"{hit.file}: {hit.snippets[0] if hit.snippets else '（正文匹配）'}"
+            for hit in hits[:MAX_SEARCH_RESULTS]
+        ]
+
+    async def search_forgotten_hits(
+        self, query: str, mode: str = insights.SEARCH_ALL
+    ) -> list[insights.SearchHit]:
+        """已遗忘文件的结构化搜索结果（与在册结果同一套排序、未截断）。"""
+        mode = insights.normalize_search_mode(mode)
+        terms = insights.search_terms(query)
+        if mode is None or not terms:
+            return []
+        headers = await asyncio.to_thread(self.forgotten_headers)
+        hits: list[insights.SearchHit] = []
+        for header in headers:
+            content = await self.read_forgotten(header.file)
+            if content is None:
+                continue
+            hit = insights.build_hit(
+                header.file, header.type, header.updated, content, terms, mode
+            )
+            if hit is not None:
+                hits.append(hit)
+        return insights.rank_hits(hits)
 
     async def long_files(self) -> list[insights.LongFile]:
         """当前作用域里超过体积或日期密度阈值的文件，供写入回执与 /mb_status。"""
         headers = await asyncio.to_thread(self.headers)
         result: list[insights.LongFile] = []
         for header in headers:
-            content = await self.read(header.file)
+            content = await asyncio.to_thread(
+                self._read_text_lenient, header.file
+            )
             if content is None:
                 continue
             doc = parse_memory(content)
@@ -2189,41 +2186,15 @@ class ScopeStore:
                 )
         return result
 
-    async def _search_in(
-        self, query: str, names: list[str], reader, mode: str = insights.SEARCH_ALL
-    ) -> list[str]:
-        mode = insights.normalize_search_mode(mode)
-        terms = insights.search_terms(query)
-        if mode is None or not terms:
-            return []
-        results: list[str] = []
-        for name in names:
-            if len(results) >= MAX_SEARCH_RESULTS:
-                break
-            content = await reader(name)
-            if content is None:
-                continue
-            lowered = content.lower()
-            present = [term for term in terms if term in lowered]
-            if mode == insights.SEARCH_ANY:
-                if not present:
-                    continue
-            elif len(present) != len(terms):
-                continue
-            excerpt = self._first_hit_line(content, present)
-            results.append(f"{name}: {excerpt}")
-        return results
-
-    @staticmethod
-    def _first_hit_line(content: str, terms: list[str]) -> str:
-        for line in content.splitlines():
-            lowered = line.lower()
-            if any(t in lowered for t in terms):
-                line = line.strip()
-                if len(line) > MAX_SEARCH_EXCERPT:
-                    line = line[:MAX_SEARCH_EXCERPT] + "…"
-                return line
-        return "（正文匹配）"
+    def _read_text_lenient(self, name: str) -> str | None:
+        """读正文并用替换符容忍非 UTF-8 字节；只给长文件统计这类只读路径用。"""
+        path = self._resolve(name)
+        if path is None or not path.is_file():
+            return None
+        try:
+            return path.read_text("utf-8", errors="replace")
+        except OSError:
+            return None
 
 
 # 人物记忆一人一个文件：user-<数字ID>.md

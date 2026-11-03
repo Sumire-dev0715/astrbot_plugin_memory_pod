@@ -163,9 +163,9 @@ AstrBot 的内置压缩没有"关闭"开关（「历史超限或上下文接近�
 | 工具 | 作用 |
 | --- | --- |
 | `memory_read(scope, file)` | 读取记忆文件完整内容；`file` 省略时读 `MEMORY.md` 索引全文；读到已遗忘的文件会自动恢复它 |
-| `memory_write(scope, file, content, delete)` | 新建或整文件覆盖写入 / 删除（`delete=true`）记忆文件；索引行随写删自动同步，`MEMORY.md` 本身拒绝直写；新建文件时回执会指出疑似记同一件事的已有文件 |
-| `memory_edit(scope, file, old_text, new_text, replace_all)` | 局部替换：`old_text` 须与文件内容逐字一致且只出现一次（`replace_all=true` 时全部替换），其余内容原样保留；改了 `description` 索引行跟着更新 |
-| `memory_search(query, scope)` | 全文搜索；写入前查重、索引被截断、记不清文件名时的兜底；开启遗忘后结果里会标出已遗忘的条目 |
+| `memory_write(scope, file, content, delete)` | 新建或整文件覆盖写入 / 删除（`delete=true`）记忆文件；索引行随写删自动同步，`MEMORY.md` 本身拒绝直写；新建文件时回执会指出疑似记同一件事的已有文件；写入后还会提示正文里指向不存在文件的 `[[链接]]`，以及需要拆分或整理的长文件 |
+| `memory_edit(scope, file, old_text, new_text, replace_all, mode)` | 局部替换：`old_text` 须与文件内容逐字一致且只出现一次（`replace_all=true` 时全部替换），其余内容原样保留；`mode=append` 追加内容，`mode=section` 用 `new_text` 替换某个小节标题（如 `## 作息与习惯`）下的正文、标题行保留；修改前自动保存旧版，改了 `description` 索引行跟着更新；写入后同样提示悬空链接与长文件 |
+| `memory_search(query, scope, mode)` | 全文搜索；`mode=all`（默认）要求所有词命中，`mode=any` 命中任意一个词即可；结果非日志优先，再按命中词数、更新时间倒序，最多 8 条，每条带类型、更新日期和最多两行命中片段；写入前查重、索引被截断、记不清文件名时的兜底；开启遗忘后结果里会标出已遗忘的条目 |
 
 ## 工作原理
 

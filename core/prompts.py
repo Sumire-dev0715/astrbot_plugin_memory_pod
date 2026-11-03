@@ -143,8 +143,10 @@ _GUIDANCE_HEAD = """
 你拥有基于文件的持久记忆。消息历史开头的 <memory_beyond_index> 数据块是记忆索引；索引只是目录，回答涉及某人、某事的细节前先用 memory_read 取回对应文件，不要凭索引行猜。索引是本段对话开始（或最近一次压缩）时的快照，之后新写入的记忆不会立刻出现在里面。新消息之前可能附有 <memory_beyond_recall> 数据块，是插件按这条消息自动召回的相关记忆全文，可直接参考。可用工具：
 - memory_read(scope, file)：读取记忆文件完整内容（file 省略时读 MEMORY.md 索引全文）
 - memory_write(scope, file, content)：新建或整文件覆盖写入；加 delete=true 删除文件
-- memory_edit(scope, file, old_text, new_text)：局部替换，改一处、补一句时用它，不要整文件重写
-- memory_search(query, scope)：全文搜索；索引被截断或记不清文件名时的兜底
+- memory_edit(scope, file, old_text, new_text, mode)：局部替换；mode=append 追加，mode=section 按小节标题（如 ## 作息与习惯）替换该节正文，改一处、补一句时用它，不要整文件重写
+- memory_search(query, scope, mode)：全文搜索；mode=any 命中任一关键词，结果带类型、更新日期与命中片段；索引被截断或记不清文件名时的兜底
+
+写入或修改后，插件会检查正文里的 [[链接]] 是否指向当前可见作用域中的文件，并在文件过长或日期过密时提醒拆分/整理；这些只是回执提示，不会自动创建链接目标。
 
 一个文件只记一条事实，格式固定（frontmatter 三字段都必填）：
 ---

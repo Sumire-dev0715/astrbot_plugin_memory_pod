@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass
 
@@ -36,6 +37,8 @@ LONG_FILE_BYTES = 8 * 1024
 LONG_FILE_DATES = 15
 
 _HEADING_RE = re.compile(r"^(#{1,6})\s+\S")
+# 围栏代码块起止行：最多 3 个前导空格，至少 3 个反引号或波浪线
+_FENCE_RE = re.compile(r"^( {0,3})(`{3,}|~{3,})(.*)$")
 # 只认 YYYY-MM-DD；前后不能再接数字，避免把更长的编号误算成日期
 _DATE_RE = re.compile(r"(?<!\d)\d{4}-\d{2}-\d{2}(?!\d)")
 
@@ -77,68 +80,223 @@ def search_terms(query: str) -> list[str]:
     return terms
 
 
-def _headings(lines: list[str]) -> list[str]:
-    """文件里的全部小节标题行（去掉首尾空白），用于报错时列出现有标题。"""
-    return [line.strip() for line in lines if _HEADING_RE.match(line.strip())]
+@dataclass(frozen=True)
+class _Line:
+    """带字符偏移与原始行尾的一行，用来原样保留小节之外的换行风格。"""
+
+    start: int
+    end: int
+    next: int
+    text: str
+    ending: str
+
+
+@dataclass(frozen=True)
+class _Heading:
+    """正文里的一个标题行；index 是 _Line 下标，level 是 # 的个数。"""
+
+    index: int
+    level: int
+    text: str
+
+
+def _split_lines(content: str) -> list[_Line]:
+    """按 \r\n、\n 或 \r 拆行，保留字符偏移与每行自己的行尾。"""
+    text = content or ""
+    result: list[_Line] = []
+    index = 0
+    while index < len(text):
+        end = index
+        while end < len(text) and text[end] not in "\r\n":
+            end += 1
+        if end >= len(text):
+            ending = ""
+        elif text.startswith("\r\n", end):
+            ending = "\r\n"
+        else:
+            ending = text[end]
+        result.append(
+            _Line(index, end, end + len(ending), text[index:end], ending)
+        )
+        index = end + len(ending)
+    return result
+
+
+def _frontmatter_end(lines: list[_Line]) -> int:
+    """YAML frontmatter 的闭合行下标；没有 frontmatter 时返回 -1。
+
+    闭合行必须顶格（与 memstore._FRONTMATTER_RE 的口径一致），
+    block scalar 里缩进的 ``---`` 不算结束。
+    """
+    if not lines or lines[0].text.rstrip() != "---":
+        return -1
+    for index in range(1, len(lines)):
+        if lines[index].text.rstrip() == "---":
+            return index
+    return -1
+
+
+def _scan_headings(content: str) -> tuple[list[_Line], list[_Heading]]:
+    """正文里的标题行；跳过 YAML frontmatter 与围栏代码块内的内容。
+
+    小节标题只认正文里以 # 开头的行。frontmatter 里的 YAML 注释或块标量
+    可能也以 # 开头，围栏代码块里的示例标题同样不是小节边界，两类都必须
+    排除，否则 section/append 会把它们当成标题，删坏 frontmatter 或提前
+    结束本节。
+    """
+    lines = _split_lines(content)
+    headings: list[_Heading] = []
+    if not lines:
+        return lines, headings
+    fm_end = _frontmatter_end(lines)
+    in_fence: tuple[str, int] | None = None
+    for index, line in enumerate(lines):
+        if index <= fm_end:
+            continue
+        text = line.text
+        if in_fence is not None:
+            match = _FENCE_RE.match(text)
+            if (
+                match
+                and match.group(2)[0] == in_fence[0]
+                and len(match.group(2)) >= in_fence[1]
+                and not match.group(3).strip()
+            ):
+                in_fence = None
+            continue
+        fence = _FENCE_RE.match(text)
+        if fence and not (fence.group(2)[0] == "`" and "`" in fence.group(3)):
+            in_fence = (fence.group(2)[0], len(fence.group(2)))
+            continue
+        match = _HEADING_RE.match(text)
+        if match:
+            headings.append(_Heading(index, len(match.group(1)), text.strip()))
+    return lines, headings
+
+
+def _heading_names(headings: list[_Heading]) -> str:
+    return "；".join(item.text for item in headings) or "（文件里没有标题行）"
+
+
+def _locate_section(
+    content: str, heading: str
+) -> tuple[list[_Line], int, int, str]:
+    """定位标题行与本节结束行；出错时返回 (行表, -1, -1, 错误)。"""
+    lines, headings = _scan_headings(content)
+    target = (heading or "").replace("\r\n", "\n").strip()
+    if not target or "\n" in target or not _HEADING_RE.match(target):
+        return lines, -1, -1, (
+            "old_text 必须是一个小节标题行（如 ## 作息与习惯）。"
+            f"现有标题：{_heading_names(headings)}"
+        )
+    matches = [item for item in headings if item.text == target]
+    if not matches:
+        return lines, -1, -1, (
+            f"没有找到小节标题 {target!r}。现有标题：{_heading_names(headings)}"
+        )
+    if len(matches) > 1:
+        return lines, -1, -1, (
+            f"小节标题 {target!r} 在文件里出现了 {len(matches)} 处，"
+            "无法确定操作哪一节；请先整理重复的标题。"
+            f"现有标题：{_heading_names(headings)}"
+        )
+    start = matches[0]
+    end = len(lines)
+    for item in headings:
+        if item.index > start.index and item.level <= start.level:
+            end = item.index
+            break
+    return lines, start.index, end, ""
+
+
+def _preferred_newline(content: str) -> str:
+    """文件主要使用的换行符；新插入的行沿用它。"""
+    crlf = (content or "").count("\r\n")
+    lf = (content or "").count("\n") - crlf
+    cr = (content or "").count("\r") - crlf
+    if crlf and crlf >= lf and crlf >= cr:
+        return "\r\n"
+    if lf:
+        return "\n"
+    if cr:
+        return "\r"
+    return "\n"
+
+
+def _block_lines(text: str) -> list[str]:
+    """把待写入的正文拆成行；只去掉首尾空行，保留行内空格与空行。"""
+    block = (text or "").replace("\r\n", "\n").replace("\r", "\n").strip("\n")
+    return block.split("\n") if block.strip() else []
 
 
 def replace_section(content: str, heading: str, text: str) -> tuple[str, str]:
     """用 text 替换 heading 这一节的正文，标题行原样保留。
 
-    返回 (新内容, 错误)；出错时新内容为空串。heading 必须与文件里的某个
+    返回 (新内容, 错误)；出错时新内容为空串。heading 必须与正文里的某个
     标题行逐字一致（去掉首尾空白后比较）且只出现一次；正文范围到下一个
     同级或更高级标题为止，更深的子标题属于本节正文，一并被替换。text 留空
-    表示清空这一节正文。标题不存在或重复时列出文件里的全部标题。
+    表示清空这一节正文。标题不存在或重复时列出正文里的全部标题。
+
+    frontmatter 与围栏代码块里的 # 行不算标题；小节之外的字符（含 CRLF
+    行尾）原样保留，只有被替换的正文与新增的空白行会重新拼接。
     """
-    lines = content.splitlines()
-    target = (heading or "").replace("\r\n", "\n").strip()
-    if not target or "\n" in target:
-        existing = "；".join(_headings(lines)) or "（文件里没有标题行）"
-        return "", (
-            "old_text 必须是一个小节标题行（如 ## 作息与习惯）。"
-            f"现有标题：{existing}"
-        )
-    matches = [
-        i
-        for i, line in enumerate(lines)
-        if line.strip() == target and _HEADING_RE.match(line.strip())
-    ]
-    if not matches:
-        existing = "；".join(_headings(lines)) or "（文件里没有标题行）"
-        return "", (
-            f"没有找到小节标题 {target!r}。现有标题：{existing}"
-        )
-    if len(matches) > 1:
-        existing = "；".join(_headings(lines)) or "（文件里没有标题行）"
-        return "", (
-            f"小节标题 {target!r} 在文件里出现了 {len(matches)} 处，"
-            f"无法确定替换哪一节；请先整理重复的标题。现有标题：{existing}"
-        )
-    start = matches[0]
-    level = len(_HEADING_RE.match(lines[start].strip()).group(1))
-    end = len(lines)
-    for i in range(start + 1, len(lines)):
-        match = _HEADING_RE.match(lines[i].strip())
-        if match and len(match.group(1)) <= level:
-            end = i
-            break
-    block = (text or "").replace("\r\n", "\n").strip("\n")
-    body_lines = block.splitlines() if block.strip() else []
-    new_lines = list(lines[: start + 1])
+    lines, start, end, error = _locate_section(content, heading)
+    if error:
+        return "", error
+    nl = _preferred_newline(content)
+    heading_line = lines[start]
+    body_lines = _block_lines(text)
+    pieces: list[str] = []
     if body_lines:
-        new_lines.append("")
-        new_lines.extend(body_lines)
-    if end < len(lines):
-        # 标题与下一个同级/更高级标题之间留一个空行；原来的空白行属于
-        # 本节正文，已经被替换掉，不再保留
-        new_lines.append("")
-        new_lines.extend(lines[end:])
-    trailing = "\n" if content.endswith("\n") else ""
-    return "\n".join(new_lines) + trailing, ""
+        # 标题行与正文之间留一个空行；标题行自己没有行尾时先补一个
+        pieces.append(nl if heading_line.ending else nl + nl)
+        pieces.append(nl.join(body_lines))
+        if end < len(lines):
+            # 正文末尾一行 + 空行，接下一个标题
+            pieces.append(nl + nl)
+        elif content.endswith(("\n", "\r")):
+            pieces.append(nl)
+    elif end < len(lines):
+        # 清空正文：标题与下一个标题之间仍留一个空行
+        pieces.append(nl)
+    tail = content[lines[end].start:] if end < len(lines) else ""
+    return content[: heading_line.next] + "".join(pieces) + tail, ""
+
+
+def append_section(content: str, heading: str, text: str) -> tuple[str, str]:
+    """把 text 追加到 heading 这一节的末尾，标题与小节之外的字符保持原样。
+
+    与 replace_section 使用同一套正文标题扫描（排除 frontmatter 与围栏
+    代码块）；追加位置在本节最后一行非空正文之后、原有尾部空行之前。
+    """
+    lines, start, end, error = _locate_section(content, heading)
+    if error:
+        return "", error
+    block = _block_lines(text)
+    if not block:
+        return "", "new_text 不能为空：追加模式要提供要补进去的文字。"
+    nl = _preferred_newline(content)
+    insert_index = start
+    for index in range(start + 1, end):
+        if lines[index].text.strip():
+            insert_index = index
+    insert_line = lines[insert_index]
+    prefix = content[: insert_line.next]
+    tail = content[insert_line.next:]
+    if prefix and not prefix.endswith(("\n", "\r")):
+        prefix += nl
+    pieces = [nl, nl.join(block), nl]
+    if tail and not tail.startswith(("\n", "\r")):
+        pieces.append(nl)
+    return prefix + "".join(pieces) + tail, ""
 
 
 def _snippet_lines(content: str, terms: list[str]) -> tuple[str, ...]:
-    """命中词所在的前几行，去重、去首尾空白并限长。"""
+    """命中词所在的前几行，去重、去首尾空白并限长。
+
+    超长行优先截取命中词附近的一小段，避免命中词在 160 字之后时
+    片段里反而看不到它。
+    """
     found: list[str] = []
     for line in (content or "").splitlines():
         cleaned = line.strip()
@@ -150,7 +308,16 @@ def _snippet_lines(content: str, terms: list[str]) -> tuple[str, ...]:
         if cleaned in found:
             continue
         if len(cleaned) > SNIPPET_CHARS:
-            cleaned = cleaned[: SNIPPET_CHARS - 1] + "…"
+            positions = [lowered.find(term) for term in terms]
+            pos = min((item for item in positions if item >= 0), default=-1)
+            if pos > SNIPPET_CHARS - 20:
+                start = max(0, pos - 20)
+                end = start + SNIPPET_CHARS - 2
+                prefix = "…" if start > 0 else ""
+                suffix = "…" if end < len(cleaned) else ""
+                cleaned = prefix + cleaned[start:end] + suffix
+            else:
+                cleaned = cleaned[: SNIPPET_CHARS - 1] + "…"
         found.append(cleaned)
         if len(found) >= MAX_SNIPPETS:
             break
@@ -236,7 +403,9 @@ def dangling_link_hint(missing: list[str]) -> str:
 
 
 def _size_label(size: int) -> str:
-    return f"{size / 1024:.1f}KB"
+    """向上取到 0.1KB，避免刚超过阈值时显示成“约 8.0KB，超过 8KB”。"""
+    tenths = math.ceil(size / 102.4)
+    return f"{tenths / 10:.1f}KB"
 
 
 def count_dates(body: str) -> int:

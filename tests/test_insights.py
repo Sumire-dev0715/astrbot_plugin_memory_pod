@@ -136,6 +136,122 @@ def test_scope_edit_section_goes_through_history(tmp_path):
     assert "旧作息，晚睡" in old and "早睡早起" not in old
 
 
+def test_section_scan_skips_frontmatter_and_fenced_code():
+    content = (
+        "---\n"
+        "name: x\n"
+        "description: |\n"
+        "  # 这不是标题\n"
+        "  ---\n"
+        "---\n"
+        "\n"
+        "# 用户档案\n"
+        "正文\n"
+        "\n"
+        "## 代码\n"
+        "```markdown\n"
+        "## 代码里的示例标题\n"
+        "```\n"
+        "本节结尾\n"
+        "\n"
+        "## 下一节\n"
+        "旧\n"
+    )
+    headings = [item.text for item in insights._scan_headings(content)[1]]
+    assert headings == ["# 用户档案", "## 代码", "## 下一节"]
+
+    # frontmatter 里的 # 行不能当标题：既不能删掉 frontmatter，也不能误判重复
+    missing, error = insights.replace_section(content, "# 这不是标题", "新")
+    assert missing == ""
+    assert "没有找到" in error and "# 用户档案" in error
+
+    updated, error = insights.replace_section(content, "## 代码", "新代码")
+    assert error == ""
+    assert updated.startswith("---\nname: x\n")
+    assert "# 这不是标题" in updated
+    assert "新代码" in updated
+    assert "本节结尾" not in updated and "代码里的示例标题" not in updated
+    assert "## 下一节\n旧\n" in updated
+
+    # 围栏代码块里的同名标题不算重复，append 也把整节追加到正确位置
+    appended, error = insights.append_section(content, "## 代码", "补充")
+    assert error == ""
+    assert appended.index("本节结尾") < appended.index("补充")
+    assert appended.index("补充") < appended.index("## 下一节")
+
+
+def test_section_edit_rejects_frontmatter_comment_without_touching_file(tmp_path):
+    """回归：frontmatter 里的 # 行曾被当成标题，整份 frontmatter 被删掉。"""
+    store = ScopeStore(tmp_path)
+    content = (
+        "---\n"
+        "name: x\n"
+        "description: 甲\n"
+        "metadata:\n"
+        "  type: user\n"
+        "# 用户档案\n"
+        "---\n"
+        "\n"
+        "正文\n"
+    )
+    run(store.write("x.md", content))
+    before = run(store.read("x.md"))
+    index_before = (tmp_path / INDEX_FILENAME).read_text("utf-8")
+
+    report = run(store.edit("x.md", "# 用户档案", "新正文", mode="section"))
+    assert not report.ok
+    assert "没有找到" in report.message
+    assert run(store.read("x.md")) == before
+    assert (tmp_path / INDEX_FILENAME).read_text("utf-8") == index_before
+    assert store.history_versions("x.md") == []
+
+
+def test_scope_edit_section_preserves_crlf_end_to_end(tmp_path):
+    store = ScopeStore(tmp_path)
+    raw = (
+        "---\r\nname: a\r\ndescription: 测试\r\nmetadata:\r\n"
+        "  type: user\r\n---\r\n\r\n"
+        "## 甲\r\n旧\r\n\r\n## 乙\r\n乙正文\r\n"
+    )
+    (tmp_path / "a.md").write_bytes(raw.encode("utf-8"))
+    report = run(store.edit("a.md", "## 甲", "新正文", mode="section"))
+    assert report.ok, report.message
+    data = (tmp_path / "a.md").read_bytes()
+    assert b"\n" not in data.replace(b"\r\n", b"")
+    assert "## 乙\r\n乙正文\r\n".encode("utf-8") in data
+    assert "旧".encode("utf-8") not in data
+
+
+def test_stamp_memory_preserves_crlf_frontmatter():
+    raw = (
+        "---\r\nname: a\r\ndescription: 测试\r\nmetadata:\r\n"
+        "  type: user\r\n---\r\n\r\n正文\r\n"
+    )
+    stamped = memstore.stamp_memory(raw, time.time(), "111")
+    assert b"\n" not in stamped.encode("utf-8").replace(b"\r\n", b"")
+    assert "\r\n  created: " in stamped and "\r\n  updated: " in stamped
+    assert "\r\n---\r\n\r\n正文\r\n" in stamped
+
+
+def test_section_edits_preserve_crlf_outside_section():
+    content = (
+        "---\r\nname: x\r\n---\r\n\r\n"
+        "## 甲\r\n旧一\r\n旧二\r\n\r\n"
+        "## 乙\r\n乙正文\r\n"
+    )
+    updated, error = insights.replace_section(content, "## 甲", "新正文")
+    assert error == ""
+    assert updated.startswith("---\r\nname: x\r\n---\r\n\r\n## 甲\r\n")
+    assert "## 乙\r\n乙正文\r\n" in updated
+    assert "旧一" not in updated
+    assert "\n" not in updated.replace("\r\n", "")
+
+    appended, error = insights.append_section(content, "## 甲", "补一句")
+    assert error == ""
+    assert "## 乙\r\n乙正文\r\n" in appended
+    assert "\n" not in appended.replace("\r\n", "")
+
+
 # ---------------------------------------------------------------- 搜索模式与排序
 
 
@@ -232,6 +348,42 @@ def test_search_hit_has_type_updated_and_two_snippets(tmp_path):
     assert hit.snippets[1] == "alpha 第二行"
 
 
+def test_search_forgotten_ranks_like_active_results(tmp_path):
+    store = ScopeStore(tmp_path)
+    write_file(
+        tmp_path, "important.md", memory_md("important", body="项目 事实")
+    )
+    for day in range(1, 10):
+        write_file(
+            tmp_path,
+            f"daily-2026-01-{day:02d}.md",
+            memory_md(f"daily-2026-01-{day:02d}", "日志", "project", body="项目 日志"),
+        )
+    names = store.list_files()
+
+    async def scenario():
+        for name in names:
+            report = await store.forget(name)
+            assert report.ok, report.message
+        hits = await store.search_forgotten_hits("项目")
+        assert hits[0].file == "important.md"
+        assert all(hit.journal for hit in hits[1:])
+        strings = await store.search_forgotten("项目")
+        assert len(strings) == memstore.MAX_SEARCH_RESULTS == 8
+        assert strings[0].startswith("important.md")
+
+    run(scenario())
+
+
+def test_snippet_window_keeps_hit_beyond_160_chars():
+    line = "x" * 300 + " alpha"
+    hit = insights.build_hit("a.md", "user", 0.0, line, ["alpha"])
+    assert hit is not None
+    snippet = hit.snippets[0]
+    assert "alpha" in snippet
+    assert len(snippet) <= insights.SNIPPET_CHARS
+
+
 def test_search_forgotten_keeps_old_format_and_supports_any(tmp_path):
     store = ScopeStore(tmp_path)
     write_file(tmp_path, "a.md", memory_md("a", body="alpha"))
@@ -265,7 +417,7 @@ def test_dangling_links_normalize_and_ignore_existing():
 def test_long_file_size_threshold_is_strict_and_journal_ignores_dates():
     assert insights.long_file_reasons("a.md", "user", "短正文", 8 * 1024) == []
     reasons = insights.long_file_reasons("a.md", "user", "短正文", 8 * 1024 + 1)
-    assert reasons == ["约 8.0KB，超过 8KB"]
+    assert reasons == ["约 8.1KB，超过 8KB"]
 
     body = "2026-01-01 " * 20
     reasons = insights.long_file_reasons("a.md", "user", body, 100)
