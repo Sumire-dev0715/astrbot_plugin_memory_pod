@@ -1020,8 +1020,11 @@ def test_extract_gate_depends_on_permission(tmp_path):
 def test_auto_tidy_people_target_requires_edit(tmp_path):
     """定期自动整理共享人物空间只由 edit 级成员的会话触发。"""
 
-    async def scheduled(level):
-        plugin = make_plugin(tmp_path / level, [f"Bot-A={level}"])
+    async def scheduled(level, event=None, members=None):
+        plugin = make_plugin(
+            tmp_path / level,
+            members if members is not None else [f"Bot-A={level}"],
+        )
         plugin.config["auto_consolidate"] = "auto"
         plugin._tidy_checked = {}
         plugin._tidy_gate = asyncio.Lock()
@@ -1032,7 +1035,7 @@ def test_auto_tidy_people_target_requires_edit(tmp_path):
             seen.append([(scope, key) for scope, key, _ in targets])
 
         plugin._auto_tidy = fake_auto
-        plugin._maybe_tidy("Bot-A:FriendMessage:1", 1000.0)
+        plugin._maybe_tidy(event or FakeEvent("Bot-A"), 1000.0)
         await asyncio.sleep(0.01)
         return seen
 
@@ -1044,6 +1047,52 @@ def test_auto_tidy_people_target_requires_edit(tmp_path):
         assert batches and all(
             scope == "session" for batch in batches for scope, _ in batch
         )
+
+    # 非共享人物空间：只由自己一个平台使用，照旧触发定期整理
+    solo = run(scheduled("solo", members=[]))
+    assert ("people", pkg_memstore.safe_key("Bot-A")) in solo[0]
+
+    # UMO 前缀是 edit 成员、事件 platform_id 却是 read 成员：按事件身份判定，
+    # 不能借 UMO 触发共享人物空间的自动整理
+    mismatch = run(
+        scheduled(
+            "mismatch",
+            event=FakeEvent("Bot-B", umo="Bot-A:FriendMessage:1"),
+            members=["Bot-A=edit", "Bot-B=read"],
+        )
+    )
+    assert all(
+        scope != "people" for batch in mismatch for scope, _ in batch
+    )
+
+
+def test_auto_forget_people_target_uses_event_identity(tmp_path):
+    """遗忘扫描同样按事件的 platform_id 判定共享人物空间权限。"""
+
+    async def scheduled(members, event):
+        plugin = make_plugin(tmp_path / "forget", members)
+        plugin.config["enable_forgetting"] = True
+        plugin._last_sweep = {}
+        plugin._tasks = set()
+        seen = []
+
+        async def fake_sweep(targets, now):
+            seen.append([(key, store.root.name) for key, store in targets])
+
+        plugin._forget_sweep = fake_sweep
+        plugin._maybe_forget(event, 10 ** 9)
+        await asyncio.sleep(0.01)
+        return seen
+
+    normal = run(scheduled(["Bot-A=edit"], FakeEvent("Bot-A")))
+    assert ("", pkg_sharing.SHARED_KEY) in normal[0]
+    mismatch = run(
+        scheduled(
+            ["Bot-A=edit", "Bot-B=read"],
+            FakeEvent("Bot-B", umo="Bot-A:FriendMessage:1"),
+        )
+    )
+    assert all(name != pkg_sharing.SHARED_KEY for _, name in mismatch[0])
 
 
 def test_background_extraction_writes_people_only_for_edit(tmp_path):

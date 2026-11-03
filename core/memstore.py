@@ -73,6 +73,9 @@ MAX_SOURCES = 5
 
 # 使用统计旁存文件（不是记忆，不进索引）与已遗忘文件的子目录
 USAGE_FILENAME = ".usage.json"
+# 改名谱系：新名字 -> 旧名字列表。只给「彻底删除（含历史）」找
+# .trash-scopes 归档里的旧名副本用；不是记忆文件，不进索引与召回。
+RENAMES_FILENAME = ".renames.json"
 FORGOTTEN_DIRNAME = "forgotten"
 # 指导类记忆是行为约束，长期不被提起不代表失效，不参与遗忘
 FORGET_EXEMPT_TYPES = ("feedback",)
@@ -1118,15 +1121,90 @@ class ScopeStore:
             await asyncio.to_thread(self._forget_usage, name)
         return WriteReport(True, f"已删除 {name}，对应索引行已同步移除")
 
+    def _renames_path(self) -> Path:
+        return self.root / RENAMES_FILENAME
+
+    def _load_renames(self) -> dict[str, list[str]]:
+        """读改名谱系；坏文件、非法文件名一律忽略，不影响正常读写。"""
+        path = self._renames_path()
+        if not path.is_file():
+            return {}
+        try:
+            data = json.loads(path.read_text("utf-8"))
+        except (OSError, ValueError):
+            return {}
+        result: dict[str, list[str]] = {}
+        if not isinstance(data, dict):
+            return result
+        for key, raw in data.items():
+            name = str(key)
+            if not self.is_valid_name(name) or not isinstance(raw, list):
+                continue
+            names = [
+                str(item)
+                for item in raw
+                if self.is_valid_name(str(item)) and str(item) != name
+            ]
+            if names:
+                result[name] = list(dict.fromkeys(names))
+        return result
+
+    def _save_renames(self, data: dict[str, list[str]]) -> None:
+        path = self._renames_path()
+        if not data:
+            try:
+                path.unlink()
+            except OSError:
+                pass
+            return
+        try:
+            self._write_atomic(path, json.dumps(data, ensure_ascii=False, indent=2))
+        except OSError:
+            # 谱系只用于清理 .trash-scopes 里的旧名副本；写失败不能让改名失败
+            pass
+
+    def _remember_rename(self, old: str, new: str) -> None:
+        """记下 new 曾经叫过的名字，供彻底删除时清理归档里的旧名副本。"""
+        data = self._load_renames()
+        lineage = [old] + data.pop(old, [])
+        merged: list[str] = []
+        for name in data.get(new, []) + lineage:
+            if name != new and name not in merged:
+                merged.append(name)
+        if merged:
+            data[new] = merged
+        else:
+            data.pop(new, None)
+        self._save_renames(data)
+
+    def _forget_rename(self, name: str) -> None:
+        """文件被彻底删除后，把谱系里与它相关的记录一并清掉。"""
+        data = self._load_renames()
+        changed = False
+        if name in data:
+            data.pop(name)
+            changed = True
+        for key, olds in list(data.items()):
+            kept = [item for item in olds if item != name]
+            if len(kept) != len(olds):
+                changed = True
+            if kept:
+                data[key] = kept
+            else:
+                data.pop(key)
+        if changed:
+            self._save_renames(data)
+
     async def finalize_rename(
         self, old: str, new: str, actor: str = ""
     ) -> WriteReport:
-        """改名收尾：迁移旧名的全部历史版本、删旧文件，并记一条 rename 审计。
+        """改名收尾：迁移旧名的全部历史与回收站条目、删旧文件，记一条 rename 审计。
 
         调用方先把新内容写进新名字（write 会顺带更新索引）。这里在同一把锁里
         把旧正文存成新名字下的一个历史版本（动作 rename），再把旧名字的历史
-        目录整份迁到新名字下，最后删掉旧文件——旧名不再留下回收站条目，之后
-        按新名字「彻底删除（含历史）」就能清掉这份记忆的全部备份。
+        目录和回收站条目整份迁到新名字下，最后删掉旧文件。改名前整份作用域
+        归档里可能还有旧名副本；谱系写进 .renames.json，之后按新名字
+        「彻底删除（含历史）」时会一并清掉。
         """
         old = (old or "").strip().lstrip("/")
         new = (new or "").strip().lstrip("/")
@@ -1171,9 +1249,17 @@ class ScopeStore:
                 )
             except OSError as exc:
                 return WriteReport(False, f"旧版本保存失败，未完成改名：{exc}")
-            moved = await asyncio.to_thread(
-                self._history.move_versions, old, new
-            )
+            try:
+                moved_versions = await asyncio.to_thread(
+                    self._history.move_versions, old, new
+                )
+                moved_trash = await asyncio.to_thread(
+                    self._history.move_trash, old, new
+                )
+            except OSError as exc:
+                return WriteReport(
+                    False, f"旧名的历史或回收站条目迁移失败，未删除 {old}：{exc}"
+                )
             try:
                 await asyncio.to_thread(old_path.unlink)
             except OSError as exc:
@@ -1183,6 +1269,7 @@ class ScopeStore:
             self._drop_header(old)
             await asyncio.to_thread(self._remove_index_line, old)
             await asyncio.to_thread(self._forget_usage, old)
+            self._remember_rename(old, new)
             before_sha = (
                 history.content_sha1(old_content)
                 if isinstance(old_content, str)
@@ -1202,7 +1289,8 @@ class ScopeStore:
             )
         return WriteReport(
             True,
-            f"已改名为 {new}，旧名的 {moved + 1} 个历史版本已迁到新名下",
+            f"已改名为 {new}，旧名的 {moved_versions + 1} 个历史版本、"
+            f"{moved_trash} 个回收站条目已迁到新名下",
         )
 
     async def purge(self, actor: str = "") -> int:
@@ -1800,12 +1888,16 @@ class ScopeStore:
             removed_trash = await asyncio.to_thread(
                 self._history.remove_trash_for, name
             )
-            removed_archives = await asyncio.to_thread(
-                self._history.remove_from_archives,
-                self._scopes_trash_dir,
-                self._scope_label,
-                name,
-            )
+            # 改名谱系里的旧名字也要从 .trash-scopes 归档里清掉；归档是
+            # 改名前的整作用域快照时，里面只有旧名副本
+            removed_archives = 0
+            for target in [name] + self._load_renames().get(name, []):
+                removed_archives += await asyncio.to_thread(
+                    self._history.remove_from_archives,
+                    self._scopes_trash_dir,
+                    self._scope_label,
+                    target,
+                )
             if (
                 not active_present
                 and not dormant_present
@@ -1817,6 +1909,7 @@ class ScopeStore:
             self._drop_header(name)
             await asyncio.to_thread(self._remove_index_line, name)
             await asyncio.to_thread(self._forget_usage, name)
+            self._forget_rename(name)
             self._history.record(
                 history.ACTION_PURGE_FILE,
                 name,

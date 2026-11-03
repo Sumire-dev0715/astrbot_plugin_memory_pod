@@ -716,20 +716,18 @@ class MemoryBeyondPlugin(Star):
         return self._sharing.permission(actor) == sharing.PERMISSION_EDIT
 
     def _can_maintain_people(
-        self, umo: str, store: memstore.ScopeStore
+        self, platform_id: str, store: memstore.ScopeStore
     ) -> bool:
         """定期维护（自动遗忘扫描、定期整理）能否处理这个人物作用域。
 
-        共享空间里只有 edit 级成员或非成员自己的目录触发维护；append / read
+        权限只看事件的 platform_id（与工具层一致，绝不信任 UMO 前缀）；
+        共享空间里只有 edit 级成员或非成员自己的目录触发维护，append / read
         级成员只读不写，不该因为他们的会话让共享文件对所有人退出索引或被
         自动改写。管理页手动发起的整理不算自动维护，不受这里限制。
         """
         if not self._store.is_shared_people_scope(store):
             return True
-        return self._people_permission(self._platform_of(umo)) in (
-            None,
-            sharing.PERMISSION_EDIT,
-        )
+        return self._people_permission(platform_id) == sharing.PERMISSION_EDIT
 
     def _shared_people_actor(self, umo: str, store: memstore.ScopeStore) -> str:
         """共享人物作用域对应的机器人 platform_id；不是共享空间返回空串。
@@ -910,9 +908,9 @@ class MemoryBeyondPlugin(Star):
         if memory_on:
             self._maybe_extract(rt, umo, contexts, n_system, now)
             # ---- 遗忘扫描：长期没用到的记忆退出索引与召回（后台，按目录节流） ----
-            self._maybe_forget(umo, now)
+            self._maybe_forget(event, now)
             # ---- 定期整理：到了时间又攒够新记忆的作用域在后台复盘 ----
-            self._maybe_tidy(umo, now)
+            self._maybe_tidy(event, now)
 
         # ---- 记忆索引块（对话内快照；新对话、压缩后、WebUI 改动后从磁盘刷新） ----
         index_msg = None
@@ -1446,10 +1444,11 @@ class MemoryBeyondPlugin(Star):
 
     # ============================================================ 遗忘
 
-    def _maybe_forget(self, umo: str, now: float) -> None:
+    def _maybe_forget(self, event: AstrMessageEvent, now: float) -> None:
         """遗忘扫描：本会话涉及的每个作用域目录至多每隔一段时间扫一次，后台进行。"""
         if not self._forgetting_on():
             return
+        umo = str(event.unified_msg_origin)
         # (索引快照要作废的会话, 作用域)；None 作废全部会话（global 对所有会话可见），
         # "" 不作废任何会话（people 没有索引注入）
         targets: list[tuple[str | None, memstore.ScopeStore]] = [
@@ -1458,10 +1457,12 @@ class MemoryBeyondPlugin(Star):
         if self._global_on():
             targets.append((None, self._global_scope()))
         if self._people_on():
-            people_store = self._people_scope(umo)
-            # 共享空间里 append / read 级成员不触发遗忘扫描：那会把文件对所有
-            # 成员移出索引，属于写操作
-            if self._can_maintain_people(umo, people_store):
+            # 目录与权限都按事件的 platform_id 取，UMO 前缀只用于会话；
+            # 两者不一致时宁可这一轮不扫描 people，也不越权处理共享文件
+            people_store, _ = self._people_store_for_event(event)
+            if people_store is not None and self._can_maintain_people(
+                self._event_actor(event), people_store
+            ):
                 targets.append(("", people_store))
         due = [
             (key, store)
@@ -1502,11 +1503,12 @@ class MemoryBeyondPlugin(Star):
 
     # ============================================================ 定期整理
 
-    def _maybe_tidy(self, umo: str, now: float) -> None:
+    def _maybe_tidy(self, event: AstrMessageEvent, now: float) -> None:
         """本会话涉及的每个作用域至多每隔几分钟看一眼该不该整理，要整理的放后台。"""
         mode = self.tidy_mode()
         if mode == tidy.MODE_OFF:
             return
+        umo = str(event.unified_msg_origin)
         # (作用域, 目录名, 索引快照要作废的会话)；含义同 _maybe_forget
         targets: list[tuple[str, str | None, str | None]] = [
             ("session", self._store.session_scope(umo).root.name, umo)
@@ -1514,11 +1516,13 @@ class MemoryBeyondPlugin(Star):
         if self._global_on():
             targets.append(("global", None, None))
         if self._people_on():
-            people_store = self._people_scope(umo)
-            # 与遗忘扫描、后台提取一致：共享人物空间只有 edit 级成员的会话
-            # 能触发定期自动整理，read / append 成员不会间接改写共享文件。
-            # 管理页手动发起的整理不受此限制。
-            if self._can_maintain_people(umo, people_store):
+            # 与遗忘扫描、后台提取一致：目录与权限都按事件的 platform_id 取；
+            # 共享人物空间只有 edit 级成员的会话能触发定期自动整理，read /
+            # append 成员不会间接改写共享文件。管理页手动整理不受此限制。
+            people_store, _ = self._people_store_for_event(event)
+            if people_store is not None and self._can_maintain_people(
+                self._event_actor(event), people_store
+            ):
                 targets.append(("people", people_store.root.name, ""))
         due = []
         for scope, key, cache_key in targets:

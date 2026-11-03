@@ -420,6 +420,11 @@ class HistoryLog:
         改名后旧名字不再单独出现：管理页只按新名字查看、恢复和「彻底删除
         （含历史）」。新名下已有同一时间戳的版本（删掉后重建再改名）时，
         把迁过来的版本时间往后挪到不冲突为止；日期非法的陌生文件不碰。
+        审计按新文件名补一行（动作、actor、来源、前后哈希沿用原行），
+        这样历史面板在新名字下仍能看到是谁改的。
+
+        任何一个版本搬不动都整体回滚并抛 OSError：调用方据此保留旧文件，
+        不会出现"部分历史留在旧名、旧文件却已删除"的静默成功。
         """
         if not old or not new or old == new:
             return 0
@@ -432,28 +437,118 @@ class HistoryLog:
                 entries = list(source.iterdir())
             except OSError:
                 return 0
-            moved = 0
-            for path in entries:
-                if not path.is_file() or not path.name.endswith(".md"):
-                    continue
-                match = _VERSION_ID_RE.match(path.name[: -len(".md")])
-                if match is None:
-                    continue
-                ts = _parse_stamp(match.group(1))
-                if ts is None:
-                    continue
-                target = dest / path.name
-                while target.exists():
-                    ts = round(ts + 0.001, 3)
-                    target = dest / f"{_stamp(ts)}-{match.group(2)}.md"
-                dest.mkdir(parents=True, exist_ok=True)
-                try:
+            audit = self._audit_index()
+            moved: list[tuple[Path, Path]] = []
+            pending: list[tuple[float, str, dict]] = []
+            try:
+                for path in entries:
+                    if not path.is_file() or not path.name.endswith(".md"):
+                        continue
+                    match = _VERSION_ID_RE.match(path.name[: -len(".md")])
+                    if match is None:
+                        continue
+                    ts = _parse_stamp(match.group(1))
+                    if ts is None:
+                        continue
+                    action = match.group(2)
+                    target = dest / path.name
+                    while target.exists():
+                        ts = round(ts + 0.001, 3)
+                        target = dest / f"{_stamp(ts)}-{action}.md"
+                    dest.mkdir(parents=True, exist_ok=True)
                     os.replace(path, target)
-                    moved += 1
-                except OSError:
-                    continue
+                    moved.append((target, path))
+                    row = audit.get((old, action, match.group(1)))
+                    if row:
+                        pending.append((ts, action, row))
+            except OSError:
+                # 把已经搬过去的版本放回原处，旧名字的历史保持完整
+                for target, path in reversed(moved):
+                    try:
+                        os.replace(target, path)
+                    except OSError:
+                        continue
+                _rmdir_if_empty(dest)
+                raise
+            for ts, action, row in pending:
+                self.record(
+                    action,
+                    new,
+                    str(row.get("actor") or ""),
+                    str(row.get("source") or ""),
+                    str(row.get("before_sha1") or ""),
+                    str(row.get("after_sha1") or ""),
+                    ts=ts,
+                )
             _rmdir_if_empty(source)
-            return moved
+            return len(moved)
+
+    def move_trash(self, old: str, new: str) -> int:
+        """把旧文件名的回收站条目迁到新文件名下，返回迁走的条数。
+
+        之后对新名字「彻底删除（含历史）」会连同这些条目一起清掉，旧名字
+        不再残留可读的正文。审计按新文件名补一行，actor / 来源沿用原行；
+        搬不动时整体回滚并抛 OSError，由调用方保留旧文件。
+        """
+        if not old or not new or old == new:
+            return 0
+        with self._lock:
+            if not self.trash_root.is_dir():
+                return 0
+            try:
+                entries = list(self.trash_root.iterdir())
+            except OSError:
+                return 0
+            audit: dict[tuple[str, str], dict] = {}
+            for row in self.audit_entries():
+                if str(row.get("action") or "") not in TRASH_ACTIONS:
+                    continue
+                try:
+                    ts = float(row.get("ts") or 0)
+                except (TypeError, ValueError):
+                    continue
+                audit.setdefault((str(row.get("file") or ""), _stamp(ts)), row)
+            moved: list[tuple[Path, Path]] = []
+            pending: list[tuple[float, dict]] = []
+            try:
+                for path in entries:
+                    match = _TRASH_NAME_RE.match(path.name)
+                    if (
+                        match is None
+                        or match.group(2) != old
+                        or not path.is_file()
+                    ):
+                        continue
+                    ts = _parse_stamp(match.group(1))
+                    if ts is None:
+                        continue
+                    target = self.trash_root / f"{_stamp(ts)}__{new}"
+                    while target.exists():
+                        ts = round(ts + 0.001, 3)
+                        target = self.trash_root / f"{_stamp(ts)}__{new}"
+                    os.replace(path, target)
+                    moved.append((target, path))
+                    row = audit.get((old, match.group(1)))
+                    if row:
+                        pending.append((ts, row))
+            except OSError:
+                for target, path in reversed(moved):
+                    try:
+                        os.replace(target, path)
+                    except OSError:
+                        continue
+                raise
+            for ts, row in pending:
+                self.record(
+                    str(row.get("action") or ""),
+                    new,
+                    str(row.get("actor") or ""),
+                    str(row.get("source") or ""),
+                    str(row.get("before_sha1") or ""),
+                    str(row.get("after_sha1") or ""),
+                    ts=ts,
+                )
+            return len(moved)
 
     # ------------------------------------------------------------ 回收站
 

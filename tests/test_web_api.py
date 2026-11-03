@@ -358,6 +358,72 @@ def test_file_save_create_edit_rename(plugin, dash):
     assert not history_root.is_dir() or not any(history_root.iterdir())
 
 
+def test_rename_clears_old_name_tidy_records(plugin, dash):
+    """整理记录与待确认方案里的旧名正文副本不能跟着改名留在磁盘上。"""
+    store = session_store(plugin)
+    asyncio.run(store.write("old.md", memory("old", "甲")))
+    sid = pkg_tidy.scope_id("session", KEY)
+    plugin._tidy.add_run(
+        sid,
+        {
+            "id": "run-1",
+            "ops": [{"op": "delete", "file": "old.md", "before": "旧名正文副本"}],
+        },
+    )
+
+    def leave_pending(meta):
+        meta.pending = {
+            "operations": [
+                {"op": "delete", "file": "old.md", "content": "旧名正文副本"}
+            ]
+        }
+
+    plugin._tidy.update_meta(sid, leave_pending)
+    base = store.mtime("old.md")
+    ok(save(dash, file="new.md", oldFile="old.md", description="改名", body="新", baseMtime=base))
+    assert plugin._tidy.runs(sid) == []
+    assert plugin._tidy.meta(sid).pending is None
+    blob = "\n".join(
+        path.read_text("utf-8")
+        for path in plugin._tidy.base_dir.glob("*.json")
+    )
+    assert "旧名正文副本" not in blob
+
+
+def test_rename_failure_rolls_back_new_file(plugin, dash, monkeypatch):
+    """历史/回收站迁移失败时撤回刚写入的新文件，旧文件保持可重试。"""
+    store = session_store(plugin)
+    asyncio.run(store.write("old.md", memory("old", "甲", "旧版一")))
+    asyncio.run(store.write("old.md", memory("old", "甲", "旧版二")))
+    assert store.history_versions("old.md")
+    base = store.mtime("old.md")
+
+    def boom(*_args, **_kwargs):
+        raise OSError("模拟迁移失败")
+
+    monkeypatch.setattr(store._history, "move_versions", boom)
+    result = save(
+        dash,
+        file="new.md",
+        oldFile="old.md",
+        description="改名",
+        body="新",
+        baseMtime=base,
+    )
+    assert result["status"] == "error" and "模拟迁移失败" in result["message"]
+    assert store.exists("old.md") and not store.exists("new.md")
+    # 旧名的历史没有被搬走或删掉
+    assert store.history_versions("old.md")
+    # 刚写入的新内容被撤回回收站，旧文件仍在册，可以按原名重试
+    assert any(entry.file == "new.md" for entry in store.trash_entries())
+
+    monkeypatch.undo()
+    ok(save(dash, file="new.md", oldFile="old.md", description="改名", body="新", baseMtime=base))
+    assert store.list_files() == ["new.md"]
+    assert store.history_versions("old.md") == []
+    assert asyncio.run(store.read("new.md"))
+
+
 def test_file_save_raw_mode(plugin, dash):
     content = "---\nname: a\ndescription: 原文模式\nmetadata:\n  type: project\n---\n\n正文\n"
     ok(call(dash, "file/save", body={"scope": "session", "key": KEY, "file": "a.md", "mode": "raw", "content": content}))
@@ -545,6 +611,48 @@ def test_consolidate_preview_and_apply(plugin, dash):
     doc = pkg_memstore.parse_memory(asyncio.run(store.read("user-1.md")))
     assert (doc.description, doc.body) == ("阿杰（合并）", "合并后正文")
     assert store.index_report().dangling == []
+
+
+def test_manual_consolidate_people_scope_not_gated(plugin, dash):
+    """管理页手动整理共享人物空间不受定期整理的 edit 门控限制。"""
+    plugin.config["enable_people_memory"] = True
+    plugin._store.set_shared_people(
+        pkg_sharing.Membership(
+            {
+                "aiocqhttp": pkg_sharing.Member(
+                    "aiocqhttp", pkg_sharing.PERMISSION_READ
+                )
+            }
+        )
+    )
+    store = plugin._store.people_scope("aiocqhttp")
+    assert store.root.name == pkg_sharing.SHARED_KEY
+    asyncio.run(store.write("user-1.md", memory("user-1", "阿杰")))
+    plugin.summarizer_reply = "<operations>" + json.dumps(
+        [
+            {
+                "op": "write",
+                "file": "user-1.md",
+                "type": "user",
+                "description": "阿杰（整理）",
+                "content": "管理页改后",
+                "reason": "合并",
+            }
+        ],
+        ensure_ascii=False,
+    ) + "</operations>"
+    body = {"scope": "people", "key": pkg_sharing.SHARED_KEY}
+    data = ok(call(dash, "consolidate/preview", body=body))
+    result = ok(
+        call(
+            dash,
+            "consolidate/apply",
+            body={**body, "operations": data["operations"]},
+        )
+    )
+    assert result["message"] == "已应用 1 / 1 项操作"
+    doc = pkg_memstore.parse_memory(asyncio.run(store.read("user-1.md")))
+    assert (doc.description, doc.body) == ("阿杰（整理）", "管理页改后")
 
 
 def test_consolidate_errors(plugin, dash):

@@ -139,22 +139,33 @@ def test_delete_moves_to_trash_and_restores(store):
 
 
 def test_rename_moves_history_and_leaves_no_trash(store):
-    """改名：旧名历史迁到新名下，审计记 rename，旧名不留回收站条目。"""
+    """改名：旧名历史与回收站条目都迁到新名下，审计记 rename。"""
 
     async def scenario():
         await store.write("old.md", memory("old", "甲", "第一版"), actor="webui")
         await store.write("old.md", memory("old", "甲", "第二版"), actor="webui")
+        # 先删一次，制造一条旧名的回收站条目，再重建同名文件
+        await store.delete("old.md", actor="webui")
+        second = store.read_trash(
+            next(e for e in store.trash_entries() if e.file == "old.md").entry
+        )
+        await store.write("old.md", memory("old", "甲", "第三版"), actor="webui")
         old_content = await store.read("old.md")
         assert store.history_versions("old.md")
 
-        # 管理页的改名顺序：先写新文件，再迁移历史并删旧文件
+        # 管理页的改名顺序：先写新文件，再迁移历史与回收站并删旧文件
         assert (await store.write("new.md", memory("new", "乙", "改名后"), actor="webui")).ok
         result = await store.finalize_rename("old.md", "new.md", actor="webui")
         assert result.ok, result.message
         assert store.list_files() == ["new.md"]
         assert store.history_versions("old.md") == []
         assert not (store.root / history.HISTORY_DIRNAME / "old.md").exists()
+        # 旧名的回收站条目迁到新名下，正文仍然可读
         assert [e for e in store.trash_entries() if e.file == "old.md"] == []
+        moved_trash = [e for e in store.trash_entries() if e.file == "new.md"]
+        assert len(moved_trash) == 1
+        assert moved_trash[0].actor == "webui"
+        assert store.read_trash(moved_trash[0].entry) == second
 
         versions = store.history_versions("new.md")
         actions = [v.action for v in versions]
@@ -163,6 +174,9 @@ def test_rename_moves_history_and_leaves_no_trash(store):
         assert store.read_history("new.md", rename_version.version) == old_content
         assert rename_version.actor == "webui"
         assert rename_version.source == "old.md"
+        # 迁过来的旧版本也保留 actor（审计按新名字补了一行）
+        write_version = next(v for v in versions if v.action == "write")
+        assert write_version.actor == "webui"
 
         rows = [
             json.loads(line)
@@ -175,11 +189,52 @@ def test_rename_moves_history_and_leaves_no_trash(store):
         assert rows[-1]["source"] == "old.md"
         assert rows[-1]["actor"] == "webui"
 
-        # 对新名字彻底删除，旧名迁过来的历史也一起清干净
+        # 对新名字彻底删除，旧名迁过来的历史与回收站条目也一起清干净
         assert (await store.delete_file_completely("new.md", actor="webui")).ok
         assert store.history_versions("new.md") == []
         assert store.trash_entries() == []
         assert store.list_files() == []
+        assert not (store.root / ".renames.json").exists()
+
+    run(scenario())
+
+
+def test_move_versions_handles_same_timestamp_collision(store):
+    """新名下已有同一时间戳的版本时，迁入的版本挪到不冲突的名字。"""
+    ts = 1_800_000_000.0
+    store._history.save_version("old.md", "旧正文", history.ACTION_WRITE, ts=ts)
+    store._history.save_version("new.md", "新正文", history.ACTION_WRITE, ts=ts)
+    assert store._history.move_versions("old.md", "new.md") == 1
+    versions = store.history_versions("new.md")
+    assert len(versions) == 2
+    assert {
+        store.read_history("new.md", version.version) for version in versions
+    } == {"旧正文", "新正文"}
+    assert not (store.root / history.HISTORY_DIRNAME / "old.md").exists()
+
+
+def test_rename_then_purge_clears_old_name_in_scope_archive(store):
+    """改名前的整作用域归档里只有旧名副本，按新名彻底删除也要清掉。"""
+
+    async def scenario():
+        await store.write("old.md", memory("old", "甲", "归档里的旧名"), actor="webui")
+        await store.purge(actor="webui")
+        archive = next(
+            path
+            for path in store._scopes_trash_dir.iterdir()
+            if path.is_dir()
+        )
+        assert (archive / "old.md").is_file()
+
+        # 重建当前作用域，制造 old.md -> new.md 的改名谱系
+        await store.write("old.md", memory("old", "甲", "重建后的旧名"), actor="webui")
+        await store.write("new.md", memory("new", "乙", "改名后"), actor="webui")
+        assert (await store.finalize_rename("old.md", "new.md", actor="webui")).ok
+        assert (archive / "old.md").is_file()
+
+        report = await store.delete_file_completely("new.md", actor="webui")
+        assert report.ok, report.message
+        assert not (archive / "old.md").exists()
 
     run(scenario())
 

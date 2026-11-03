@@ -712,7 +712,21 @@ class MemoryDashboard:
                 old, name, actor=history.ACTOR_WEBUI
             )
             if not renamed.ok:
-                raise ApiError(renamed.message)
+                # 新文件是这次刚写的；改名没完成就撤回，保证旧文件不动、
+                # 用户刷新后还能用原来的名字重试
+                rolled = await store.delete(name, actor=history.ACTOR_WEBUI)
+                detail = "；已撤回刚写入的新文件" if rolled.ok else ""
+                raise ApiError(renamed.message + detail)
+            # 整理记录与待确认方案里的旧名正文副本不能留下，否则撤销整理
+            # 还能把 old.md 写回来；旧名的"看过"哈希也一并作废
+            await asyncio.to_thread(
+                self.plugin._tidy.remove_file,
+                tidy.scope_id(scope, key),
+                old,
+            )
+            seen = getattr(self.plugin, "_seen", None)
+            if seen is not None:
+                await asyncio.to_thread(seen.forget_file, old)
             message = f"{message}；{renamed.message}"
         self._changed(key)
         return _ok({"file": name, "mtime": store.mtime(name) or 0.0}, message)
