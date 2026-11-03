@@ -142,6 +142,7 @@ def _load_main():
 
 main = _load_main()
 pkg_compress = importlib.import_module(f"{PACKAGE}.core.compress")
+pkg_history = importlib.import_module(f"{PACKAGE}.core.history")
 pkg_memstore = importlib.import_module(f"{PACKAGE}.core.memstore")
 pkg_prompts = importlib.import_module(f"{PACKAGE}.core.prompts")
 pkg_recall = importlib.import_module(f"{PACKAGE}.core.recall")
@@ -691,3 +692,239 @@ def test_mb_status_shows_shared_space_and_permission(tmp_path):
 
     off = _status_text(make_plugin(tmp_path / "off", []), FakeEvent("Bot-A"))
     assert "共享人物空间：否（未启用）" in off
+
+
+# ---------------------------------------------------------------- 3.4 编辑与检索
+
+
+def test_append_permission_cannot_use_section_mode(tmp_path):
+    plugin = make_plugin(tmp_path, ["Bot-A=append"])
+    event = FakeEvent("Bot-A")
+    body = "## 基本信息\n\n身份：工程师\n"
+    assert "已写入" in run(
+        plugin.memory_write(event, "people", "user-123.md", person_file(body=body))
+    )
+    store = plugin._people_scope(event.unified_msg_origin)
+    before = run(store.read("user-123.md"))
+
+    result = run(
+        plugin.memory_edit(
+            event,
+            "people",
+            "user-123.md",
+            old_text="## 基本信息",
+            new_text="身份：研究员",
+            mode="section",
+        )
+    )
+    assert "只能用 mode=append" in result
+    assert run(store.read("user-123.md")) == before
+
+
+def test_edit_permission_section_mode_keeps_heading_and_history(tmp_path):
+    plugin = make_plugin(tmp_path, ["Bot-A=edit"])
+    event = FakeEvent("Bot-A")
+    body = "## 基本信息\n\n身份：工程师\n\n## 爱好\n\n钓鱼\n"
+    assert "已写入" in run(
+        plugin.memory_write(event, "people", "user-123.md", person_file(body=body))
+    )
+    store = plugin._people_scope(event.unified_msg_origin)
+
+    result = run(
+        plugin.memory_edit(
+            event,
+            "people",
+            "user-123.md",
+            old_text="## 基本信息",
+            new_text="身份：研究员",
+            mode="section",
+        )
+    )
+    assert "已替换" in result
+    content = run(store.read("user-123.md"))
+    assert "## 基本信息" in content and "身份：研究员" in content
+    assert "身份：工程师" not in content
+    assert "## 爱好" in content and "钓鱼" in content
+
+    versions = store.history_versions("user-123.md")
+    assert versions and versions[0].action == pkg_history.ACTION_EDIT
+    assert versions[0].actor == "Bot-A"
+    assert "身份：工程师" in store.read_history("user-123.md", versions[0].version)
+
+
+def test_dangling_link_hint_only_checks_visible_scopes(tmp_path):
+    plugin = make_plugin(tmp_path, ["Bot-A=edit", "Bot-B=edit"])
+    bot_a = FakeEvent("Bot-A", umo="Bot-A:FriendMessage:1")
+    bot_b = FakeEvent("Bot-B", umo="Bot-B:FriendMessage:2")
+    bot_c = FakeEvent("Bot-C", umo="Bot-C:FriendMessage:3")
+
+    # 共享人物文件对两个成员都可见
+    assert "已写入" in run(
+        plugin.memory_write(
+            bot_a, "people", "user-1.md", person_file("user-1", "身份：甲")
+        )
+    )
+    # Bot-A 的会话文件与 Bot-C 的独立人物文件，Bot-B 都看不到
+    assert "已写入" in run(
+        plugin.memory_write(
+            bot_a, "session", "private-note.md", person_file("private-note", "甲的秘密")
+        )
+    )
+    assert "已写入" in run(
+        plugin.memory_write(
+            bot_c, "people", "user-9.md", person_file("user-9", "身份：丙")
+        )
+    )
+
+    result = run(
+        plugin.memory_write(
+            bot_b,
+            "session",
+            "b.md",
+            person_file("b", "见 [[user-1]]、[[private-note]] 与 [[user-9]]。"),
+        )
+    )
+    assert "已写入" in result
+    assert "[[private-note]]" in result and "找不到" in result
+    assert "[[user-9]]" in result
+    # 共享人物文件可见，不算悬空
+    assert "[[user-1]]" not in result
+
+
+def test_dangling_link_hint_sees_enabled_global_but_not_disabled_people(tmp_path):
+    plugin = make_plugin(tmp_path, [])
+    plugin.config["enable_global_memory"] = True
+    event = FakeEvent("Bot-A")
+    assert "已写入" in run(
+        plugin.memory_write(event, "global", "g.md", person_file("g", "全局事实"))
+    )
+    linked = run(
+        plugin.memory_write(
+            event, "session", "s.md", person_file("s", "见 [[g]]")
+        )
+    )
+    assert "[[g]]" not in linked
+
+    # people 关闭时，磁盘上即使有文件也不在可见范围里
+    plugin.config["enable_people_memory"] = False
+    run(
+        plugin._store.people_scope("Bot-A").write(
+            "user-1.md", person_file("user-1", "身份：甲")
+        )
+    )
+    hidden = run(
+        plugin.memory_write(
+            event, "session", "t.md", person_file("t", "见 [[user-1]]")
+        )
+    )
+    assert "[[user-1]]" in hidden and "找不到" in hidden
+
+
+def test_write_and_edit_receipts_mention_links_and_long_files(tmp_path):
+    plugin = make_plugin(tmp_path, [])
+    event = FakeEvent("Bot-A")
+    long_body = "见 [[missing]]。" + "x" * (9 * 1024)
+    result = run(
+        plugin.memory_write(
+            event, "session", "big.md", person_file("big", long_body)
+        )
+    )
+    assert "找不到对应文件" in result and "[[missing]]" in result
+    assert "偏长" in result and "超过 8KB" in result
+
+    # 日志只按体积判断：日期很多但文件不大时不提醒
+    log = run(
+        plugin.memory_write(
+            event,
+            "session",
+            "daily-2026-11-03.md",
+            person_file("daily-2026-11-03", "2026-01-01 " * 20),
+        )
+    )
+    assert "偏长" not in log
+
+    # memory_edit 的成功回执也走同一套检查
+    assert "已写入" in run(
+        plugin.memory_write(
+            event,
+            "session",
+            "small.md",
+            person_file("small", "## 甲\n\n旧正文\n"),
+        )
+    )
+    edited = run(
+        plugin.memory_edit(
+            event,
+            "session",
+            "small.md",
+            old_text="## 甲",
+            new_text="见 [[nope]]",
+            mode="section",
+        )
+    )
+    assert "已替换" in edited
+    assert "[[nope]]" in edited and "找不到" in edited
+
+
+def test_memory_search_tool_mode_ranking_and_format(tmp_path):
+    plugin = make_plugin(tmp_path, [])
+    event = FakeEvent("Bot-A")
+    store = plugin._session_scope(event)
+    run(store.write("a.md", person_file("a", "alpha 第一行")))
+    run(store.write("b.md", person_file("b", "beta 第二行")))
+
+    assert "没有找到" in run(
+        plugin.memory_search(event, "alpha beta", scope="session")
+    )
+    result = run(
+        plugin.memory_search(event, "alpha beta", scope="session", mode="any")
+    )
+    assert "a.md" in result and "b.md" in result
+    assert "（user，更新 " in result
+    assert "alpha 第一行" in result
+    assert "mode 只能是" in run(
+        plugin.memory_search(event, "alpha", scope="session", mode="bogus")
+    )
+
+
+def test_memory_search_tool_not_crowded_out_by_daily_files(tmp_path):
+    """回归：按文件名取前 8 条时，daily-* 会把 important.md 挤出结果。"""
+    plugin = make_plugin(tmp_path, [])
+    event = FakeEvent("Bot-A")
+    store = plugin._session_scope(event)
+    run(store.write("important.md", person_file("important", "项目 事实")))
+    for day in range(1, 10):
+        run(
+            store.write(
+                f"daily-2026-01-{day:02d}.md",
+                person_file(f"daily-2026-01-{day:02d}", "项目 日志"),
+            )
+        )
+    result = run(plugin.memory_search(event, "项目", scope="session"))
+    assert "important.md" in result
+    # 非日志排在日志前面
+    assert result.index("important.md") < result.index("daily-2026-01-01.md")
+
+
+def test_mb_status_lists_long_session_files(tmp_path):
+    plugin = make_plugin(tmp_path, [])
+    event = FakeEvent("Bot-A")
+    assert "已写入" in run(
+        plugin.memory_write(
+            event,
+            "session",
+            "big.md",
+            person_file("big", "x" * (9 * 1024)),
+        )
+    )
+    assert "已写入" in run(
+        plugin.memory_write(
+            event, "session", "short.md", person_file("short", "短正文")
+        )
+    )
+    text = _status_text(plugin, event)
+    line = next(
+        item for item in text.splitlines() if item.startswith("会话长文件：")
+    )
+    assert "big.md" in line and "超过 8KB" in line
+    assert "short.md" not in line

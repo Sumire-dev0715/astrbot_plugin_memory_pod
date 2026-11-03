@@ -43,7 +43,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import history, journal, sharing
+from . import history, insights, journal, sharing
 
 INDEX_FILENAME = "MEMORY.md"
 INDEX_MAX_LINES = 200
@@ -914,16 +914,20 @@ class ScopeStore:
         actor: str = "",
         mode: str = "replace",
     ) -> WriteReport:
-        """局部修改：默认 replace 把 old 替换成 new；append 追加内容。
+        """局部修改：默认 replace 把 old 替换成 new；append 追加内容；section 换小节正文。
 
         replace：old 在文件里须恰好出现一次（replace_all 时可多次），其余原样保留。
         append：old 留空追加到文件末尾；old 是某个小节标题行时追加到该小节末尾。
-        两种模式都持锁读改写，追加前同样把旧内容存进历史；替换后的全文照样过
+        section：old 是小节标题行，new 替换这一节的正文（标题行保留），范围到
+        下一个同级或更高级标题为止；标题不存在或重复时报错并列出全部标题。
+        三种模式都持锁读改写，写入前同样把旧内容存进历史；替换后的全文照样过
         体积守门并同步索引行，改了 description 索引钩子随之更新。
         """
         mode = (mode or "").strip().lower()
-        if mode not in ("replace", "append"):
-            return WriteReport(False, "mode 只能是 replace（默认）或 append。")
+        if mode not in ("replace", "append", "section"):
+            return WriteReport(
+                False, "mode 只能是 replace（默认）、append 或 section。"
+            )
         name = (name or "").strip().lstrip("/")
         path = self._resolve(name)
         if path is None:
@@ -959,6 +963,27 @@ class ScopeStore:
                     path,
                     updated,
                     f"已向 {name} 追加内容",
+                    source,
+                    content,
+                    action=history.ACTION_EDIT,
+                    actor=actor,
+                    active_before=content,
+                )
+            if mode == "section":
+                if not old.strip():
+                    return WriteReport(
+                        False,
+                        "old_text 不能为空：section 模式要给出一个小节标题行，"
+                        "如 ## 作息与习惯。",
+                    )
+                updated, error = insights.replace_section(content, old, new)
+                if error:
+                    return WriteReport(False, error)
+                return await self._commit(
+                    name,
+                    path,
+                    updated,
+                    f"已替换 {name} 的小节「{old.strip()}」",
                     source,
                     content,
                     action=history.ACTION_EDIT,
@@ -2089,21 +2114,87 @@ class ScopeStore:
 
     # ------------------------------------------------------------ 全文搜索
 
-    async def search(self, query: str) -> list[str]:
-        """大小写不敏感的多词 AND 全文搜索，返回可读的结果行。
+    async def search(self, query: str, mode: str = insights.SEARCH_ALL) -> list[str]:
+        """大小写不敏感的多词全文搜索，返回可读的结果行。
 
-        这是索引截断或索引行写得不好时的兜底通道：不依赖"模型知道这条
-        记忆存在"，只要正文里有词就能找到。
+        默认 all 要求所有词都命中，any 命中任意一个词即可。结果按
+        insights.rank_hits 排序：非日志在前，再按命中词数、updated 倒序；
+        最多 MAX_SEARCH_RESULTS 条，每条带首行片段（memory_search 用
+        search_hits 拿完整的类型、日期与两行片段）。这是索引截断或索引行
+        写得不好时的兜底通道：不依赖"模型知道这条记忆存在"。
         """
-        return await self._search_in(query, self.list_files(), self.read)
+        hits = await self.search_hits(query, mode)
+        return [
+            f"{hit.file}: {hit.snippets[0] if hit.snippets else '（正文匹配）'}"
+            for hit in hits[:MAX_SEARCH_RESULTS]
+        ]
 
-    async def search_forgotten(self, query: str) -> list[str]:
-        """同样的搜索，只搜已遗忘的文件。"""
-        return await self._search_in(query, self.forgotten_files(), self.read_forgotten)
+    async def search_hits(
+        self, query: str, mode: str = insights.SEARCH_ALL
+    ) -> list[insights.SearchHit]:
+        """全文搜索的结构化结果（已排序、未截断）；memory_search 用它展示类型与片段。"""
+        mode = insights.normalize_search_mode(mode)
+        terms = insights.search_terms(query)
+        if mode is None or not terms:
+            return []
+        headers = {
+            header.file: header
+            for header in await asyncio.to_thread(self.headers)
+        }
+        hits: list[insights.SearchHit] = []
+        for name in self.list_files():
+            content = await self.read(name)
+            if content is None:
+                continue
+            header = headers.get(name)
+            if header is None:
+                doc = parse_memory(content)
+                mem_type = doc.type
+                updated = parse_stamp(doc.updated) or self.mtime(name) or 0.0
+            else:
+                mem_type = header.type
+                updated = header.updated
+            hit = insights.build_hit(
+                name, mem_type, updated, content, terms, mode
+            )
+            if hit is not None:
+                hits.append(hit)
+        return insights.rank_hits(hits)
 
-    async def _search_in(self, query: str, names: list[str], reader) -> list[str]:
-        terms = [t.lower() for t in query.split() if t.strip()]
-        if not terms:
+    async def search_forgotten(
+        self, query: str, mode: str = insights.SEARCH_ALL
+    ) -> list[str]:
+        """同样的搜索，只搜已遗忘的文件；标注与单行片段保持原样。"""
+        return await self._search_in(
+            query, self.forgotten_files(), self.read_forgotten, mode
+        )
+
+    async def long_files(self) -> list[insights.LongFile]:
+        """当前作用域里超过体积或日期密度阈值的文件，供写入回执与 /mb_status。"""
+        headers = await asyncio.to_thread(self.headers)
+        result: list[insights.LongFile] = []
+        for header in headers:
+            content = await self.read(header.file)
+            if content is None:
+                continue
+            doc = parse_memory(content)
+            reasons = insights.long_file_reasons(
+                header.file, doc.type or header.type, doc.body, header.size
+            )
+            if reasons:
+                result.append(
+                    insights.LongFile(
+                        header.file, header.size, tuple(reasons)
+                    )
+                )
+        return result
+
+    async def _search_in(
+        self, query: str, names: list[str], reader, mode: str = insights.SEARCH_ALL
+    ) -> list[str]:
+        mode = insights.normalize_search_mode(mode)
+        terms = insights.search_terms(query)
+        if mode is None or not terms:
             return []
         results: list[str] = []
         for name in names:
@@ -2113,9 +2204,13 @@ class ScopeStore:
             if content is None:
                 continue
             lowered = content.lower()
-            if not all(t in lowered for t in terms):
+            present = [term for term in terms if term in lowered]
+            if mode == insights.SEARCH_ANY:
+                if not present:
+                    continue
+            elif len(present) != len(terms):
                 continue
-            excerpt = self._first_hit_line(content, terms)
+            excerpt = self._first_hit_line(content, present)
             results.append(f"{name}: {excerpt}")
         return results
 

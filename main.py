@@ -38,6 +38,7 @@ from .core import (
     archive,
     compress,
     history,
+    insights,
     journal,
     loopguard,
     memstore,
@@ -1988,7 +1989,7 @@ class MemoryBeyondPlugin(Star):
         content: str = "",
         delete: bool = False,
     ) -> str:
-        """写入、修改或删除一个长期记忆文件（整文件覆盖；修改＝读出后改写重写入，删除＝delete 设 true）。一个文件只记一条事实，content 必须以 frontmatter 开头：--- / name: 与文件名一致 / description: 一句话钩子 / metadata: / type: user|feedback|project|reference|journal / ---，正文写事实本身。MEMORY.md 索引由插件自动维护，禁止直接写：要改索引行就重写对应文件的 description，要删索引行就删除对应文件。写前先查重，同一个人、同一件事始终更新同一个文件，不另建重复文件。type 为 journal 的是每日日志（文件名建议 daily-<日期>.md）：流水账不占单独索引行，只在索引末尾折叠成最近两篇加一行汇总，不参与自动召回，也不参与查重；需要时按日期用 memory_read 或 memory_search 检索。作用域边界：关于具体用户或本会话的信息一律写 session，记人以发送者标注中的数字 ID 为锚（文件名 user-<数字ID>.md，昵称只作正文附注）；global 只存机器人自身的偏好与行为准则；people（启用时）只存某人亲口说的、换个群也成立的身份类事实。
+        """写入、修改或删除一个长期记忆文件（整文件覆盖；修改＝读出后改写重写入，删除＝delete 设 true）。一个文件只记一条事实，content 必须以 frontmatter 开头：--- / name: 与文件名一致 / description: 一句话钩子 / metadata: / type: user|feedback|project|reference|journal / ---，正文写事实本身。MEMORY.md 索引由插件自动维护，禁止直接写：要改索引行就重写对应文件的 description，要删索引行就删除对应文件。写前先查重，同一个人、同一件事始终更新同一个文件，不另建重复文件。type 为 journal 的是每日日志（文件名建议 daily-<日期>.md）：流水账不占单独索引行，只在索引末尾折叠成最近两篇加一行汇总，不参与自动召回，也不参与查重；需要时按日期用 memory_read 或 memory_search 检索。写入后会检查正文里的 [[文件名]] 链接指向的文件是否在当前机器人可见的作用域里，并在文件超过 8KB 或日期过密时提醒拆分或整理；这些只是回执提示，不会自动创建链接目标。作用域边界：关于具体用户或本会话的信息一律写 session，记人以发送者标注中的数字 ID 为锚（文件名 user-<数字ID>.md，昵称只作正文附注）；global 只存机器人自身的偏好与行为准则；people（启用时）只存某人亲口说的、换个群也成立的身份类事实。
 
         Args:
             scope(string): 作用域，global（机器人自我的全局记忆）、session（当前会话的记忆）或 people（人物记忆，一人一个 user-<数字ID>.md；通常同一平台所有会话共享，启用共享人物空间时是多个成员机器人共用的 _shared 目录）
@@ -2056,6 +2057,12 @@ class MemoryBeyondPlugin(Star):
                         + "\n提醒：覆盖和删除前插件已自动保存旧版，管理页可以恢复，"
                         "不需要手动备份（backup、副本或 zz- 开头的文件）。",
                     )
+            if report.ok:
+                extra = await self._write_insights(event, store, file)
+                if extra:
+                    report = memstore.WriteReport(
+                        True, report.message + "\n" + extra
+                    )
         if report.ok:
             self._note_model_wrote(event)
         return report.message
@@ -2071,15 +2078,15 @@ class MemoryBeyondPlugin(Star):
         replace_all: bool = False,
         mode: str = "replace",
     ) -> str:
-        """修改一个已有的长期记忆文件。默认 replace 模式：把 old_text 替换成 new_text，文件其余内容原样保留；改一处、补一句、更新 description 时用它，不要用 memory_write 整文件重写（重写容易丢内容）。replace 时 old_text 必须与文件现有内容逐字一致（空格、换行、标点都算）且只出现一次，所以先用 memory_read 读出当前内容再复制片段；new_text 留空等于删掉这段。append 模式：old_text 留空时把 new_text 追加到文件末尾，old_text 是某个小节标题行（如 ## 作息与习惯）时追加到该小节末尾，追加前插件自动保存旧版。改了 frontmatter 的 description，索引行会自动同步。
+        """修改一个已有的长期记忆文件。默认 replace 模式：把 old_text 替换成 new_text，文件其余内容原样保留；改一处、补一句、更新 description 时用它，不要用 memory_write 整文件重写（重写容易丢内容）。replace 时 old_text 必须与文件现有内容逐字一致（空格、换行、标点都算）且只出现一次，所以先用 memory_read 读出当前内容再复制片段；new_text 留空等于删掉这段。append 模式：old_text 留空时把 new_text 追加到文件末尾，old_text 是某个小节标题行（如 ## 作息与习惯）时追加到该小节末尾。section 模式：old_text 是一个小节标题行，new_text 替换这一节标题下的正文，标题行保留，范围到下一个同级或更高级标题为止；标题不存在或出现多次时报错，并列出文件里的所有标题。每次修改前插件自动保存旧版；修改后会检查 [[文件名]] 链接和文件长度并在回执里提醒。
 
         Args:
             scope(string): 作用域，global（机器人自我的全局记忆）、session（当前会话的记忆）或 people（人物记忆，一人一个 user-<数字ID>.md；通常同一平台所有会话共享，启用共享人物空间时是多个成员机器人共用的 _shared 目录）
             file(string): 要修改的记忆文件名，如 user-12345678.md；不可为 MEMORY.md
-            old_text(string): replace 模式下要被替换的原文片段，须与文件内容逐字一致且只出现一次；append 模式下留空表示追加到文件末尾，填小节标题行表示追加到该小节末尾
-            new_text(string): replace 模式下的替换文字（留空表示删掉 old_text）；append 模式下要追加的文字
-            replace_all(boolean): replace 模式下设为 true 时替换文件里所有匹配处（如统一改一个称呼），默认只接受唯一匹配
-            mode(string): replace（默认，局部替换）或 append（追加，不覆盖已有文字）
+            old_text(string): replace 模式下要被替换的原文片段，须与文件内容逐字一致且只出现一次；append 模式下留空表示追加到文件末尾，填小节标题行表示追加到该小节末尾；section 模式下填一个小节标题行，如 ## 作息与习惯
+            new_text(string): replace 模式下的替换文字（留空表示删掉 old_text）；append 模式下要追加的文字；section 模式下是这一节的新正文（留空表示清空这一节正文）
+            replace_all(boolean): replace 模式下设为 true 时替换文件里所有匹配处（如统一改一个称呼），默认只接受唯一匹配；append 与 section 模式下忽略
+            mode(string): replace（默认，局部替换）、append（追加，不覆盖已有文字）或 section（按小节标题替换该节正文）
         """
         if not self._bool("enable_memory", True):
             return "记忆功能已在插件配置中停用。"
@@ -2089,6 +2096,8 @@ class MemoryBeyondPlugin(Star):
         if scope == "people" and not memstore.is_person_file(file):
             return PEOPLE_FILE_RULE
         mode = (mode or "replace").strip().lower()
+        if mode not in ("replace", "append", "section"):
+            return "mode 只能是 replace（默认）、append 或 section。"
         permission = (
             self._people_permission(self._event_actor(event))
             if scope == "people"
@@ -2110,6 +2119,9 @@ class MemoryBeyondPlugin(Star):
             # 自己刚改过的版本算看过，后续整文件覆盖不会被版本检查误拦
             await self._note_shared_seen(event, scope, store, file)
             self._note_model_wrote(event)
+            extra = await self._write_insights(event, store, file)
+            if extra:
+                report = memstore.WriteReport(True, report.message + "\n" + extra)
         return report.message
 
     async def _duplicate_hint(
@@ -2141,6 +2153,55 @@ class MemoryBeyondPlugin(Star):
             "请核对，确属同一件事就合并进一个文件、删掉多余的。"
         )
 
+    def _visible_stores(self, event: AstrMessageEvent) -> list[memstore.ScopeStore]:
+        """当前机器人能看到的记忆作用域：global（启用时）、当前会话、people（启用时）。
+
+        共享人物空间只映射到成员共用的 _shared；非成员的 people 目录只属于
+        自己。链接检查只用这几个作用域，不会暴露别的会话或别的机器人里有没有
+        某个文件。
+        """
+        stores: list[memstore.ScopeStore] = []
+        if self._global_on():
+            stores.append(self._global_scope())
+        stores.append(self._session_scope(event))
+        if self._people_on():
+            stores.append(self._people_scope(str(event.unified_msg_origin)))
+        return stores
+
+    async def _write_insights(
+        self, event: AstrMessageEvent, store: memstore.ScopeStore, file: str
+    ) -> str:
+        """写入 / 修改成功后的回执补充：悬空链接与长文件提醒。
+
+        只是提醒，失败也不影响已经完成的写入，所以这里吞掉异常，最多记一条
+        调试日志。
+        """
+        try:
+            content = await store.read(file)
+            if content is None:
+                return ""
+            doc = memstore.parse_memory(content)
+            available: set[str] = set()
+            for visible in self._visible_stores(event):
+                available.update(visible.list_files())
+            notes: list[str] = []
+            missing = insights.dangling_links(
+                memstore.extract_links(doc.body), available
+            )
+            hint = insights.dangling_link_hint(missing)
+            if hint:
+                notes.append(hint)
+            reasons = insights.long_file_reasons(
+                file, doc.type, doc.body, len(content.encode("utf-8"))
+            )
+            hint = insights.long_file_hint(file, reasons)
+            if hint:
+                notes.append(hint)
+            return "\n".join(notes)
+        except Exception:  # noqa: BLE001 - 提醒失败不影响已完成的写入
+            logger.debug(LOG_PREFIX + "写入回执的链接/长文件检查失败", exc_info=True)
+            return ""
+
     def _note_model_wrote(self, event: AstrMessageEvent) -> None:
         # 索引快照不在这里刷新：开头的注入内容一变，整段历史的提示词
         # 缓存都会失效。新写的记忆已在磁盘上，相关时由召回带上全文，
@@ -2153,13 +2214,18 @@ class MemoryBeyondPlugin(Star):
 
     @filter.llm_tool(name="memory_search")
     async def memory_search(
-        self, event: AstrMessageEvent, query: str, scope: str = "all"
+        self,
+        event: AstrMessageEvent,
+        query: str,
+        scope: str = "all",
+        mode: str = "all",
     ) -> str:
         """在长期记忆里全文搜索。写入前查重、索引被截断、或不确定某条记忆是否存在时，用本工具查找；它直接搜文件内容，不依赖索引。
 
         Args:
-            query(string): 搜索词，可用空格分隔多个词（须同时命中）
+            query(string): 搜索词，可用空格分隔多个词；默认要同时命中所有词，mode=any 时命中任意一个即可
             scope(string): 搜索范围，global、session、people 或 all（默认，启用的作用域都搜）
+            mode(string): all（默认，所有词都要命中）或 any（命中任意一个词即可）；结果按非日志优先、命中词数、updated 倒序排列，最多 8 条，每条附文件名、类型、更新日期和最多 2 行命中片段
         """
         if not self._bool("enable_memory", True):
             return "记忆功能已在插件配置中停用。"
@@ -2168,6 +2234,9 @@ class MemoryBeyondPlugin(Star):
         query = (query or "").strip()
         if not query:
             return "query 不能为空。"
+        mode = (mode or insights.SEARCH_ALL).strip().lower()
+        if mode not in insights.SEARCH_MODES:
+            return "mode 只能是 all 或 any。"
         scope = (scope or "all").strip().lower()
         global_on = self._global_on()
         people_on = self._people_on()
@@ -2187,21 +2256,48 @@ class MemoryBeyondPlugin(Star):
             )
         if not stores:
             return "scope 参数必须是 global、session、people 或 all。"
-        lines: list[str] = []
+        hits: list[tuple[str, insights.SearchHit]] = []
         for label, store in stores:
-            for hit in await store.search(query):
-                lines.append(f"[{label}] {hit}")
+            for hit in await store.search_hits(query, mode):
+                hits.append((label, hit))
+        # 各作用域合并后统一排序，最多 8 条；日志排在非日志后面，
+        # 避免 daily-* 按文件名占满名额把真正的记忆挤掉
+        hits.sort(key=lambda item: insights.search_key(item[1]))
+        lines = [
+            self._format_search_hit(label, hit)
+            for label, hit in hits[: memstore.MAX_SEARCH_RESULTS]
+        ]
         forgotten: list[str] = []
         if self._forgetting_on():
             for label, store in stores:
-                for hit in await store.search_forgotten(query):
+                for hit in await store.search_forgotten(query, mode):
                     forgotten.append(f"[{label}·已遗忘] {hit}")
         if not lines and not forgotten:
             return f"没有找到匹配「{query}」的记忆。"
         text = "搜索结果（用 memory_read 读取完整内容）：\n" + "\n".join(lines + forgotten)
+        if len(hits) > memstore.MAX_SEARCH_RESULTS:
+            text += (
+                f"\n（另有 {len(hits) - memstore.MAX_SEARCH_RESULTS} 条结果未显示；"
+                "可缩小 scope 或增加搜索词）"
+            )
         if forgotten:
             text += "\n标注「已遗忘」的是长期没用到而移出索引的记忆，用 memory_read 读取即自动恢复。"
         return text
+
+    @staticmethod
+    def _format_search_hit(label: str, hit: insights.SearchHit) -> str:
+        """一条搜索结果：文件名、类型、更新日期，以及最多两行片段。"""
+        updated = (
+            time.strftime("%Y-%m-%d", time.localtime(hit.updated))
+            if hit.updated > 0
+            else "未知"
+        )
+        head = (
+            f"[{label}] {hit.file}"
+            f"（{hit.mem_type or '未分类'}，更新 {updated}）"
+        )
+        snippets = hit.snippets or ("（正文匹配）",)
+        return head + "\n" + "\n".join(f"  {line}" for line in snippets)
 
     # ============================================================ 管理指令
 
@@ -2303,7 +2399,9 @@ class MemoryBeyondPlugin(Star):
             if self._people_on()
             else "人物 停用"
         )
-        session_files = self._session_scope(event).list_files()
+        session_store = self._session_scope(event)
+        session_files = session_store.list_files()
+        long_files = await session_store.long_files()
         configured_id = self._str("summary_provider_id").strip() or "（未配置，用当前对话提供商）"
         tidy_id = self._str("consolidate_provider_id").strip() or "（未配置，同摘要提供商）"
 
@@ -2378,6 +2476,7 @@ class MemoryBeyondPlugin(Star):
             f"后台记忆提取：{self._extract_label(state)}",
             f"记忆遗忘：{self._forget_label(umo)}",
             f"共享人物空间：{self._sharing_label(umo)}",
+            f"会话长文件：{self._long_files_label(long_files)}",
             f"定期整理：{self._tidy_label(umo)}",
             "记忆管理页：AstrBot WebUI 侧边栏「插件页面」",
         ]
@@ -2392,6 +2491,15 @@ class MemoryBeyondPlugin(Star):
         if permission is None:
             return f"否（本机器人 {platform_id} 不在共享成员列表）"
         return f"是（权限 {permission}）"
+
+    @staticmethod
+    def _long_files_label(files: list[insights.LongFile]) -> str:
+        """当前会话里超过阈值的文件列表；没有就写"无"。"""
+        if not files:
+            return "无"
+        return "；".join(
+            f"{item.file}（{'，'.join(item.reasons)}）" for item in files
+        )
 
     def _loop_guard_label(self, rt: RuntimeSession) -> str:
         if not self._bool("loop_guard", True):
