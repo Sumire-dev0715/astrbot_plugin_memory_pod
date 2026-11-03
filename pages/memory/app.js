@@ -232,7 +232,7 @@
     action_purge_scope: "清除作用域",
     purgeFile: "彻底删除（含历史）",
     purgeFileTitle: "彻底删除文件",
-    purgeFileMessage: "确定彻底删除 {file} 吗？在册文件、已遗忘副本、全部历史版本和回收站条目都会删除，无法恢复。",
+    purgeFileMessage: "确定彻底删除 {file} 吗？当前作用域里的在册文件、已遗忘副本、全部历史版本和回收站条目都会删除，无法恢复；其他作用域（包括迁移后保留的旧平台人物目录）里的同名文件不受影响。",
     purgeFileConfirm: "彻底删除",
     backToArchives: "返回归档列表",
     archiveSummary: "这次压缩生成的摘要",
@@ -245,7 +245,7 @@
     remarkTitle: "会话备注",
     remarkHint: "备注只在管理页显示，方便认出这个会话。留空则显示群名或昵称。",
     purgeTitle: "清除会话数据",
-    purgeMessage: "「只删记忆」删除这个会话的全部记忆文件和索引；「删除全部」还会删除压缩状态、归档和会话登记。平台上的聊天记录不受影响。删除后无法恢复。",
+    purgeMessage: "「只删记忆」把该会话的记忆目录移入 memories/.trash-scopes 归档（在回收站保留期内可人工取回）；「删除全部」还会立即删除压缩状态、归档和会话登记。平台上的聊天记录不受影响。",
     purgeMemories: "只删记忆",
     purgeAll: "删除全部",
     consolidateTitle: "整理记忆",
@@ -4121,6 +4121,9 @@
         );
         picker.total = scopes.length;
         result.replaceChildren(picker.el);
+        (res.warnings || []).forEach(function (warning) {
+          result.appendChild(notice("warn", warning));
+        });
       } catch (err) {
         token = "";
         picker = null;
@@ -4281,6 +4284,9 @@
               )
             );
           }
+          (res.warnings || []).forEach(function (warning) {
+            parts.push(notice("warn", warning));
+          });
           const skipped = res.skipped || [];
           if (skipped.length) {
             parts.push(
@@ -4477,23 +4483,25 @@
         result.replaceChildren(spinnerBlock());
         try {
           const res = await apiPost("migrate/scope", payload(true));
-          result.replaceChildren(
+          const reportBox = h(
+            "div",
+            { class: "batch-list" },
             h(
               "div",
-              { class: "batch-list" },
+              { class: "batch-row" },
               h(
                 "div",
-                { class: "batch-row" },
-                h(
-                  "div",
-                  { class: "batch-text" },
-                  h("div", { class: "batch-name" }, scopeTitle(res.from) + " → " + scopeTitle(res.to)),
-                  issuesBlock(res.issues)
-                ),
-                h("span", { class: "tag" }, countsLine(res.counts))
-              )
+                { class: "batch-text" },
+                h("div", { class: "batch-name" }, scopeTitle(res.from) + " → " + scopeTitle(res.to)),
+                issuesBlock(res.issues)
+              ),
+              h("span", { class: "tag" }, countsLine(res.counts))
             )
           );
+          result.replaceChildren(reportBox);
+          (res.warnings || []).forEach(function (warning) {
+            result.appendChild(notice("warn", warning));
+          });
           previewed = landed(res.counts) > 0 || (opts.mode === "move" && (res.counts.same || 0) > 0);
           runBtn.disabled = !previewed;
         } catch (err) {

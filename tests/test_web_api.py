@@ -87,6 +87,7 @@ class FakePlugin:
         self._registry = pkg_registry.SessionRegistry(base / "sessions.json")
         self._archive = pkg_archive.ArchiveStore(base / "archive")
         self._tidy = pkg_tidy.TidyBook(base / "tidy")
+        self._seen = pkg_sharing.SeenVersions(base / "state" / "shared_seen.json")
         self._sessions: dict = {}
         self._state_dir = base / "state"
         self.config = {
@@ -1130,3 +1131,54 @@ def test_migrate_platform_and_info(plugin, dash):
     assert plugin._store.session_scope_by_key(new_key).list_files() == ["a.md"]
     assert plugin._registry.get(KEY) is None
     assert "相同" in err(call(dash, "migrate/platform", body={"from": "x", "to": "x"}))
+
+
+# ---------------------------------------------------------------- 审查回归
+
+
+def test_migrate_to_shared_people_warns_and_invalidates_pinned(plugin, dash):
+    store = session_store(plugin)
+    asyncio.run(store.write("user-9.md", memory("user-9", "小九")))
+    body = {
+        "from": {"scope": "session", "key": KEY},
+        "to": {"scope": "people", "key": pkg_sharing.SHARED_KEY},
+        "files": ["user-9.md"],
+        "mode": "move",
+    }
+    preview = ok(call(dash, "migrate/scope", body={**body, "dryRun": True}))
+    assert preview["warnings"]
+    assert "共享人物空间" in preview["warnings"][0]
+    assert "拆分" in preview["warnings"][0]
+
+    result = call(dash, "migrate/scope", body=body)
+    assert result["status"] == "ok"
+    assert "共享人物空间" in result["message"]
+    # people 目录的迁移也要作废钉在私聊开头块的快照
+    assert pkg_sharing.SHARED_KEY in plugin.invalidated
+    assert plugin._store.people_scope_by_key(pkg_sharing.SHARED_KEY).exists("user-9.md")
+
+
+def test_file_purge_clears_tidy_only_residual(plugin, dash):
+    """正文只剩在整理记录 before 里时，彻底删除也要能清掉。"""
+    sid = pkg_tidy.scope_id("session", KEY)
+    plugin._tidy.add_run(
+        sid,
+        {
+            "id": "run-1",
+            "at": 1_700_000_000.0,
+            "trigger": "auto",
+            "ops": [
+                {"op": "delete", "file": "ghost.md", "before": "整理前的残留正文"}
+            ],
+        },
+    )
+    assert plugin._tidy.runs(sid)
+
+    result = call(
+        dash,
+        "file/purge",
+        body={"scope": "session", "key": KEY, "file": "ghost.md"},
+    )
+    assert result["status"] == "ok"
+    assert "整理记录" in result["message"]
+    assert plugin._tidy.runs(sid) == []

@@ -611,9 +611,16 @@ class MemoryBeyondPlugin(Star):
         有效内容没变时不做任何事，避免反复覆盖与刷日志。
         """
         raw = self.config.get("shared_people_bots", [])
-        membership = sharing.parse_config(raw).filter_same_platform(
-            self.platform_types()
-        )
+        # 适配器暂时取不到类型时（get_insts 异常、热重载瞬间）沿用上次已知的
+        # 类型，否则先前因平台不一致被关闭的成员会被重新放回共享目录。
+        types = self.platform_types()
+        cache = getattr(self, "_platform_type_cache", None)
+        if cache is None:
+            cache = {}
+            self._platform_type_cache = cache
+        if types:
+            cache.update(types)
+        membership = sharing.parse_config(raw).filter_same_platform(dict(cache))
         for warning in membership.warnings:
             if warning not in self._sharing_warned:
                 self._sharing_warned.add(warning)
@@ -654,6 +661,26 @@ class MemoryBeyondPlugin(Star):
 
     def _people_scope(self, umo: str) -> memstore.ScopeStore:
         return self._store.people_scope(self._platform_of(umo))
+
+    def _people_store_for_event(
+        self, event: AstrMessageEvent
+    ) -> tuple[memstore.ScopeStore | None, str]:
+        """事件对应的 people 作用域：(store, 拒绝原因)。
+
+        目录按事件的 platform_id 选，而不是 UMO 前缀：AstrBot 正常构造时
+        两者一致；一旦不一致，读取与权限必须看同一个身份，否则非成员可以
+        借成员的 UMO 读到共享内容。取不到 platform_id 且 UMO 会落到共享
+        目录时 fail-closed（无法确认成员身份）；非成员自己的 people 目录
+        不受影响。
+        """
+        actor = self._event_actor(event)
+        if actor:
+            return self._store.people_scope(actor), ""
+        umo = str(getattr(event, "unified_msg_origin", "") or "")
+        platform = self._platform_of(umo)
+        if self._sharing.is_member(platform):
+            return None, sharing.IDENTITY_REFUSAL
+        return self._store.people_scope(platform), ""
 
     def _people_permission(self, platform_id: str) -> str | None:
         """共享人物空间里这个机器人的权限；非成员返回 None（不受限制）。"""
@@ -758,7 +785,8 @@ class MemoryBeyondPlugin(Star):
         if scope == "session":
             return self._session_scope(event)
         if scope == "people":
-            return self._people_scope(str(event.unified_msg_origin))
+            store, _ = self._people_store_for_event(event)
+            return store
         return None
 
     def _tool_store(
@@ -772,6 +800,11 @@ class MemoryBeyondPlugin(Star):
             return None, scope, GLOBAL_MEMORY_OFF
         if scope == "people" and not self._people_on():
             return None, scope, PEOPLE_MEMORY_OFF
+        if scope == "people":
+            store, refusal = self._people_store_for_event(event)
+            if store is None:
+                return None, scope, refusal
+            return store, scope, ""
         store = self._scope_for(event, scope)
         if store is None:
             return None, scope, SCOPE_ARG_ERROR
@@ -1104,8 +1137,14 @@ class MemoryBeyondPlugin(Star):
             return rt.index_block
         global_index = None
         if global_on:
-            global_index = (await self._global_scope().load_index()).text
-        session_snap = await self._session_scope(event).load_index()
+            global_store = self._global_scope()
+            await global_store.ensure_index_folded()
+            global_index = (await global_store.load_index()).text
+        session_store = self._session_scope(event)
+        # 升级后的第一次注入把旧格式索引（散落的 daily 行）改写成折叠块，
+        # 不必等到下一次写入/删除才同步。
+        await session_store.ensure_index_folded()
+        session_snap = await session_store.load_index()
         profiles: list[injection.MemoryView] = []
         pinned: dict[str, str] = {}
         pinned_full: set[str] = set()
@@ -1145,7 +1184,9 @@ class MemoryBeyondPlugin(Star):
         sender_id, _ = self._sender_identity(event)
         if not sender_id or not memstore.is_person_file(f"user-{sender_id}.md"):
             return ()
-        return ("pin", self._platform_of(umo), sender_id)
+        # 与 _people_store_for_event 同口径：有 platform_id 时以它为准
+        platform = self._event_actor(event) or self._platform_of(umo)
+        return ("pin", platform, sender_id)
 
     async def _pinned_profiles(
         self, event: AstrMessageEvent, *, note_seen: bool = False
@@ -1156,7 +1197,6 @@ class MemoryBeyondPlugin(Star):
         人物空间里，未被头尾截断的 people 档案记进"看过"：模型确实看过
         这份完整内容，之后整文件覆盖才允许。
         """
-        umo = str(getattr(event, "unified_msg_origin", "") or "")
         sender_id, _ = self._sender_identity(event)
         name = f"user-{sender_id}.md"
         if not sender_id or not memstore.is_person_file(name):
@@ -1166,10 +1206,13 @@ class MemoryBeyondPlugin(Star):
         views: list[injection.MemoryView] = []
         pinned: dict[str, str] = {}
         full: set[str] = set()
-        for label, store in (
-            ("session", self._session_scope(event)),
-            ("people", self._people_scope(umo)),
-        ):
+        pairs: list[tuple[str, memstore.ScopeStore]] = [
+            ("session", self._session_scope(event))
+        ]
+        people_store, _ = self._people_store_for_event(event)
+        if people_store is not None:
+            pairs.append(("people", people_store))
+        for label, store in pairs:
             content = await store.read(name)
             if content is None:
                 continue
@@ -1202,16 +1245,15 @@ class MemoryBeyondPlugin(Star):
         不记的话，长期稳定的档案 uses 一直是 0，遗忘扫描会把它们当成
         "从未用过"移出在册，整理时也会被标成从未用到。
         """
-        umo = str(getattr(event, "unified_msg_origin", "") or "")
         by_store: dict[memstore.ScopeStore, list[str]] = {}
+        people_store, _ = self._people_store_for_event(event)
         for ref in rt.index_pinned:
             scope, _, file = ref.partition("/")
-            store = (
-                self._people_scope(umo)
-                if scope == "people"
-                else self._session_scope(event)
-            )
-            if store.exists(file):
+            if scope == "people":
+                store = people_store
+            else:
+                store = self._session_scope(event)
+            if store is not None and store.exists(file):
                 by_store.setdefault(store, []).append(file)
         for store, names in by_store.items():
             await asyncio.to_thread(store.note_used, names)
@@ -1220,16 +1262,17 @@ class MemoryBeyondPlugin(Star):
         self, rt: RuntimeSession, event: AstrMessageEvent
     ) -> None:
         """给快照里未截断的人物档案补记"看过"，只认与快照一致的内容。"""
-        umo = str(getattr(event, "unified_msg_origin", "") or "")
+        people_store, _ = self._people_store_for_event(event)
         for ref in rt.index_pinned:
             if ref not in rt.index_pinned_full:
                 continue
             scope, _, file = ref.partition("/")
-            store = (
-                self._people_scope(umo)
-                if scope == "people"
-                else self._session_scope(event)
-            )
+            if scope == "people":
+                store = people_store
+            else:
+                store = self._session_scope(event)
+            if store is None:
+                continue
             content = await store.read(file)
             if content is None:
                 continue
@@ -1264,7 +1307,11 @@ class MemoryBeyondPlugin(Star):
             if self._global_on():
                 scopes.append(("global", self._global_scope()))
             if self._people_on():
-                scopes.append(("people", self._people_scope(umo)))
+                # 共享目录按事件 platform_id 选；身份不明时宁可这一轮不召回
+                # people，也不把 _shared 的内容发给非成员。
+                people_store, _ = self._people_store_for_event(event)
+                if people_store is not None:
+                    scopes.append(("people", people_store))
             stores: dict[str, memstore.ScopeStore] = dict(scopes)
             query = prompts.strip_sender_tag(query)
             sender_id, _ = self._sender_identity(event)
@@ -1696,7 +1743,22 @@ class MemoryBeyondPlugin(Star):
 
         共享人物空间里提取写入沿用工具层的覆盖前版本检查：提示词读到的全文
         到真正写入之间若有别的机器人改过，宁可跳过这一条，也不整文件覆盖。
+
+        任务开始时捕获的 people 作用域在落盘前要再确认一次：后台提取跑在
+        模型调用之后，期间成员可能被移出共享或降成 read/append。身份或目录
+        映射变了就把 people 目标丢掉，草稿退回 session，不能继续往 _shared
+        写（此时 shared_people_actor 为空，连版本检查都不会做）。
         """
+        if people is not None:
+            # 配置页改动可能还没被下一次请求带进来；落盘前主动同步一次成员表
+            self._refresh_sharing()
+            current = self._people_scope(umo)
+            if not self._can_extract_people(umo) or current.root != people.root:
+                logger.info(
+                    LOG_PREFIX
+                    + f"会话 {umo} 的共享人物身份已变化，本次提取不再写 people"
+                )
+                people = None
         stores = {"session": self._store.session_scope(umo)}
         shared_people_actor = ""
         if people is not None:
@@ -1726,15 +1788,14 @@ class MemoryBeyondPlugin(Star):
                     # 索引行由 write 按 frontmatter description 自动同步
                     stored += 1
                     if label == "people" and shared_people_actor:
-                        # 自己刚写的版本算看过；同一批里再改同一文件不会被误拦
-                        written = await scope.read(draft.filename)
-                        if written is not None:
-                            await asyncio.to_thread(
-                                self._seen.note,
-                                shared_people_actor,
-                                draft.filename,
-                                written,
-                            )
+                        # 用刚写入的内容记"看过"，不要重读：写锁释放后别的
+                        # 机器人可能已经写入，重读会把对方的版本记成自己看过
+                        await asyncio.to_thread(
+                            self._seen.note,
+                            shared_people_actor,
+                            draft.filename,
+                            report.content,
+                        )
                 elif label == "people" and shared_people_actor:
                     logger.info(
                         LOG_PREFIX
@@ -2387,8 +2448,9 @@ class MemoryBeyondPlugin(Star):
                 return refusal
             report = await store.delete(file, actor=actor)
             if report.ok:
-                # 删除后开头块不能再继续注入旧档案
+                # 删除后开头块不能再继续注入旧档案，也不能留着过期版本记录
                 self._invalidate_pinned(scope, [file])
+                await asyncio.to_thread(self._seen.forget_file, file)
         else:
             if not content.strip():
                 return "content 为空。写入需提供完整文件内容；如要删除请设 delete=true。"
@@ -2417,8 +2479,11 @@ class MemoryBeyondPlugin(Star):
                 forbid_overwrite=(permission == sharing.PERMISSION_APPEND),
             )
             if report.ok:
-                # 自己刚写的版本算看过，紧接着再整文件覆盖不会被版本检查误拦
-                await self._note_shared_seen(event, scope, store, file)
+                # 自己刚写的版本算看过，紧接着再整文件覆盖不会被版本检查误拦。
+                # 用 write 返回的落盘内容，不要重读磁盘（写锁释放后别人可能已写）。
+                await self._note_shared_seen(
+                    event, scope, store, file, report.content
+                )
             if report.ok and not existed:
                 hint = await self._duplicate_hint(store, file, content)
                 if hint:
@@ -2501,8 +2566,10 @@ class MemoryBeyondPlugin(Star):
             expected_sha1=expected,
         )
         if report.ok:
-            # 自己刚改过的版本算看过，后续整文件覆盖不会被版本检查误拦
-            await self._note_shared_seen(event, scope, store, file)
+            # 自己刚改过的版本算看过；同样用 edit 返回的落盘内容，避免重读竞态
+            await self._note_shared_seen(
+                event, scope, store, file, report.content
+            )
             self._note_model_wrote(event)
             extra = await self._write_insights(event, store, file)
             if extra:
@@ -2550,7 +2617,9 @@ class MemoryBeyondPlugin(Star):
             stores.append(self._global_scope())
         stores.append(self._session_scope(event))
         if self._people_on():
-            stores.append(self._people_scope(str(event.unified_msg_origin)))
+            people_store, _ = self._people_store_for_event(event)
+            if people_store is not None:
+                stores.append(people_store)
         return stores
 
     async def _write_insights(
@@ -2640,9 +2709,11 @@ class MemoryBeyondPlugin(Star):
         if scope in ("session", "all"):
             stores.append(("session", self._session_scope(event)))
         if scope in ("people", "all") and people_on:
-            stores.append(
-                ("people", self._people_scope(str(event.unified_msg_origin)))
-            )
+            people_store, people_refusal = self._people_store_for_event(event)
+            if people_store is not None:
+                stores.append(("people", people_store))
+            elif scope == "people":
+                return people_refusal
         if not stores:
             return "scope 参数必须是 global、session、people 或 all。"
         hits: list[tuple[str, insights.SearchHit]] = []

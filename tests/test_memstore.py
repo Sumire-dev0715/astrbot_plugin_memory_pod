@@ -375,12 +375,13 @@ def test_truncate_index_appends_notice():
     ]
     snap = _truncate_index(raw, headers=headers)
     assert snap.truncated
-    assert snap.loaded_lines == INDEX_MAX_LINES
-    # 注入时渲染成紧凑行；按 updated 从旧到新丢掉最旧的 50 条，顺序不变
-    assert snap.text.splitlines()[0] == "- m50.md — 钩子"
+    # 200 行上限包含末尾的"还有 N 条"说明，所以保留 199 条
+    assert snap.loaded_lines == INDEX_MAX_LINES - 1
+    # 注入时渲染成紧凑行；按 updated 从旧到新丢掉最旧的 51 条，顺序不变
+    assert snap.text.splitlines()[0] == "- m51.md — 钩子"
     assert "- m249.md — 钩子" in snap.text
     assert "m0.md" not in snap.text
-    assert "还有 50 条未加载，可用 memory_search 找到" in snap.text
+    assert "还有 51 条未加载，可用 memory_search 找到" in snap.text
     assert "50 行" not in snap.text
 
 

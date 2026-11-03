@@ -268,16 +268,16 @@ class TidyBook:
                 if path.is_file():
                     path.unlink()
 
-    def remove_file(self, sid: str, file: str) -> None:
+    def remove_file(self, sid: str, file: str) -> bool:
         """把一个文件从整理记录与待确认方案里抹掉（管理员彻底删除文件时）。
 
         整理记录里的 ops.before 与待确认方案里的 operation.content 都留着
         改动前的原文；文件被彻底删除后这些副本不能继续留在磁盘上，否则
-        撤销整理还能把已删除的正文写回。
+        撤销整理还能把已删除的正文写回。返回是否真的清掉了记录。
         """
         file = (file or "").strip()
         if not file:
-            return
+            return False
         with self._lock:
             runs = self.runs(sid)
             kept_runs: list[dict] = []
@@ -305,19 +305,20 @@ class TidyBook:
             pending = meta.pending
             ops = pending.get("operations") if isinstance(pending, dict) else None
             if not isinstance(ops, list):
-                return
+                return runs_changed
             kept_ops = [
                 op
                 for op in ops
                 if not (isinstance(op, dict) and str(op.get("file")) == file)
             ]
             if len(kept_ops) == len(ops):
-                return
+                return runs_changed
             if kept_ops:
                 meta.pending = {**pending, "operations": kept_ops}
             else:
                 meta.pending = None
             self._write(self._path(sid), meta.to_raw())
+            return True
 
 
 # ---------------------------------------------------------------- 判断

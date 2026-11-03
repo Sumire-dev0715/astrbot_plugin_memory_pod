@@ -122,6 +122,7 @@ def test_opening_block_appends_profiles_inside_index_block():
     block = injection.build_opening_block(None, index, [profile], NOW)
     assert block.startswith(prompts.INDEX_BLOCK_OPEN)
     assert block.endswith(prompts.INDEX_BLOCK_CLOSE)
+    assert prompts.DATA_NOTICE in block
     assert "- [a](a.md) — 会话记忆" in block
     assert injection.PROFILE_HEADING in block
     assert "### people/user-1.md（user｜今天写入）" in block

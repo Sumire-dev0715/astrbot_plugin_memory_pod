@@ -285,3 +285,32 @@ class SeenVersions:
         """当前内容是否正是这个机器人看过的版本。"""
         seen = self.seen(platform_id, file)
         return bool(seen) and seen == content_sha1(content)
+
+    def clear(self) -> None:
+        """清空全部版本记录（人物空间整体迁移/清除后调用）。"""
+        with self._lock:
+            if self.path.is_file():
+                self.path.unlink()
+
+    def forget_file(self, file: str) -> int:
+        """删除所有机器人对某个文件的版本记录（文件被删除/移走后调用）。
+
+        不清理的话，同名文件以后重新创建时，旧哈希仍会被当成 expected_sha1；
+        虽然文件不存在时写入已不再比较，但留着过期记录会让下一次覆盖检查
+        误判成"看过旧版本"。返回清掉的记录数。
+        """
+        file = (file or "").strip()
+        if not file:
+            return 0
+        removed = 0
+        with self._lock:
+            bots = self._load()
+            changed = False
+            for platform_id, files in bots.items():
+                if file in files:
+                    del files[file]
+                    removed += 1
+                    changed = True
+            if changed:
+                self._save(bots)
+        return removed

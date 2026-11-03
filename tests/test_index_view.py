@@ -95,14 +95,16 @@ def test_oldest_entries_are_dropped_first_and_feedback_last():
         file_types={"fb.md": "feedback", "fb2.md": "feedback"},
         idle_times={"a.md": 100.0, "b.md": 300.0, "c.md": 200.0,
                     "fb.md": 1.0, "fb2.md": 50.0},
-        max_lines=3,
+        max_lines=4,
     )
-    # 丢掉最久没用的 a、c（b 更晚用过）；feedback 没被丢
+    # 丢掉最久没用的 a、c（b 更晚用过）；feedback 没被丢；
+    # 上限里的 1 行留给"还有 N 条"说明。
     assert view.text.splitlines()[:3] == [
         "- b.md — b.md 的描述",
         "- fb.md — fb.md 的描述",
         "- fb2.md — fb2.md 的描述",
     ]
+    assert len(view.text.splitlines()) <= 4
     assert "还有 2 条未加载" in view.text
     assert view.dropped_entries == 2
 
@@ -112,12 +114,13 @@ def test_oldest_entries_are_dropped_first_and_feedback_last():
         file_types={"fb.md": "feedback", "fb2.md": "feedback"},
         idle_times={"a.md": 100.0, "b.md": 300.0, "c.md": 200.0,
                     "fb.md": 1.0, "fb2.md": 50.0},
-        max_lines=2,
+        max_lines=3,
     )
     assert tighter.text.splitlines()[:2] == [
         "- fb.md — fb.md 的描述",
         "- fb2.md — fb2.md 的描述",
     ]
+    assert len(tighter.text.splitlines()) <= 3
     assert tighter.dropped_entries == 3
 
 
@@ -136,8 +139,9 @@ def test_byte_limit_drops_journal_block_first():
     block = journal.build_block(
         [journal.JournalEntry(f"daily-2026-11-0{day}.md", "日志") for day in (1, 2)]
     )
-    # 只够装下正常行，日志块一条都装不下
+    # 只够装下正常行和"还有 N 条"说明，日志块一条都装不下
     max_bytes = sum(len(line.encode("utf-8")) + 1 for line in normal)
+    max_bytes += len(index_view._drop_note(2).encode("utf-8")) + 1
     view = index_view.render_for_injection(
         "\n".join(normal + block), max_bytes=max_bytes
     )
@@ -145,13 +149,15 @@ def test_byte_limit_drops_journal_block_first():
     assert "日志共" not in view.text
     compact = [index_view.compact_index_line(line) for line in normal]
     assert view.text.startswith("\n".join(compact))
+    assert len(view.text.encode("utf-8")) <= max_bytes
 
 
 def test_byte_limit_drops_oldest_normal_entries():
     normal = lines(*(f"m{i}.md" for i in range(6)))
     compact = [index_view.compact_index_line(line) for line in normal]
-    # 只够装最后两条；使用时间 m0 最早，按旧到新丢到只剩 m4、m5
+    # 只够装最后两条和"还有 N 条"说明；使用时间 m0 最早，按旧到新丢到只剩 m4、m5
     max_bytes = sum(len(line.encode("utf-8")) + 1 for line in compact[-2:])
+    max_bytes += len(index_view._drop_note(4).encode("utf-8")) + 1
     view = index_view.render_for_injection(
         "\n".join(normal),
         idle_times={f"m{i}.md": float(i) for i in range(6)},
@@ -160,6 +166,7 @@ def test_byte_limit_drops_oldest_normal_entries():
     assert view.text.splitlines()[:2] == compact[-2:]
     assert view.dropped_entries == 4
     assert "还有 4 条未加载" in view.text
+    assert len(view.text.encode("utf-8")) <= max_bytes
 
 
 def test_mixed_journal_and_normal_counts():
@@ -173,9 +180,9 @@ def test_mixed_journal_and_normal_counts():
         raw,
         journal_files={entry.name for entry in entries},
         idle_times={f"m{i}.md": float(i) for i in range(10)},
-        max_lines=9,
+        max_lines=10,
     )
-    # 3 篇日志整块 + 最旧的 m0：共 4 条
+    # 3 篇日志整块 + 最旧的 m0：共 4 条；上限里的 1 行留给说明
     assert "日志共" not in view.text
     assert "m0.md" not in view.text
     assert view.dropped_entries == 4
@@ -183,6 +190,7 @@ def test_mixed_journal_and_normal_counts():
     assert view.text.splitlines()[:9] == [
         index_view.compact_index_line(line) for line in normal[1:]
     ]
+    assert len(view.text.splitlines()) <= 10
 
 
 def test_journal_block_before_manual_line_is_dropped_whole():
@@ -193,9 +201,10 @@ def test_journal_block_before_manual_line_is_dropped_whole():
     ]
     raw = "\n".join(normal + journal.build_block(entries) + ["# 手工补充"])
     view = index_view.render_for_injection(
-        raw, journal_files={entry.name for entry in entries}, max_lines=4
+        raw, journal_files={entry.name for entry in entries}, max_lines=5
     )
-    # 汇总行后面有手工行，也按一个完整的日志块丢掉，不留半截
+    # 汇总行后面有手工行，也按一个完整的日志块丢掉，不留半截；
+    # 上限里的 1 行留给"还有 N 条"说明。
     assert "daily-2026" not in view.text and "日志共" not in view.text
     assert "# 手工补充" in view.text
     assert all(
@@ -203,6 +212,7 @@ def test_journal_block_before_manual_line_is_dropped_whole():
     )
     assert view.dropped_entries == 5
     assert "还有 5 条未加载" in view.text
+    assert len(view.text.splitlines()) <= 5
 
 
 def test_non_entry_lines_over_limit_fall_back_to_bottom_cut(tmp_path):
@@ -257,15 +267,24 @@ def test_write_receipt_uses_compact_injection_size(tmp_path):
 
 
 def test_feedback_is_dropped_last_via_load_index(tmp_path, monkeypatch):
-    monkeypatch.setattr(memstore, "INDEX_MAX_LINES", 1)
+    long_desc = "描" * 100
+    note = index_view._drop_note(1)
+    one_line = (
+        len(index_view.compact_index_line(format_index_line("fb.md", long_desc)).encode("utf-8"))
+        + 1
+    )
+    monkeypatch.setattr(memstore, "INDEX_MAX_BYTES", one_line + len(note.encode("utf-8")) + 1)
     (tmp_path / "user.md").write_text(
-        memory("user", "用户", "2026-06-01 12:00", "user"), "utf-8"
+        memory("user", long_desc, "2026-06-01 12:00", "user"), "utf-8"
     )
     (tmp_path / "fb.md").write_text(
-        memory("fb", "指导", "2026-01-01 12:00", "feedback"), "utf-8"
+        memory("fb", long_desc, "2026-01-01 12:00", "feedback"), "utf-8"
     )
     (tmp_path / INDEX_FILENAME).write_text(
-        "\n".join(lines("user.md", "fb.md")) + "\n", "utf-8"
+        "\n".join(
+            format_index_line(name, long_desc) for name in ("user.md", "fb.md")
+        ) + "\n",
+        "utf-8",
     )
     store = ScopeStore(tmp_path)
     snap = run(store.load_index())
@@ -278,15 +297,25 @@ def test_feedback_is_dropped_last_via_load_index(tmp_path, monkeypatch):
 
 
 def test_missing_usage_falls_back_to_updated(tmp_path, monkeypatch):
-    monkeypatch.setattr(memstore, "INDEX_MAX_LINES", 2)
+    long_desc = "描" * 100
+    note = index_view._drop_note(1)
+    budget = sum(
+        len(index_view.compact_index_line(format_index_line(name, long_desc)).encode("utf-8")) + 1
+        for name in ("mid.md", "new.md")
+    )
+    monkeypatch.setattr(memstore, "INDEX_MAX_BYTES", budget + len(note.encode("utf-8")) + 1)
     for name, updated in (
         ("old", "2026-01-01 12:00"),
         ("mid", "2026-03-01 12:00"),
         ("new", "2026-06-01 12:00"),
     ):
-        (tmp_path / f"{name}.md").write_text(memory(name, name), "utf-8")
+        (tmp_path / f"{name}.md").write_text(memory(name, long_desc), "utf-8")
     (tmp_path / INDEX_FILENAME).write_text(
-        "\n".join(lines("old.md", "mid.md", "new.md")) + "\n", "utf-8"
+        "\n".join(
+            format_index_line(f"{name}.md", long_desc)
+            for name in ("old", "mid", "new")
+        ) + "\n",
+        "utf-8",
     )
     store = ScopeStore(tmp_path)
     snap = run(store.load_index())
@@ -297,10 +326,16 @@ def test_missing_usage_falls_back_to_updated(tmp_path, monkeypatch):
 
 
 def test_load_index_reads_usage_each_time_it_builds_a_snapshot(tmp_path, monkeypatch):
-    monkeypatch.setattr(memstore, "INDEX_MAX_LINES", 2)
+    long_desc = "描" * 100
+    note = index_view._drop_note(1)
+    budget = sum(
+        len(index_view.compact_index_line(format_index_line(f"{name}.md", long_desc)).encode("utf-8")) + 1
+        for name in ("b", "c")
+    )
+    monkeypatch.setattr(memstore, "INDEX_MAX_BYTES", budget + len(note.encode("utf-8")) + 1)
     store = ScopeStore(tmp_path)
     for name in ("a", "b", "c"):
-        run(store.write(f"{name}.md", memory(name, name)))
+        run(store.write(f"{name}.md", memory(name, long_desc)))
     store.note_used(["a.md"], 100.0)
     first = run(store.load_index())
     assert "a.md" not in first.text
@@ -315,12 +350,44 @@ def test_load_index_reads_usage_each_time_it_builds_a_snapshot(tmp_path, monkeyp
 
 def test_usage_is_not_read_while_rendering():
     """渲染函数是纯函数：只按传入的统计决定丢谁，不碰磁盘。"""
-    raw = "\n".join(lines("a.md", "b.md"))
+    long_desc = "描" * 100
+    raw = "\n".join(
+        format_index_line(name, long_desc) for name in ("a.md", "b.md")
+    )
+    note = index_view._drop_note(1)
+    budget = (
+        len(index_view.compact_index_line(raw.splitlines()[0]).encode("utf-8")) + 1
+    )
+    budget += len(note.encode("utf-8")) + 1
     # 没有统计时两者同样"旧"，按索引顺序丢前面的 a
-    without = index_view.render_for_injection(raw, max_lines=1)
+    without = index_view.render_for_injection(raw, max_bytes=budget)
     assert "a.md" not in without.text and "b.md" in without.text
-    # 传入统计后改按最近使用：b 更久没用，丢 b
+    # 传入统计后改按最近使用：b 更久没用，丢 b；上限里的 1 行留给说明
     with_usage = index_view.render_for_injection(
-        raw, idle_times={"a.md": 300.0, "b.md": 100.0}, max_lines=1
+        raw, idle_times={"a.md": 300.0, "b.md": 100.0}, max_bytes=budget
     )
     assert "b.md" not in with_usage.text and "a.md" in with_usage.text
+
+
+def test_drop_note_counts_toward_both_limits():
+    """超限说明自身也受 200 行 / 25KB 约束，最终注入不能因此超限。"""
+    raw = "\n".join(lines(*(f"m{i}.md" for i in range(201))))
+    view = index_view.render_for_injection(raw, max_lines=200)
+    assert view.truncated
+    assert len(view.text.splitlines()) <= 200
+    # 200 行上限含说明行，所以保留 199 条、丢掉 2 条
+    assert view.loaded_lines == 199
+    assert "还有 2 条未加载" in view.text
+
+    long = "\n".join(f"- m{i}.md — " + "测" * 20 for i in range(200))
+    note = index_view._drop_note(1)
+    max_bytes = (
+        len(index_view.compact_index_line(long.splitlines()[0]).encode("utf-8"))
+        + 1
+        + len(note.encode("utf-8"))
+        + 1
+    )
+    tight = index_view.render_for_injection(long, max_bytes=max_bytes)
+    assert tight.truncated
+    assert len(tight.text.encode("utf-8")) <= max_bytes
+    assert "还有" in tight.text

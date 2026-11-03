@@ -735,3 +735,62 @@ def test_audit_records_every_change(store):
             }
 
     run(scenario())
+
+
+def test_import_refuses_non_utf8_existing_file_without_aborting_batch(store):
+    """目标文件不是 UTF-8 时只把这一条标成无效，不能中断整批导入。"""
+    store.root.mkdir(parents=True, exist_ok=True)
+    bad = store.root / "bad.md"
+    bad.write_bytes(b"\xff\xfe\x00broken")
+    forgotten_dir = store.root / history.FORGOTTEN_DIRNAME
+    forgotten_dir.mkdir()
+    (forgotten_dir / "dormant.md").write_bytes(b"\xff\xfe\x00old")
+
+    async def scenario():
+        results = await store.import_files(
+            [
+                ImportEntry("bad.md", memory("bad", "坏的")),
+                ImportEntry("dormant.md", memory("dormant", "遗忘副本")),
+                ImportEntry("ok.md", memory("ok", "好的")),
+            ],
+            CONFLICT_OVERWRITE,
+        )
+        assert [item.outcome for item in results] == [
+            IMPORT_INVALID,
+            IMPORT_INVALID,
+            "added",
+        ]
+        assert bad.read_bytes() == b"\xff\xfe\x00broken"
+        assert (forgotten_dir / "dormant.md").read_bytes() == b"\xff\xfe\x00old"
+        assert (store.root / "ok.md").is_file()
+
+    run(scenario())
+
+
+def test_scope_archive_cleanup_respects_trash_keep_days(tmp_path, monkeypatch):
+    base = 1_800_000_000.0
+    monkeypatch.setattr(history, "_now", lambda: base)
+    memory_store = MemoryStore(tmp_path / "memories")
+    store = memory_store.session_scope(UMO)
+
+    async def scenario():
+        await store.write("a.md", memory("a", "甲", "归档里的正文"))
+        assert await store.purge(actor="webui") == 1
+
+    run(scenario())
+    archives = list((tmp_path / "memories" / ".trash-scopes").iterdir())
+    assert len(archives) == 1
+    memory_store.set_retention(0, 30)
+    result = memory_store.cleanup_history(now=base + 100 * DAY, scopes=[])
+    key = str(tmp_path / "memories" / ".trash-scopes")
+    assert result[key]["archives"] == 1
+    assert not archives[0].exists()
+
+    # 保留期为 0（永久）时不能再删归档
+    async def scenario2():
+        await store.write("b.md", memory("b", "乙"))
+        await store.purge(actor="webui")
+
+    run(scenario2())
+    memory_store.set_retention(0, 0)
+    assert memory_store.cleanup_history(now=base + 1000 * DAY, scopes=[]) == {}

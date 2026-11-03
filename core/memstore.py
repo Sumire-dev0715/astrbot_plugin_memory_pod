@@ -398,6 +398,10 @@ class IndexSnapshot:
 class WriteReport:
     ok: bool
     message: str
+    # 写入成功时是落盘后的完整内容（含 _commit 补好的时间戳），供调用方
+    # 记录"看过"的版本；失败时为空串。不要再从磁盘重读：写锁释放后别人
+    # 可能已经写入，重读会把对方的版本记成本机器人看过。
+    content: str = ""
 
 
 @dataclass
@@ -833,8 +837,9 @@ class ScopeStore:
                 return WriteReport(False, sharing.APPEND_OVERWRITE_REFUSAL)
             if expected_sha1 is not None:
                 base = active if active is not None else previous
-                actual = history.content_sha1(base) if base is not None else ""
-                if actual != expected_sha1:
+                # 同名文件已经不存在（被删除/迁移/彻底清除）时没有可丢的内容，
+                # 旧版本记录不该把重新创建锁死；只有确实存在旧内容才比较哈希。
+                if base is not None and history.content_sha1(base) != expected_sha1:
                     return WriteReport(
                         False, sharing.version_conflict_message(name)
                     )
@@ -872,7 +877,7 @@ class ScopeStore:
 
     @staticmethod
     def _read_for_update(path: Path) -> str | None:
-        """覆盖前读取旧内容：不存在返回 None；存在但读不出来抛 OSError。
+        """覆盖前读取旧内容：不存在返回 None；存在但读不出来抛 OSError / UnicodeDecodeError。
 
         与 _read_if_exists 不同，这里绝不把"读失败"当成"没有旧文件"，
         否则会在没有历史副本的情况下把读不出来的内容直接覆盖掉。
@@ -1083,7 +1088,7 @@ class ScopeStore:
         health = self._index_health(lines, size)
         if health:
             message += "。" + health
-        return WriteReport(True, message)
+        return WriteReport(True, message, content)
 
     async def delete(self, name: str, actor: str = "") -> WriteReport:
         name = (name or "").strip().lstrip("/")
@@ -1878,7 +1883,7 @@ class ScopeStore:
                 target = self.root / name
                 try:
                     old = self._read_for_update(target)
-                except OSError:
+                except (OSError, UnicodeDecodeError):
                     results[-1] = ImportResult(
                         name, IMPORT_INVALID, "读取现有文件失败，未导入"
                     )
@@ -1942,8 +1947,9 @@ class ScopeStore:
         try:
             active = self._read_for_update(self.root / name)
             dormant = self._read_for_update(self._forgotten_path(name))
-        except OSError:
-            # 读不出旧内容就不能导入覆盖：否则会在没有副本的情况下丢内容
+        except (OSError, UnicodeDecodeError):
+            # 读不出旧内容就不能导入覆盖：否则会在没有副本的情况下丢内容。
+            # 非 UTF-8 文件也算读不出：不能因为一份坏文件让整批导入中断。
             return IMPORT_INVALID, "读取现有文件失败，未导入"
         if entry.forgotten and active is not None:
             # 目标这份正在用，已遗忘的导入件不去顶替它
@@ -2212,6 +2218,11 @@ class ScopeStore:
 
         使用统计在这里读一次，供超限时的丢行顺序使用；快照由调用方缓存，
         之后的轮次不再重读，记忆不变时注入文本逐字不变。
+
+        渲染前先按当前在册日志折叠一次：升级前散落在索引里的 daily 行
+        即使还没触发写入/删除，第一次注入也会按新格式显示，不会把每篇
+        日志逐条列给模型。真正把文件改写成新格式由 ensure_index_folded()
+        负责，本方法保持只读。
         """
         raw = await self.read(INDEX_FILENAME)
         if raw is None:
@@ -2223,7 +2234,47 @@ class ScopeStore:
             for header in headers
             if journal.is_journal(header.file, header.type)
         }
+        lines = journal.fold_index(raw.splitlines(), self._journal_entries(headers))
+        folded = "\n".join(lines).strip("\n")
+        raw = folded + "\n" if folded else ""
         return _truncate_index(raw, journals, headers, usage)
+
+    async def ensure_index_folded(self) -> bool:
+        """把旧格式索引改写成折叠后的日志块，返回是否真的写了盘。
+
+        升级后第一次注入（或启动时）调用一次即可；写入与索引同步共用同一
+        把锁，并在锁内重读一次，避免把并发写入的记忆行覆盖掉。重复调用
+        结果不变，不会每次请求都写盘。
+        """
+        index_path = self.root / INDEX_FILENAME
+        raw = await self.read(INDEX_FILENAME)
+        if raw is None:
+            return False
+        headers = await asyncio.to_thread(self.headers)
+        entries = self._journal_entries(headers)
+        before = raw.splitlines()
+        folded = journal.fold_index(before, entries)
+        if folded == before:
+            return False
+        text = "\n".join(folded).strip("\n")
+        text = text + "\n" if text else ""
+        async with self._lock:
+            current = await asyncio.to_thread(self._read_if_exists, index_path)
+            if current is None:
+                return False
+            current_lines = current.splitlines()
+            # 锁内重新看一次在册文件：等待锁期间可能有新日志写入，
+            # 用锁外算好的 entries 会把刚同步进来的日志行折叠掉。
+            current_entries = await asyncio.to_thread(
+                self._journal_entries, self.headers()
+            )
+            current_folded = journal.fold_index(current_lines, current_entries)
+            current_text = "\n".join(current_folded).strip("\n")
+            current_text = current_text + "\n" if current_text else ""
+            if current_text == current:
+                return False
+            await asyncio.to_thread(self._write_atomic, index_path, current_text)
+        return True
 
     # ------------------------------------------------------------ 全文搜索
 

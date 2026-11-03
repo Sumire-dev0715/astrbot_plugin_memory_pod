@@ -145,6 +145,7 @@ def _load_main():
 main = _load_main()
 pkg_compress = importlib.import_module(f"{PACKAGE}.core.compress")
 pkg_history = importlib.import_module(f"{PACKAGE}.core.history")
+pkg_index_view = importlib.import_module(f"{PACKAGE}.core.index_view")
 pkg_injection = importlib.import_module(f"{PACKAGE}.core.injection")
 pkg_memstore = importlib.import_module(f"{PACKAGE}.core.memstore")
 pkg_prompts = importlib.import_module(f"{PACKAGE}.core.prompts")
@@ -847,11 +848,17 @@ def test_index_snapshot_does_not_follow_usage_changes(tmp_path, monkeypatch):
     """超限丢行只在生成快照时读一次使用统计，缓存期间不跟每轮召回漂移。"""
     plugin = make_plugin(tmp_path, [])
     plugin.config["pin_private_profile"] = False
-    monkeypatch.setattr(pkg_memstore, "INDEX_MAX_LINES", 3)
+    long_desc = "描" * 100
+    note = pkg_index_view._drop_note(1)
+    budget = sum(
+        len(pkg_index_view.compact_index_line(pkg_memstore.format_index_line(f"{name}.md", long_desc)).encode("utf-8")) + 1
+        for name in ("a", "b", "c")
+    )
+    monkeypatch.setattr(pkg_memstore, "INDEX_MAX_BYTES", budget + len(note.encode("utf-8")) + 1)
     event = FakeEvent("Bot-A", sender_id="123")
     session = plugin._store.session_scope(event.unified_msg_origin)
     for name in ("a", "b", "c", "d"):
-        run(session.write(f"{name}.md", note_file(name, f"{name} 描述", "正文")))
+        run(session.write(f"{name}.md", note_file(name, long_desc, "正文")))
     # a 最久没用：第一次生成快照时丢 a
     session.note_used(["a.md"], 100.0)
 
@@ -1585,3 +1592,213 @@ def test_mb_status_survives_non_utf8_session_file(tmp_path):
         item for item in text.splitlines() if item.startswith("会话长文件：")
     )
     assert "bad.md" in line and "超过 8KB" in line
+
+
+# ---------------------------------------------------------------- 审查回归
+
+
+def test_read_search_and_pin_follow_event_platform_not_umo_prefix(tmp_path):
+    """UMO 前缀与事件 platform_id 不一致时，读/搜/钉不能落到别人的共享目录。"""
+    plugin = make_plugin(tmp_path, ["Bot-A=edit"])
+    shared = plugin._store.people_scope("Bot-A")
+    run(shared.write("user-123.md", person_file(body="共享私密正文"), actor="system"))
+    event = FakeEvent("Bot-Z", sender_id="123", umo="Bot-A:FriendMessage:100")
+
+    assert "共享私密正文" not in run(
+        plugin.memory_read(event, "people", "user-123.md")
+    )
+    result = run(plugin.memory_search(event, "私密", scope="people"))
+    assert "user-123" not in result and "正文" not in result
+    rt = main.RuntimeSession(state=pkg_compress.SessionState())
+    opening = run(plugin._index_block(rt, event))
+    assert opening is None or "共享私密正文" not in opening
+
+    # 非成员写入也落在自己的 people 目录，不会借 UMO 前缀写进 _shared
+    result = run(
+        plugin.memory_write(event, "people", "user-9.md", person_file("user-9"))
+    )
+    assert "已写入" in result
+    assert plugin._store.people_scope("Bot-Z").exists("user-9.md")
+    assert not shared.exists("user-9.md")
+
+    # 取不到 platform_id 且 UMO 指向共享目录：fail-closed
+    unknown = FakeEvent("", sender_id="123", umo="Bot-A:FriendMessage:100")
+    assert run(
+        plugin.memory_read(unknown, "people", "user-123.md")
+    ) == pkg_sharing.IDENTITY_REFUSAL
+    assert run(
+        plugin.memory_search(unknown, "共享私密正文", scope="people")
+    ) == pkg_sharing.IDENTITY_REFUSAL
+
+
+def test_write_seen_uses_written_content_not_reread_race(tmp_path, monkeypatch):
+    """写锁释放后别的机器人先写入，不能把对方内容记成自己看过。"""
+    plugin = make_plugin(tmp_path, ["Bot-A=edit", "Bot-B=edit"])
+    event = FakeEvent("Bot-A")
+    store = plugin._store.people_scope("Bot-A")
+    run(store.write("user-1.md", person_file("user-1", body="初始"), actor="system"))
+    assert "初始" in run(plugin.memory_read(event, "people", "user-1.md"))
+
+    original = store.write
+    raced = {"done": False}
+
+    async def write_then_other(*args, **kwargs):
+        report = await original(*args, **kwargs)
+        if report.ok and not raced["done"]:
+            raced["done"] = True
+            # 模拟 A 写入后、记 seen 之前 B 抢先写入
+            await original("user-1.md", person_file("user-1", body="B 抢先写的"))
+        return report
+
+    monkeypatch.setattr(store, "write", write_then_other)
+    result = run(
+        plugin.memory_write(
+            event, "people", "user-1.md", person_file("user-1", body="A 的版本")
+        )
+    )
+    assert "已写入" in result
+    current = run(store.read("user-1.md"))
+    assert "B 抢先写的" in current
+    # seen 必须是 A 自己写下的版本，不是磁盘上的 B 版本
+    assert plugin._seen.seen("Bot-A", "user-1.md") != pkg_sharing.content_sha1(current)
+
+    # A 没读过 B 的版本，下一次整文件覆盖必须被版本检查挡住
+    again = run(
+        plugin.memory_write(
+            event, "people", "user-1.md", person_file("user-1", body="A 再覆盖")
+        )
+    )
+    assert again == pkg_sharing.version_conflict_message("user-1.md")
+
+
+def test_deleted_shared_file_does_not_leave_a_stale_seen_lock(tmp_path):
+    """文件被删除后旧 seen 不能把同名文件重新创建锁死。"""
+    plugin = make_plugin(tmp_path, ["Bot-A=edit"])
+    event = FakeEvent("Bot-A")
+    store = plugin._store.people_scope("Bot-A")
+    assert "已写入" in run(
+        plugin.memory_write(event, "people", "user-1.md", person_file("user-1"))
+    )
+    run(plugin.memory_read(event, "people", "user-1.md"))
+    assert plugin._seen.seen("Bot-A", "user-1.md")
+
+    assert "已删除" in run(
+        plugin.memory_write(event, "people", "user-1.md", delete=True)
+    )
+    # 删除路径应清掉所有机器人的版本记录
+    assert plugin._seen.seen("Bot-A", "user-1.md") == ""
+
+    # 故意再塞回一个过期哈希：文件不存在时 store.write 不应拿它跟空串比较
+    plugin._seen.note("Bot-A", "user-1.md", "旧版本的正文")
+    assert "已写入" in run(
+        plugin.memory_write(
+            event, "people", "user-1.md", person_file("user-1", body="重建")
+        )
+    )
+    assert "重建" in run(store.read("user-1.md"))
+
+
+def test_extraction_rechecks_shared_membership_before_people_write(tmp_path):
+    """提取任务开始后被移出共享，落盘时不能继续写 _shared。"""
+    plugin = make_plugin(tmp_path, ["Bot-A=edit"])
+    umo = "Bot-A:FriendMessage:100"
+    shared = plugin._store.people_scope("Bot-A")
+    session = plugin._store.session_scope(umo)
+    draft = pkg_prompts.MemoryDraft(
+        type="user",
+        name="user-1",
+        description="身份",
+        content="工程师",
+        scope="people",
+    )
+
+    # 任务开始时 people 目标是共享目录；落盘前成员被移出
+    plugin.config["shared_people_bots"] = []
+    plugin._refresh_sharing()
+    stored = run(
+        plugin._store_drafts(
+            umo,
+            [draft],
+            {"session": set(), "people": {"user-1.md"}},
+            "测试提取",
+            actor="extract@Bot-A",
+            people=shared,
+        )
+    )
+    assert stored == 1
+    assert session.exists("user-1.md")
+    assert not shared.exists("user-1.md")
+    assert "工程师" in run(session.read("user-1.md"))
+
+
+def test_platform_type_mismatch_stays_disabled_when_types_temporarily_missing(tmp_path):
+    plugin = make_plugin(tmp_path, ["Bot-A=edit", "Bot-B=edit", "Bot-C=append"])
+    plugin.context.platform_manager = FakePlatformManager(
+        [
+            FakeInst("Bot-A", "aiocqhttp"),
+            FakeInst("Bot-B", "aiocqhttp"),
+            FakeInst("Bot-C", "discord"),
+        ]
+    )
+    plugin._refresh_sharing()
+    assert plugin._sharing.permission("Bot-C") is None
+
+    # 适配器暂时取不到类型时，沿用上次已知类型，不能把 C 放回共享
+    plugin.context.platform_manager = FakePlatformManager([])
+    plugin._refresh_sharing()
+    assert plugin._sharing.permission("Bot-C") is None
+    assert plugin._store.people_scope("Bot-C").root.name != pkg_sharing.SHARED_KEY
+
+
+def test_other_private_session_does_not_get_pinned_profile(tmp_path):
+    plugin = make_plugin(tmp_path, [])
+    event_a = FakeEvent("Bot-A", sender_id="123", umo="Bot-A:FriendMessage:100")
+    event_b = FakeEvent("Bot-A", sender_id="123", umo="Bot-A:FriendMessage:200")
+    session_a = plugin._store.session_scope(event_a.unified_msg_origin)
+    session_b = plugin._store.session_scope(event_b.unified_msg_origin)
+    people = plugin._store.people_scope("Bot-A")
+    run(session_a.write("user-123.md", person_file(body="会话一的私密档案")))
+    run(session_b.write("user-123.md", person_file(body="会话二的私密档案")))
+    run(people.write("user-123.md", person_file(body="跨群身份事实")))
+
+    rt_a = main.RuntimeSession(state=pkg_compress.SessionState())
+    rt_b = main.RuntimeSession(state=pkg_compress.SessionState())
+    opening_a = run(plugin._index_block(rt_a, event_a))
+    opening_b = run(plugin._index_block(rt_b, event_b))
+    assert "会话一的私密档案" in opening_a
+    assert "会话一的私密档案" not in opening_b
+    assert "会话二的私密档案" in opening_b
+    # people 是按平台共享的，两边的跨群身份事实都应在
+    assert "跨群身份事实" in opening_a and "跨群身份事实" in opening_b
+
+
+def test_tools_cannot_read_history_trash_or_forgotten_paths(tmp_path):
+    plugin = make_plugin(tmp_path, [])
+    event = FakeEvent("Bot-A")
+    session = plugin._store.session_scope(event.unified_msg_origin)
+    session.root.mkdir(parents=True, exist_ok=True)
+    hidden = {
+        ".history/a.md": "历史版本正文",
+        ".trash/x__a.md": "回收站正文",
+        "forgotten/b.md": "遗忘正文",
+    }
+    for name, body in hidden.items():
+        path = session.root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(person_file(body=body), encoding="utf-8")
+
+    for name, body in hidden.items():
+        read = run(plugin.memory_read(event, "session", name))
+        assert body not in read
+        written = run(
+            plugin.memory_write(event, "session", name, person_file(body="想写进去"))
+        )
+        assert "文件名不合法" in written
+        edited = run(
+            plugin.memory_edit(
+                event, "session", name, old_text="历史", new_text="改"
+            )
+        )
+        assert "文件名不合法" in edited
+    # 搜索只扫作用域根目录的 .md，不碰隐藏目录
+    assert run(plugin.memory_search(event, "历史版本正文")) == "没有找到匹配「历史版本正文」的记忆。"

@@ -464,8 +464,9 @@ def test_truncate_index_drops_journal_block_under_byte_limit(monkeypatch):
     normal_bytes = sum(
         len(line.encode("utf-8")) + 1 for line in _compact(normal)
     )
-    first_block_bytes = len(block[0].encode("utf-8")) + 1
-    monkeypatch.setattr(memstore, "INDEX_MAX_BYTES", normal_bytes + first_block_bytes)
+    note_bytes = len(index_view._drop_note(3).encode("utf-8")) + 1
+    # 只够装正常行和"还有 N 条"说明，日志块一条都装不下
+    monkeypatch.setattr(memstore, "INDEX_MAX_BYTES", normal_bytes + note_bytes)
     snap = _truncate_index("\n".join(normal + block))
     assert snap.truncated
     # 字节上限只允许装下第一条日志行：整块让位，不显示半截
@@ -513,3 +514,61 @@ def test_management_page_offers_journal_type():
     )
     assert 'type_journal: "日志"' in app_js
     assert "typeHint_journal:" in app_js
+
+
+# ---------------------------------------------------------------- 升级与索引体检
+
+
+def test_load_index_folds_legacy_without_writing_then_ensure_persists(tmp_path):
+    """升级后第一次注入就能看到折叠格式；ensure 才把文件改成新格式。"""
+    store = ScopeStore(tmp_path)
+    a = memory_md("alpha", "甲", "project")
+    b = memory_md("beta", "乙", "project")
+    d1 = memory_md("daily-2026-11-01", "一号", "project")
+    d2 = memory_md("daily-2026-11-02", "二号", "project")
+    (tmp_path / "alpha.md").write_text(a, "utf-8")
+    (tmp_path / "beta.md").write_text(b, "utf-8")
+    (tmp_path / "daily-2026-11-01.md").write_text(d1, "utf-8")
+    (tmp_path / "daily-2026-11-02.md").write_text(d2, "utf-8")
+    legacy = [
+        format_index_line("alpha.md", "甲"),
+        format_index_line("daily-2026-11-01.md", "一号"),
+        format_index_line("beta.md", "乙"),
+        format_index_line("daily-2026-11-02.md", "二号"),
+    ]
+    (tmp_path / INDEX_FILENAME).write_text("\n".join(legacy) + "\n", "utf-8")
+
+    snap = run(store.load_index())
+    # 注入视图已经折叠：非日志保持原顺序，日志只在末尾块里出现
+    assert snap.text.splitlines()[:2] == [
+        index_view.compact_index_line(legacy[0]),
+        index_view.compact_index_line(legacy[2]),
+    ]
+    assert "日志共 2 篇" in snap.text
+    assert snap.text.count("daily-2026-11-01.md") == 1
+    assert snap.text.count("daily-2026-11-02.md") == 1
+    # load_index 只读：磁盘上仍是旧格式
+    disk = (tmp_path / INDEX_FILENAME).read_text("utf-8")
+    assert "- [daily-2026-11-01](daily-2026-11-01.md)" in disk
+    assert "日志共" not in disk
+
+    assert run(store.ensure_index_folded()) is True
+    on_disk = (tmp_path / INDEX_FILENAME).read_text("utf-8")
+    assert on_disk.splitlines()[:2] == [
+        format_index_line("alpha.md", "甲"),
+        format_index_line("beta.md", "乙"),
+    ]
+    assert "日志共 2 篇" in on_disk
+    # 重复调用不再写盘
+    assert run(store.ensure_index_folded()) is False
+
+
+def test_block_span_allows_manual_line_after_summary():
+    """汇总行之后的手工行不影响索引体检识别日志块（与注入侧一致）。"""
+    normal = [format_index_line("alpha.md", "甲")]
+    entries = [
+        journal.JournalEntry(f"daily-2026-11-0{day}.md", f"{day} 号")
+        for day in (1, 2)
+    ]
+    lines = normal + journal.build_block(entries) + ["# 手工补充"]
+    assert journal.block_span(lines, {e.name for e in entries}) == (1, 3)

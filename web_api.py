@@ -44,6 +44,13 @@ LOG_PREFIX = "[MemoryBeyond] "
 SCOPE_GLOBAL = "global"
 SCOPE_SESSION = "session"
 SCOPE_PEOPLE = "people"
+# 管理页迁移/导入到共享人物空间时的隐私提醒。迁移算管理员操作、不拦截，
+# 但 PLAN 第 6 节要求先人工确认拆分，页面不能默认用户已经知道。
+SHARED_PEOPLE_WARNING = (
+    "注意：内容会整份写入共享人物空间，原文件里的关系、健康、性、家庭矛盾等"
+    "只应在原私聊可见的段落也会被所有共享成员机器人读到。迁移/导入不会拆分"
+    "文件，请先确认已按 PLAN 第 6 节把这类段落留在原会话的 session 里。"
+)
 PEOPLE_FILE_RULE = "人物记忆一人一个文件，文件名必须是 user-<数字ID>.md"
 MAX_REMARK = 64
 MAX_QUERY = 200
@@ -760,6 +767,9 @@ class MemoryDashboard:
         report = await store.delete_forgotten(name, actor=history.ACTOR_WEBUI)
         if not report.ok:
             raise ApiError(report.message)
+        seen = getattr(self.plugin, "_seen", None)
+        if seen is not None:
+            await asyncio.to_thread(seen.forget_file, name)
         return _ok({"file": name}, report.message)
 
     # ------------------------------------------------------------ 历史与回收站
@@ -861,16 +871,33 @@ class MemoryDashboard:
         body = await _body()
         scope, key, store = self._scope_from_body(body)
         name = self._file_name(body.get("file"))
+        sid = tidy.scope_id(scope, key)
         report = await store.delete_file_completely(
             name, actor=history.ACTOR_WEBUI
         )
+        seen = getattr(self.plugin, "_seen", None)
         if not report.ok:
+            # 正文可能只残留在 tidy/*.runs.json 的 before 里（整理合并后
+            # 回收站又按保留期清掉了）。这时 memstore 报"没有找到"，但撤销
+            # 整理仍能把内容写回；把整理记录清掉后按成功处理。
+            if report.message == f"没有找到 {name}":
+                removed = await asyncio.to_thread(
+                    self.plugin._tidy.remove_file, sid, name
+                )
+                if removed:
+                    if seen is not None:
+                        await asyncio.to_thread(seen.forget_file, name)
+                    self._changed(key)
+                    return _ok(
+                        {"file": name},
+                        f"已清除 {name} 在整理记录里的残留内容",
+                    )
             raise ApiError(report.message)
         # 整理记录与待确认方案里也留着改动前原文；彻底删除要一并清掉，
         # 否则撤销整理会把刚删掉的正文写回来
-        await asyncio.to_thread(
-            self.plugin._tidy.remove_file, tidy.scope_id(scope, key), name
-        )
+        await asyncio.to_thread(self.plugin._tidy.remove_file, sid, name)
+        if seen is not None:
+            await asyncio.to_thread(seen.forget_file, name)
         self._changed(key)
         return _ok({"file": name}, report.message)
 
@@ -1147,6 +1174,15 @@ class MemoryDashboard:
             self._changed(ref.key)
         elif ref.scope == SCOPE_GLOBAL:
             self._changed(None)
+        elif ref.scope == SCOPE_PEOPLE:
+            # 人物档案可能钉在私聊开头块里；people 目录名不对应任何会话
+            # 运行时，invalidate_for_key 会按 people/ 前缀作废所有相关快照。
+            self._changed(ref.key)
+            # 人物文件被搬走/覆盖后，旧的"看过"哈希会让下一次同名覆盖
+            # 误判；人物空间一旦变动，全部版本记录重来最保守。
+            seen = getattr(self.plugin, "_seen", None)
+            if seen is not None:
+                seen.clear()
 
     async def _drop_pending(self, ref: transfer.ScopeRef) -> None:
         """记忆被搬动后，那里待确认的整理方案就对不上了。"""
@@ -1253,7 +1289,13 @@ class MemoryDashboard:
         for item, report in zip(summary, reports):
             item["counts"] = report["counts"]
             item["issues"] = report["issues"]
-        return _ok({"token": token, "scopes": summary})
+        warnings = []
+        if any(
+            item.ref.scope == SCOPE_PEOPLE and item.ref.key == sharing.SHARED_KEY
+            for item in scopes
+        ):
+            warnings.append(SHARED_PEOPLE_WARNING)
+        return _ok({"token": token, "scopes": summary, "warnings": warnings})
 
     async def import_apply(self) -> dict:
         body = await _body()
@@ -1274,10 +1316,14 @@ class MemoryDashboard:
         written = sum(
             r["counts"]["added"] + r["counts"]["replaced"] for r in reports
         )
-        return _ok(
-            {"reports": reports},
-            f"导入完成：{len(reports)} 处，写入 {written} 条记忆",
-        )
+        message = f"导入完成：{len(reports)} 处，写入 {written} 条记忆"
+        if any(
+            item.ref.scope == SCOPE_PEOPLE
+            and item.ref.key == sharing.SHARED_KEY
+            for item in scopes
+        ):
+            message += "\n" + SHARED_PEOPLE_WARNING
+        return _ok({"reports": reports}, message)
 
     async def migrate_scope(self) -> dict:
         """把一处的记忆复制或移动到另一处；目标会话可以用完整的会话标识新建。"""
@@ -1318,6 +1364,8 @@ class MemoryDashboard:
             policy=transfer.check_policy(body.get("policy")),
             dry_run=dry_run,
         )
+        if dst.scope == SCOPE_PEOPLE and dst.key == sharing.SHARED_KEY:
+            report.setdefault("warnings", []).append(SHARED_PEOPLE_WARNING)
         if dry_run:
             return _ok(report)
         self._changed_ref(dst)
@@ -1329,6 +1377,8 @@ class MemoryDashboard:
         message = f"已写入 {counts['added'] + counts['replaced']} 条"
         if report.get("moved"):
             message += f"，已从原处移走 {report['moved']} 条"
+        if report.get("warnings"):
+            message += "\n" + "\n".join(report["warnings"])
         return _ok(report, message)
 
     async def migrate_platform(self) -> dict:
@@ -1336,14 +1386,20 @@ class MemoryDashboard:
         body = await _body()
         dry_run = bool(body.get("dryRun"))
         mode = _text(body.get("mode") or transfer.MODE_MOVE).strip().lower()
+        include_people = bool(body.get("includePeople", True))
         result = await self.transfer.remap_platform(
             _text(body.get("from")),
             _text(body.get("to")),
             mode=mode,
             policy=transfer.check_policy(body.get("policy")),
-            include_people=bool(body.get("includePeople", True)),
+            include_people=include_people,
             dry_run=dry_run,
         )
+        if (
+            include_people
+            and self.plugin._store.people_key(_text(body.get("to"))) == sharing.SHARED_KEY
+        ):
+            result.setdefault("warnings", []).append(SHARED_PEOPLE_WARNING)
         if dry_run:
             return _ok(result)
         for item in result["items"]:
@@ -1352,8 +1408,10 @@ class MemoryDashboard:
                 self._changed_ref(ref)
                 await self._drop_pending(ref)
         totals = result["totals"]
-        return _ok(
-            result,
+        message = (
             f"迁移完成：{len(result['items'])} 处，写入 "
-            f"{totals['added'] + totals['replaced']} 条记忆",
+            f"{totals['added'] + totals['replaced']} 条记忆"
         )
+        if result.get("warnings"):
+            message += "\n" + "\n".join(result["warnings"])
+        return _ok(result, message)

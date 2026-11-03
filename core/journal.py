@@ -167,17 +167,20 @@ def fold_index(lines: list[str], entries: list[JournalEntry]) -> list[str]:
 def block_span(
     lines: list[str], journal_files: set[str] | None = None
 ) -> tuple[int, int] | None:
-    """索引末尾日志块的范围 (起始行, 汇总行)；末尾不是完整日志块时返回 None。
+    """索引里日志块的范围 (起始行, 汇总行)；找不到完整日志块时返回 None。
 
-    末尾的空行（手工编辑或外部写入留下）不影响识别。供截断与索引体检
-    使用：日志块要么完整显示，要么整块让位。journal_files 是当前在册
-    日志的文件名集合，用来认出以 type: journal 标注、文件名不带日期的
-    日志；不传时只按日期文件名识别。
+    从最后一条汇总行往前认块：末尾的空行，以及汇总行之后手工加的行
+    （WebUI 编辑器允许，注入侧 index_view._journal_span 同样认可），都
+    不影响识别。供截断与索引体检使用：日志块要么完整显示，要么整块让位。
+    journal_files 是当前在册日志的文件名集合，用来认出以 type: journal
+    标注、文件名不带日期的日志；不传时只按日期文件名识别。
     """
-    end = len(lines) - 1
-    while end >= 0 and not lines[end].strip():
-        end -= 1
-    if end < 0 or not is_summary_line(lines[end]):
+    end = None
+    for index in range(len(lines) - 1, -1, -1):
+        if is_summary_line(lines[index]):
+            end = index
+            break
+    if end is None:
         return None
     start = end
     while start > 0 and _is_entry_line(lines[start - 1], journal_files):
