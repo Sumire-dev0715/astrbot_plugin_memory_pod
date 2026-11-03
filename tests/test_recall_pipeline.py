@@ -35,10 +35,15 @@ def memory(name, description, body, mem_type="user"):
 
 
 def make_store(tmp_path, files, mtime=NOW):
-    """按 (作用域, 文件名, 描述, 正文) 建合成记忆库；返回 (MemoryStore, 作用域表)。"""
+    """按 (作用域, 文件名, 描述, 正文) 建合成记忆库；返回 (MemoryStore, 作用域表)。
+
+    写入后把 frontmatter 的 updated 统一改成 mtime：同分候选的"同分取较新"
+    排序才稳定，固定期望值不会因为跑测试时恰好跨分钟而变。
+    """
     root = tmp_path / "memories"
     store = memstore.MemoryStore(root)
     written = {}
+    stamp = memstore.format_stamp(mtime)
     for scope, name, description, body in files:
         if scope == "global":
             scoped = store.global_scope()
@@ -50,6 +55,12 @@ def make_store(tmp_path, files, mtime=NOW):
         assert report.ok, report.message
         written.setdefault(scope, scoped)
         path = scoped.root / name
+        lines = []
+        for line in path.read_text("utf-8").splitlines(keepends=True):
+            if line.startswith("  updated: "):
+                line = f"  updated: {stamp}\n"
+            lines.append(line)
+        path.write_text("".join(lines), "utf-8")
         os.utime(path, (mtime, mtime))
     return store, written
 
