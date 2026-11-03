@@ -38,6 +38,7 @@ from .core import (
     archive,
     compress,
     history,
+    journal,
     loopguard,
     memstore,
     prompts,
@@ -1821,7 +1822,7 @@ class MemoryBeyondPlugin(Star):
         content: str = "",
         delete: bool = False,
     ) -> str:
-        """写入、修改或删除一个长期记忆文件（整文件覆盖；修改＝读出后改写重写入，删除＝delete 设 true）。一个文件只记一条事实，content 必须以 frontmatter 开头：--- / name: 与文件名一致 / description: 一句话钩子 / metadata: / type: user|feedback|project|reference / ---，正文写事实本身。MEMORY.md 索引由插件自动维护，禁止直接写：要改索引行就重写对应文件的 description，要删索引行就删除对应文件。写前先查重，同一个人、同一件事始终更新同一个文件，不另建重复文件。作用域边界：关于具体用户或本会话的信息一律写 session，记人以发送者标注中的数字 ID 为锚（文件名 user-<数字ID>.md，昵称只作正文附注）；global 只存机器人自身的偏好与行为准则；people（启用时）只存某人亲口说的、换个群也成立的身份类事实。
+        """写入、修改或删除一个长期记忆文件（整文件覆盖；修改＝读出后改写重写入，删除＝delete 设 true）。一个文件只记一条事实，content 必须以 frontmatter 开头：--- / name: 与文件名一致 / description: 一句话钩子 / metadata: / type: user|feedback|project|reference|journal / ---，正文写事实本身。MEMORY.md 索引由插件自动维护，禁止直接写：要改索引行就重写对应文件的 description，要删索引行就删除对应文件。写前先查重，同一个人、同一件事始终更新同一个文件，不另建重复文件。type 为 journal 的是每日日志（文件名建议 daily-<日期>.md）：流水账不占单独索引行，只在索引末尾折叠成最近两篇加一行汇总，不参与自动召回，也不参与查重；需要时按日期用 memory_read 或 memory_search 检索。作用域边界：关于具体用户或本会话的信息一律写 session，记人以发送者标注中的数字 ID 为锚（文件名 user-<数字ID>.md，昵称只作正文附注）；global 只存机器人自身的偏好与行为准则；people（启用时）只存某人亲口说的、换个群也成立的身份类事实。
 
         Args:
             scope(string): 作用域，global（机器人自我的全局记忆）、session（当前会话的记忆）或 people（同一平台所有会话共享的人物记忆，一人一个 user-<数字ID>.md）
@@ -1905,12 +1906,19 @@ class MemoryBeyondPlugin(Star):
     async def _duplicate_hint(
         self, store: memstore.ScopeStore, file: str, content: str
     ) -> str:
-        """新建文件后用召回的打分看看有没有疑似记同一件事的旧文件，有就提醒合并。"""
+        """新建文件后用召回的打分看看有没有疑似记同一件事的旧文件，有就提醒合并。
+
+        日志是流水账，既不拿别的日志当查重候选，新建日志时也不提示查重。
+        """
         try:
             doc = memstore.parse_memory(content)
+            if journal.is_journal(file, doc.type):
+                return ""
             text = f"{doc.description} {doc.body[:600]}"
             headers = await asyncio.to_thread(store.headers)
-            similar = recall.similar_memories(text, headers, file)
+            similar = recall.similar_memories(
+                text, headers, file, mem_type=doc.type
+            )
         except Exception:  # noqa: BLE001 - 查重只是提醒，失败不影响写入
             logger.debug(LOG_PREFIX + "写入查重失败", exc_info=True)
             return ""

@@ -17,6 +17,10 @@
 漏登记、格式跑偏这一整类错误。索引接近注入上限时在写入回执里提醒合并
 记忆文件。工具读文件读到的始终是完整文件（截断只发生在注入通道）。
 
+日志（journal）是流水账而不是稳定事实，不占单独的索引行：非日志行保持
+原顺序，日志在索引末尾折叠成"最近两篇 + 一行汇总"的块，判定与折叠规则
+见 core/journal.py。
+
 使用统计与遗忘：每个作用域目录下有一份 .usage.json，记每个文件最近一次
 被召回或读取的时间与次数。开启遗忘后，长期没用到的文件移进 forgotten/
 子目录——不进索引、不参与召回、工具看不见，但文件还在；那个人再出现、
@@ -36,7 +40,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import history
+from . import history, journal
 
 INDEX_FILENAME = "MEMORY.md"
 INDEX_MAX_LINES = 200
@@ -51,7 +55,7 @@ MAX_HOOK_CHARS = 100
 
 # 召回打分只看文件开头这么多字符，避免个别大文件拖慢每轮的扫描
 HEADER_TEXT_CHARS = 8 * 1024
-MEMORY_TYPES = ("user", "feedback", "project", "reference")
+MEMORY_TYPES = ("user", "feedback", "project", "reference", "journal")
 
 # 插件自动维护的三个戳（写在 frontmatter 的 metadata 下）：
 #   created  首次写入时间；改写、整理都不会把老记忆变"新"
@@ -527,6 +531,12 @@ def _truncate_index(raw: str) -> IndexSnapshot:
         kept.append(line)
         used_bytes += line_bytes
     loaded = len(kept)
+    # 日志块要整块显示或整块让位：截断落在块中间时，把已经装下的
+    # 半截日志行也去掉，避免模型看到一份缺头少尾的日志目录。
+    start = journal.block_start(lines)
+    if loaded < total and start is not None and start < loaded:
+        kept = kept[:start]
+        loaded = len(kept)
     text = "\n".join(kept)
     if loaded < total:
         text += (
@@ -1756,25 +1766,46 @@ class ScopeStore:
 
     # ------------------------------------------------------------ 索引维护
 
+    def _journal_entries(
+        self, headers: list[MemoryHeader] | None = None
+    ) -> list[journal.JournalEntry]:
+        """索引折叠用的日志条目：以磁盘上的实际文件为准，不信任旧索引行。"""
+        headers = self.headers() if headers is None else headers
+        return [
+            journal.JournalEntry(
+                name=header.file,
+                description=header.description,
+                date=journal.journal_date(header.file),
+                updated=header.updated,
+            )
+            for header in headers
+            if journal.is_journal(header.file, header.type)
+        ]
+
     def _sync_index_line(self, filename: str, description: str) -> tuple[int, int]:
         """增改 filename 对应的索引行（原位更新，保持行序稳定）。
 
         只动匹配行与末尾追加，其余行原样保留——用户手工整理过的索引
-        （分组标题、排序）不会被破坏。返回 (总行数, 总字节数) 供守门。
+        （分组标题、排序）不会被破坏。日志不占单独一行，统一折进末尾的
+        日志块；这一步同时把升级前散落在索引里的老日志行改写成新格式。
+        返回 (总行数, 总字节数) 供守门。
         """
         index_path = self.root / INDEX_FILENAME
         existing = ""
         if index_path.is_file():
             existing = index_path.read_text("utf-8")
         lines = existing.splitlines()
-        marker = f"]({filename})"
-        new_line = format_index_line(filename, description)
-        for i, line in enumerate(lines):
-            if marker in line:
-                lines[i] = new_line
-                break
-        else:
-            lines.append(new_line)
+        entries = self._journal_entries()
+        if not any(entry.name == filename for entry in entries):
+            marker = f"]({filename})"
+            new_line = format_index_line(filename, description)
+            for i, line in enumerate(lines):
+                if marker in line:
+                    lines[i] = new_line
+                    break
+            else:
+                lines.append(new_line)
+        lines = journal.fold_index(lines, entries)
         text = "\n".join(lines).strip("\n") + "\n"
         self._write_atomic(index_path, text)
         return len(text.splitlines()), len(text.encode("utf-8"))
@@ -1789,6 +1820,7 @@ class ScopeStore:
             for line in index_path.read_text("utf-8").splitlines()
             if marker not in line
         ]
+        lines = journal.fold_index(lines, self._journal_entries())
         text = "\n".join(lines).strip("\n")
         self._write_atomic(index_path, text + "\n" if text else "")
 
@@ -1813,11 +1845,21 @@ class ScopeStore:
         return None
 
     def index_report(self) -> IndexReport:
-        """索引体检（同步方法）：体积、截断、缺行与悬空行。"""
+        """索引体检（同步方法）：体积、截断、缺行与悬空行。
+
+        日志只要求出现在末尾折叠块里，不要求每篇都有索引行，因此不算缺行。
+        """
         index_path = self.root / INDEX_FILENAME
         files = set(self.list_files())
+        journals = {
+            header.file
+            for header in self.headers()
+            if journal.is_journal(header.file, header.type)
+        }
         if not index_path.is_file():
-            return IndexReport(False, 0, 0, False, sorted(files), [])
+            return IndexReport(
+                False, 0, 0, False, sorted(files - journals), []
+            )
         raw = index_path.read_text("utf-8")
         listed: list[str] = []
         for line in raw.splitlines():
@@ -1830,7 +1872,7 @@ class ScopeStore:
             lines=snap.total_lines,
             size=len(raw.encode("utf-8")),
             truncated=snap.truncated,
-            missing=sorted(files - set(listed)),
+            missing=sorted((files - journals) - set(listed)),
             dangling=[name for name in listed if name not in files],
         )
 
@@ -1862,13 +1904,15 @@ class ScopeStore:
         """按磁盘上的实际文件重建 MEMORY.md，返回索引行数。
 
         已有行原位刷新钩子、保留手工加的标题与分组，指向不存在文件的行
-        删掉，没登记的文件追加到末尾。用于手工改动文件目录之后的修复。
+        删掉，没登记的文件追加到末尾；日志只保留末尾折叠块。用于手工改动
+        文件目录之后的修复。
         """
         async with self._lock:
             return await asyncio.to_thread(self._rebuild_index_sync)
 
     def _rebuild_index_sync(self) -> int:
         headers = {h.file: h for h in self.headers()}
+        entries = self._journal_entries(list(headers.values()))
         index_path = self.root / INDEX_FILENAME
         existing = index_path.read_text("utf-8") if index_path.is_file() else ""
         lines: list[str] = []
@@ -1883,10 +1927,14 @@ class ScopeStore:
             if header is None or target in listed:
                 continue
             listed.add(target)
+            if journal.is_journal(target, header.type):
+                # 日志不占原位行，统一由末尾折叠块重建
+                continue
             lines.append(format_index_line(target, header.description))
         for name, header in headers.items():
-            if name not in listed:
+            if name not in listed and not journal.is_journal(name, header.type):
                 lines.append(format_index_line(name, header.description))
+        lines = journal.fold_index(lines, entries)
         text = "\n".join(lines).strip("\n")
         if not text and not headers:
             if index_path.is_file():

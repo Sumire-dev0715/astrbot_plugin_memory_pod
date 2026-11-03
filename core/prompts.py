@@ -151,23 +151,23 @@ _GUIDANCE_HEAD = """
 name: 与文件名一致的小写短横线标识（如 user-12345678）
 description: 一句话钩子——写成"扫一眼就知道何时该读全文"的样子
 metadata:
-  type: user | feedback | project | reference
+  type: user | feedback | project | reference | journal
 ---
 正文写事实本身；feedback 与 project 类须附 **Why:**（为什么）和 **How to apply:**（怎么用）两行；相关记忆用 [[name]] 互相链接。metadata 下的 created（首次写入）、updated（最近修改）、source（说出这条信息的人的数字 ID）由插件自动填写，你不必写；source 里的 ID 与文件所记的人不是同一个时，这条记忆是旁人转述，采信前留意。
 
-MEMORY.md 索引由插件自动维护：写入/删除记忆文件时自动增改、移除对应索引行，钩子取自 description。你不能也不需要直接写 MEMORY.md——要改索引行就重写对应文件（更新其 description），要删索引行就删除对应文件。
+MEMORY.md 索引由插件自动维护：写入/删除记忆文件时自动增改、移除对应索引行，钩子取自 description；日志不占单独索引行，在索引末尾折叠成最近两篇加一行汇总。你不能也不需要直接写 MEMORY.md——要改索引行就重写对应文件（更新其 description），要删索引行就删除对应文件。
 
-四种类型：user＝某个人是谁（角色、偏好、专长）；feedback＝对你工作方式的指导（纠正过的错误、确认过的做法，附原因）；project＝进行中的事、目标、约束（相对日期须转为绝对日期）；reference＝外部资源指针（链接、公告、文档位置）。"""
+五种类型：user＝某个人是谁（角色、偏好、专长）；feedback＝对你工作方式的指导（纠正过的错误、确认过的做法，附原因）；project＝进行中的事、目标、约束（相对日期须转为绝对日期）；reference＝外部资源指针（链接、公告、文档位置）；journal＝每日日志流水账，文件名用 daily-<日期>.md，一天一个文件。日志不占单独的索引行，只在索引末尾折叠成最近两篇加一行汇总，不参与自动召回，也不参与写入查重；需要时按日期用 memory_read 读取，或用 memory_search 搜索。日志不是稳定事实，不要把日志内容顺手并进人物或项目记忆。"""
 
 _SCOPE_GLOBAL = "- global：你（机器人）自己的全局记忆，所有会话共享生效。只存你自身的行为准则与偏好（feedback）、通用参考资料（reference）；任何关于具体用户、具体群聊的信息都不属于这里。"
 
-_SCOPE_SESSION = "- session：当前会话（本群或本私聊）的记忆：这里的人（user）、进行中的事（project）、仅本会话适用的指导（feedback）、资源指针（reference）。"
+_SCOPE_SESSION = "- session：当前会话（本群或本私聊）的记忆：这里的人（user）、进行中的事（project）、仅本会话适用的指导（feedback）、资源指针（reference）、每日日志（journal）。"
 
 _SCOPE_PEOPLE = "- people：某个人本身的记忆，同一平台的所有群聊和私聊共享：一人一个文件，文件名固定 user-<数字ID>.md，类型 user。只存换个群也成立、且是本人亲口说的事实：身份、职业与专长、常用称呼、长期偏好；他在本群的角色、本群里的约定、群内的小事、别人转述的私事仍写 session 的 user-<数字ID>.md。people 没有索引注入：正在说话和被提到的人的 people 文件会由召回自动附上，查别人直接 memory_read people 的 user-<数字ID>.md 或用 memory_search。"
 
 _SCOPES_SESSION_ONLY = """
 
-作用域：全局记忆与人物记忆已在插件配置中停用，memory 工具的 scope 一律填 session——当前会话（本群或本私聊）的记忆：这里的人（user）、进行中的事（project）、仅本会话适用的指导（feedback）、资源指针（reference）。不要读写 global 或 people 作用域，这样的请求会被拒绝。"""
+作用域：全局记忆与人物记忆已在插件配置中停用，memory 工具的 scope 一律填 session——当前会话（本群或本私聊）的记忆：这里的人（user）、进行中的事（project）、仅本会话适用的指导（feedback）、资源指针（reference）、每日日志（journal）。不要读写 global 或 people 作用域，这样的请求会被拒绝。"""
 
 _GLOBAL_OFF_NOTE = "\n全局记忆（global 作用域）已在插件配置中停用，不要读写，这样的请求会被拒绝。"
 

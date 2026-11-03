@@ -598,7 +598,9 @@ class MemoryDashboard:
         else:
             mem_type = _text(body.get("type")).strip().lower()
             if mem_type not in memstore.MEMORY_TYPES:
-                raise ApiError("类型只能是 user、feedback、project、reference 之一")
+                raise ApiError(
+                    "类型只能是 user、feedback、project、reference、journal 之一"
+                )
             if scope == SCOPE_PEOPLE and mem_type != "user":
                 raise ApiError("人物记忆的类型只能是 user")
             description = " ".join(_text(body.get("description")).split())

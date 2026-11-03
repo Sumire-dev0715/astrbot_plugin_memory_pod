@@ -12,6 +12,9 @@
 
 每条召回记忆标注写入时间，超过一天的附上时效提醒：记忆是写入时的观察，
 不是现状。
+
+日志（journal）是流水账，既不进身份必选，也不进关键词与模型挑选；
+需要时按日期显式 memory_read 或 memory_search。
 """
 
 from __future__ import annotations
@@ -21,6 +24,7 @@ import re
 import time
 from dataclasses import dataclass
 
+from . import journal
 from .memstore import MemoryHeader
 
 RECALL_BLOCK_OPEN = "<memory_beyond_recall>"
@@ -122,7 +126,8 @@ def select_by_keywords(
     """身份必选在前，其余按关键词得分（同分取较新）补足到 limit 条。
 
     人物作用域（people）只参与身份必选：正在说话、被提到的人才带上，
-    不按关键词把别的群里的人扩散进来。
+    不按关键词把别的群里的人扩散进来。日志是流水账，既不进身份必选，
+    也不按关键词扩散。
     """
     if limit <= 0:
         return []
@@ -132,12 +137,18 @@ def select_by_keywords(
         by_file.setdefault(cand.header.file, []).append(cand)
     for name in forced_files:
         for cand in by_file.get(name, []):
-            if cand.scope in FORCED_SCOPES and cand not in chosen:
+            if (
+                cand.scope in FORCED_SCOPES
+                and not journal.is_journal(cand.header.file, cand.header.type)
+                and cand not in chosen
+            ):
                 chosen.append(cand)
     query_tokens = tokenize(query)
     scored = []
     for cand in candidates:
         if cand in chosen or cand.scope == "people":
+            continue
+        if journal.is_journal(cand.header.file, cand.header.type):
             continue
         value = score(query_tokens, cand.header)
         if value >= MIN_SCORE:
@@ -155,13 +166,20 @@ _USER_FILE_RE = re.compile(r"^user-[^/]+\.md$")
 
 
 def similar_memories(
-    text: str, headers: list[MemoryHeader], exclude: str, limit: int = 2
+    text: str,
+    headers: list[MemoryHeader],
+    exclude: str,
+    limit: int = 2,
+    mem_type: str = "",
 ) -> list[MemoryHeader]:
     """用召回同一套打分找出与新内容最像的已有记忆，供写入回执提示查重。
 
     两个记人文件（user-<ID>.md）ID 不同就是两个人，不算重复——同一个
-    群里同行、同好的人很多，描述相近是常态。
+    群里同行、同好的人很多，描述相近是常态。日志既不作为查重候选，新建
+    日志本身也不查重：流水账天天写，提醒合并只会制造噪声。
     """
+    if journal.is_journal(exclude, mem_type):
+        return []
     tokens = tokenize(text)
     if not tokens:
         return []
@@ -169,6 +187,8 @@ def similar_memories(
     scored = []
     for header in headers:
         if header.file == exclude:
+            continue
+        if journal.is_journal(header.file, header.type):
             continue
         if is_user and _USER_FILE_RE.match(header.file):
             continue
@@ -211,8 +231,14 @@ def age_label(mtime: float, now: float | None = None) -> str:
 def build_selector_prompt(
     candidates: list[Candidate], query: str, limit: int, now: float | None = None
 ) -> str:
+    """拼摘要模型挑选用的清单；日志是流水账，不交给模型挑选。"""
     lines = []
-    for i, cand in enumerate(candidates, 1):
+    visible = [
+        cand
+        for cand in candidates
+        if not journal.is_journal(cand.header.file, cand.header.type)
+    ]
+    for i, cand in enumerate(visible, 1):
         header = cand.header
         description = header.description or "（无描述）"
         lines.append(
@@ -228,7 +254,7 @@ def parse_selector_response(
     text: str, candidates: list[Candidate]
 ) -> list[Candidate] | None:
     """解析模型挑选结果：空数组表示"没有相关的"；找不到 JSON 数组返回 None，
-    调用方据此退回关键词模式——模型答了句闲话不该让召回落空。"""
+    调用方据此退回关键词模式——模型答了句闲话不该让召回落空。日志一律不选。"""
     if not text:
         return None
     start, end = text.find("["), text.rfind("]")
@@ -248,8 +274,11 @@ def parse_selector_response(
     for item in data:
         ref = str(item or "").strip()
         cand = by_ref.get(ref) or by_file.get(ref.rsplit("/", 1)[-1])
-        if cand is not None and cand not in chosen:
-            chosen.append(cand)
+        if cand is None or cand in chosen:
+            continue
+        if journal.is_journal(cand.header.file, cand.header.type):
+            continue
+        chosen.append(cand)
     return chosen
 
 
