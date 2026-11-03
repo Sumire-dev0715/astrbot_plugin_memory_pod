@@ -228,6 +228,6 @@ def test_recall_block_marks_shared_people_files():
         recall.Recalled("session/user-2.md", "内容", 1_800_000_000.0),
     ]
     block = recall.build_recall_block(items, "[数据]", now=1_800_000_000.0)
-    assert "### people/user-1.md（多个机器人共享，今天写入）" in block
-    assert "### session/user-2.md（今天写入）" in block
+    assert "### people/user-1.md（未标注｜多个机器人共享｜今天写入）" in block
+    assert "### session/user-2.md（未标注｜今天写入）" in block
     assert "多个机器人共享" not in block.split("### session/user-2.md")[1]

@@ -1,8 +1,11 @@
-"""召回编排（core.recall.assemble_recall）与重构前逻辑的逐字对比。
+"""召回编排（core.recall.assemble_recall）与重构前逻辑的选择对比。
 
 参照实现 legacy_recall 是从 main.py 的 _recall_message 抽出去之前的原样
-代码（挑选、读文件、拼块），用来证明重构前后选中的文件、顺序和块文本
-完全一致。记忆全部是临时目录里的合成数据。
+代码（挑选、读文件、拼块），用来证明重构前后选中的文件、顺序、读到的
+原文与使用统计完全一致。3.6 第 2、3 条有意改变了块内呈现（分档、去
+frontmatter、头尾瘦身、标题格式），所以块文本不再逐字比较，渲染由
+tests/test_injection.py 与 tests/test_recall_tiers.py 单独覆盖。
+记忆全部是临时目录里的合成数据。
 """
 
 import asyncio
@@ -143,22 +146,17 @@ async def legacy_recall(
 
 
 async def compare(stores, candidates, **kwargs):
-    """新实现与参照实现的结果必须逐字一致。"""
+    """新实现与参照实现的选中文件、顺序、原文与使用统计必须一致。"""
     plan = await recall.assemble_recall(stores, candidates, **kwargs)
-    chosen, items, used, sections, block = await legacy_recall(
+    chosen, items, used, _sections, _block = await legacy_recall(
         stores, candidates, **kwargs
     )
     assert [item.ref for item in plan.items] == [item.ref for item in items]
     assert [item.content for item in plan.items] == [item.content for item in items]
     assert [item.shared for item in plan.items] == [item.shared for item in items]
     assert plan.used == used
-    assert plan.block == block
-    # 截断与否、块内顺序逐条相同：截断/预算回归会让这里先红
-    assert [
-        (section.item.ref, section.content, section.truncated)
-        for section in plan.sections
-    ] == sections
-    assert plan.files == [section.item.ref for section in plan.sections]
+    # 块内提到的文件与顺序不变；具体呈现（分档/瘦身）由新测试覆盖
+    assert plan.files == [item.ref for item in items]
     return plan, chosen
 
 
@@ -272,9 +270,9 @@ def test_budget_truncation_matches_pre_refactor(tmp_path):
         )
     )
     assert any(section.truncated for section in plan.sections)
-    assert "已截断" in plan.block
-    # 截断算正文被切过，但依然算"全文文件"之外的一条
-    assert plan.files == [section.item.ref for section in plan.sections]
+    assert "中间省略" in plan.block
+    # 头尾瘦身过的条目仍在块里；选中的文件一个不少
+    assert plan.files == [item.ref for item in plan.items]
 
 
 def test_missing_or_empty_file_is_skipped(tmp_path):
@@ -336,7 +334,7 @@ def test_shared_people_marks_only_people_scope(tmp_path):
             now=NOW,
         )
     )
-    assert "多个机器人共享，" in plan.block
+    assert "多个机器人共享｜" in plan.block
     assert [item.shared for item in plan.items] == [True, False][: len(plan.items)]
     # 非共享时同样的输入不带共享标注
     plain = run(

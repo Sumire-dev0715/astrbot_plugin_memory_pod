@@ -7,4 +7,5 @@
     insights.py  —— 小节替换、搜索排序与片段、悬空链接与长文件提醒
     compress.py  —— 摘要 + 水位线的上下文压缩状态机
     prompts.py   —— 注入块、system prompt 规范、摘要提示词模板
+    injection.py —— 注入视图：去 frontmatter、头尾瘦身、标题与档案区
 """

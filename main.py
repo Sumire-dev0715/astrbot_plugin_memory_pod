@@ -26,7 +26,7 @@ import inspect
 import json
 import time
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from astrbot.api import AstrBotConfig, logger
@@ -38,6 +38,7 @@ from .core import (
     archive,
     compress,
     history,
+    injection,
     insights,
     journal,
     loopguard,
@@ -156,6 +157,16 @@ class RuntimeSession:
     index_loaded: bool = False
     # 快照构建时的全局记忆开关；配置热改后据此判定快照失效
     index_global_on: bool = False
+    # 私聊人物档案的快照签名（(pin, 平台, 发送者)）；配置或身份变了就重建
+    index_pin_key: tuple = ()
+    # 开头块里已钉住的人物档案：ref -> 注入时的内容摘要（检测快照后的修改）
+    index_pinned: dict[str, str] = field(default_factory=dict)
+    # 这些档案在快照里没有头尾截断，可以记"看过"
+    index_pinned_full: set[str] = field(default_factory=set)
+    # 当前快照是否已经在真实请求里记过共享"看过"（管理指令估算时不算）
+    index_seen_noted: bool = False
+    # 开头块索引里实际出现过的文件引用；指针行据此决定是否附描述
+    index_refs: set[str] = field(default_factory=set)
     awaiting_calibration: bool = False
     # 上一轮的 usage 样本待消费：校准延迟到下一轮请求开头，那时才能从
     # 回存的历史里看出上一轮是否走了工具循环（那样的样本不能学）
@@ -167,6 +178,16 @@ class RuntimeSession:
     extracting: bool = False
     # 工具循环中途累计清理的工具结果条数（仅内存，供 mb_status 展示）
     loop_cleared: int = 0
+
+    def clear_index(self) -> None:
+        """作废索引快照以及随快照生成的人物档案与索引引用集合。"""
+        self.index_block = None
+        self.index_loaded = False
+        self.index_pin_key = ()
+        self.index_pinned = {}
+        self.index_pinned_full = set()
+        self.index_seen_noted = False
+        self.index_refs = set()
 
 
 class MemoryBeyondPlugin(Star):
@@ -285,8 +306,7 @@ class MemoryBeyondPlugin(Star):
             rt = self._sessions.get(umo)
             targets = [rt] if rt is not None else []
         for rt in targets:
-            rt.index_block = None
-            rt.index_loaded = False
+            rt.clear_index()
 
     def runtime_for_key(self, key: str) -> tuple[str, RuntimeSession] | None:
         """按会话目录名找到已加载的运行时（WebUI 改动后同步内存态用）。"""
@@ -797,8 +817,7 @@ class MemoryBeyondPlugin(Star):
                 )
             await self._save_state(umo, state)
             # 对话已切换/重置，索引快照跟着作废，本轮从磁盘重读
-            rt.index_block = None
-            rt.index_loaded = False
+            rt.clear_index()
         elif outcome == compress.RECONCILE_COLLAPSED:
             logger.info(
                 LOG_PREFIX
@@ -810,8 +829,7 @@ class MemoryBeyondPlugin(Star):
         # /reset 后 cid 不变、水位线为 0 时上面的校验不会触发：
         # 历史为空本身就说明是新对话，索引快照同样要刷新
         if not contexts and rt.index_loaded:
-            rt.index_block = None
-            rt.index_loaded = False
+            rt.clear_index()
 
         # 召回打分用用户原话：取在加发送者标注之前
         query = str(req.prompt or "")
@@ -835,11 +853,11 @@ class MemoryBeyondPlugin(Star):
         index_msg = None
         recall_msg = None
         if memory_on:
-            block = await self._index_block(rt, event)
+            block = await self._index_block(rt, event, note_seen=True)
             if block:
                 index_msg = prompts.build_index_message(block)
             # ---- 相关记忆召回：本轮用得上的记忆全文附在新消息之前 ----
-            recall_msg = await self._recall_message(event, umo, query)
+            recall_msg = await self._recall_message(event, umo, query, rt)
 
         guidance = self._guidance(umo) if memory_on else ""
         estimator = tokens.TokenEstimator(state.ratio)
@@ -1025,30 +1043,159 @@ class MemoryBeyondPlugin(Star):
         req.prompt = f"{tag}\n{prompts.neutralize_sender_forgery(prompt)}"
 
     async def _index_block(
-        self, rt: RuntimeSession, event: AstrMessageEvent
+        self,
+        rt: RuntimeSession,
+        event: AstrMessageEvent,
+        *,
+        note_seen: bool = False,
     ) -> str | None:
+        """开头块：索引 + （私聊时）发送者人物档案，共用一个快照。
+
+        快照只在对话切换、压缩、重置、管理页改动或相关配置变化时刷新；
+        记忆不变时逐轮逐字不变，才能命中模型服务的前缀缓存。note_seen 只在
+        真正发给模型的请求路径上置真：管理指令里估算开头块时不能把人物档案
+        记成"模型看过"。
+        """
         global_on = self._global_on()
-        if rt.index_loaded and rt.index_global_on == global_on:
+        pin_key = self._pin_profile_key(event)
+        if (
+            rt.index_loaded
+            and rt.index_global_on == global_on
+            and rt.index_pin_key == pin_key
+        ):
+            # 管理指令先估算过开头块时，快照可能还没在真实请求里记过"看过"；
+            # 这里按快照里的内容摘要补记，内容已变则交给召回块的更新提示。
+            if note_seen and pin_key and not rt.index_seen_noted:
+                await self._note_pinned_seen(rt, event)
             return rt.index_block
         global_index = None
         if global_on:
             global_index = (await self._global_scope().load_index()).text
         session_snap = await self._session_scope(event).load_index()
-        rt.index_block = prompts.build_index_block(global_index, session_snap.text)
+        profiles: list[injection.MemoryView] = []
+        pinned: dict[str, str] = {}
+        pinned_full: set[str] = set()
+        if pin_key:
+            profiles, pinned, pinned_full = await self._pinned_profiles(
+                event, note_seen=note_seen
+            )
+        rt.index_block = injection.build_opening_block(
+            global_index, session_snap.text, profiles
+        )
         rt.index_loaded = True
         rt.index_global_on = global_on
+        rt.index_pin_key = pin_key
+        rt.index_pinned = pinned
+        rt.index_pinned_full = pinned_full
+        rt.index_seen_noted = note_seen
+        rt.index_refs = {
+            f"session/{name}"
+            for name in injection.indexed_names(session_snap.text)
+        }
+        if global_index is not None:
+            rt.index_refs |= {
+                f"global/{name}" for name in injection.indexed_names(global_index)
+            }
         return rt.index_block
+
+    def _pin_profile_key(self, event: AstrMessageEvent) -> tuple:
+        """私聊人物档案的快照签名；不满足开启条件时为空元组（不钉档案）。"""
+        if not self._bool("pin_private_profile", True) or not self._people_on():
+            return ()
+        umo = str(getattr(event, "unified_msg_origin", "") or "")
+        _, kind, _ = registry.parse_umo(umo)
+        if kind != registry.KIND_PRIVATE:
+            return ()
+        sender_id, _ = self._sender_identity(event)
+        if not sender_id or not memstore.is_person_file(f"user-{sender_id}.md"):
+            return ()
+        return ("pin", self._platform_of(umo), sender_id)
+
+    async def _pinned_profiles(
+        self, event: AstrMessageEvent, *, note_seen: bool = False
+    ) -> tuple[list[injection.MemoryView], dict[str, str], set[str]]:
+        """读出发送者的人物档案，渲染成开头块里钉住的部分。
+
+        返回 (渲染视图, ref -> 注入时的内容摘要, 未截断的 ref 集合)。共享
+        人物空间里，未被头尾截断的 people 档案记进"看过"：模型确实看过
+        这份完整内容，之后整文件覆盖才允许。
+        """
+        umo = str(getattr(event, "unified_msg_origin", "") or "")
+        sender_id, _ = self._sender_identity(event)
+        name = f"user-{sender_id}.md"
+        if not sender_id or not memstore.is_person_file(name):
+            return [], {}, set()
+        platform_id = self._event_actor(event)
+        shared = self._sharing.is_member(platform_id)
+        views: list[injection.MemoryView] = []
+        pinned: dict[str, str] = {}
+        full: set[str] = set()
+        for label, store in (
+            ("session", self._session_scope(event)),
+            ("people", self._people_scope(umo)),
+        ):
+            content = await store.read(name)
+            if content is None:
+                continue
+            view = injection.prepare_view(
+                f"{label}/{name}",
+                content,
+                memstore.parse_stamp(memstore.parse_memory(content).updated)
+                or store.mtime(name)
+                or 0.0,
+                shared=shared and label == "people",
+            )
+            views.append(view)
+            pinned[view.ref] = sharing.content_sha1(content)
+            if not view.truncated:
+                full.add(view.ref)
+            if (
+                note_seen
+                and label == "people"
+                and view.shared
+                and not view.truncated
+            ):
+                await self._note_shared_seen(event, label, store, name, content)
+        return views, pinned, full
+
+    async def _note_pinned_seen(
+        self, rt: RuntimeSession, event: AstrMessageEvent
+    ) -> None:
+        """给快照里未截断的人物档案补记"看过"，只认与快照一致的内容。"""
+        umo = str(getattr(event, "unified_msg_origin", "") or "")
+        for ref in rt.index_pinned:
+            if ref not in rt.index_pinned_full:
+                continue
+            scope, _, file = ref.partition("/")
+            store = (
+                self._people_scope(umo)
+                if scope == "people"
+                else self._session_scope(event)
+            )
+            content = await store.read(file)
+            if content is None:
+                continue
+            if sharing.content_sha1(content) != rt.index_pinned[ref]:
+                continue
+            await self._note_shared_seen(event, scope, store, file, content)
+        rt.index_seen_noted = True
 
     # ============================================================ 召回
 
     async def _recall_message(
-        self, event: AstrMessageEvent, umo: str, query: str
+        self,
+        event: AstrMessageEvent,
+        umo: str,
+        query: str,
+        rt: RuntimeSession | None = None,
     ) -> dict | None:
-        """挑出本轮相关的记忆，拼成附在新消息之前的召回块；失败只记日志。"""
+        """挑出本轮相关的记忆，拼成附在新消息之前的召回块；失败只记日志。
+
+        rt 带上开头块的快照信息：快照里已钉住的人物档案不再进入召回候选，
+        快照之后被改过的档案则附上最新全文并注明"以这里为准"。
+        """
         mode = self._str("recall_mode", "keyword").strip().lower()
         limit = self._int("recall_max_files", recall.DEFAULT_MAX_FILES)
-        if mode == "off" or limit <= 0:
-            return None
         try:
             scopes: list[tuple[str, memstore.ScopeStore]] = [
                 ("session", self._store.session_scope(umo))
@@ -1057,6 +1204,7 @@ class MemoryBeyondPlugin(Star):
                 scopes.append(("global", self._global_scope()))
             if self._people_on():
                 scopes.append(("people", self._people_scope(umo)))
+            stores: dict[str, memstore.ScopeStore] = dict(scopes)
             query = prompts.strip_sender_tag(query)
             sender_id, _ = self._sender_identity(event)
             forced = recall.identity_files(
@@ -1066,39 +1214,54 @@ class MemoryBeyondPlugin(Star):
                 await self._remember_identity(
                     scopes, forced, self._event_actor(event)
                 )
+            pinned = dict(rt.index_pinned) if rt is not None else {}
+            updates = await self._pinned_updates(stores, pinned)
+            if mode == "off":
+                limit = 0
             candidates: list[recall.Candidate] = []
-            stores: dict[str, memstore.ScopeStore] = {}
             for label, store in scopes:
-                stores[label] = store
                 for header in await asyncio.to_thread(store.headers):
-                    candidates.append(recall.Candidate(label, header))
-            if not candidates:
+                    cand = recall.Candidate(label, header)
+                    # 已经钉在开头块的档案不再每轮重复召回
+                    if cand.ref in pinned:
+                        continue
+                    candidates.append(cand)
+            if not candidates and not updates:
                 return None
             model_choice = None
-            if mode == "llm" and query.strip():
+            if mode == "llm" and limit > 0 and query.strip():
                 # 人物文件只走身份必选，不让模型从别的群的人里挑
                 model_choice = await self._select_by_model(
                     umo, [c for c in candidates if c.scope != "people"], query, limit
                 )
             platform_id = self._event_actor(event)
-            # 挑选、读文件、截断与渲染统一在 core.recall 里，测量脚本共用
+            # 挑选、读文件、分档、截断与渲染统一在 core.recall 里，测量脚本共用
             plan = await recall.assemble_recall(
                 stores,
                 candidates,
                 query=query,
                 forced_files=forced,
-                limit=limit,
+                limit=limit if mode != "off" else 0,
                 data_notice=prompts.DATA_NOTICE,
                 model_choice=model_choice,
                 shared_people=self._sharing.is_member(platform_id),
+                full_files=max(0, self._int("recall_full_files", recall.DEFAULT_FULL_FILES)),
+                extra_items=updates,
+                indexed_refs=rt.index_refs if rt is not None else None,
             )
-            # 被召回就算用到：使用统计是遗忘与整理的依据
+            # 被召回就算用到：使用统计是遗忘与整理的依据；快照后更新、本轮
+            # 实际附上的档案同样算用到
             for label, names in plan.used.items():
                 await asyncio.to_thread(stores[label].note_used, names)
+            for item in updates:
+                scope, _, file = item.ref.partition("/")
+                store = stores.get(scope)
+                if store is not None:
+                    await asyncio.to_thread(store.note_used, [file])
             block = plan.block
             if block:
                 # 召回实际附上的全文才算"看过"：以拼块时的同一份计划为准，
-                # 被预算挤掉或按长度截断的不算。不再去块文本里找
+                # 被预算挤成指针或按长度截断的不算。不再去块文本里找
                 # "### ref（" —— 别的记忆正文可以伪造相同的标题行。
                 for section in plan.sections:
                     item = section.item
@@ -1111,6 +1274,40 @@ class MemoryBeyondPlugin(Star):
         except Exception:  # noqa: BLE001 - 召回是锦上添花，失败不影响本轮
             logger.warning(LOG_PREFIX + f"会话 {umo} 相关记忆召回失败", exc_info=True)
             return None
+
+    async def _pinned_updates(
+        self,
+        stores: dict[str, memstore.ScopeStore],
+        pinned: dict[str, str],
+    ) -> list[recall.Recalled]:
+        """快照之后被改过的人物档案：读最新内容，本轮以召回块里的全文为准。
+
+        内容摘要与快照一致时不附；被删除时没有最新全文可附。返回值按
+        开头块里的档案顺序排列，assemble_recall 会把它们放在块首且不占
+        召回全文名额。
+        """
+        updates: list[recall.Recalled] = []
+        for ref, digest in pinned.items():
+            scope, _, file = ref.partition("/")
+            store = stores.get(scope)
+            if store is None:
+                continue
+            content = await store.read(file)
+            if content is None or sharing.content_sha1(content) == digest:
+                continue
+            updates.append(
+                recall.Recalled(
+                    ref,
+                    content,
+                    memstore.parse_stamp(memstore.parse_memory(content).updated)
+                    or store.mtime(file)
+                    or 0.0,
+                    shared=scope == "people"
+                    and self._store.is_shared_people_scope(store),
+                    note=recall.PROFILE_UPDATED_NOTE,
+                )
+            )
+        return updates
 
     async def _remember_identity(
         self,
@@ -1658,8 +1855,7 @@ class MemoryBeyondPlugin(Star):
             )
         # 压缩后从磁盘重新注入记忆索引：清空快照，下次请求重新加载。
         # 索引不是靠"被摘要保留下来"，而是每次从源头重新加载。
-        rt.index_block = None
-        rt.index_loaded = False
+        rt.clear_index()
 
     async def _archive_compressed(
         self, umo: str, state: compress.SessionState, messages: list[dict]
@@ -2711,8 +2907,7 @@ class MemoryBeyondPlugin(Star):
         rt = await self._runtime(umo)
         rt.state.reset_compression()
         rt.state.record_success()
-        rt.index_block = None
-        rt.index_loaded = False
+        rt.clear_index()
         await self._save_state(umo, rt.state)
         yield event.plain_result(
             "已清空本会话的压缩状态（摘要与水位线）。注意：此前已被压缩"

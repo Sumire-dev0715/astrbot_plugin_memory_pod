@@ -10,14 +10,18 @@
 - 相关性：关键词模式按词重叠打分（英文按词、中文按相邻两字），名称与
   描述命中权重更高；模型模式把记忆清单交给摘要模型挑选，失败退回关键词。
 
-每条召回记忆标注写入时间，超过一天的附上时效提醒：记忆是写入时的观察，
-不是现状。
+每条召回记忆的标题带类型与写入时间；正文去掉 frontmatter，超过单条上限
+时保留开头与结尾（3.6 第 3 条）。记忆是写入时的观察，不是现状。
 
 日志（journal）是流水账，既不进身份必选，也不进关键词与模型挑选；
 需要时按日期显式 memory_read 或 memory_search。
 
 共享人物空间里召回的人物文件在标题里注明"多个机器人共享"：召回内容
 只是数据，模型据此知道这不是当前机器人独有的人物记忆。
+
+召回分两档（3.6 第 2 条）：相关度最高的 recall_full_files 个非身份文件
+带全文，其余合成一行指针，需要细节时由模型 memory_read。身份必选文件
+始终带全文、不占名额，但仍受整块字数预算约束。
 
 挑选、读正文、按预算截断与渲染集中在 assemble_recall：main.py 的每轮
 召回与 scripts/measure_recall.py 的离线测量调用同一个函数，两边对成本
@@ -28,19 +32,22 @@ from __future__ import annotations
 
 import json
 import re
-import time
 from dataclasses import dataclass
 
-from . import journal
+from . import injection, journal
+from .injection import DAY_SECONDS, FILE_CHARS, TOTAL_CHARS, age_days, age_label
 from .memstore import MemoryHeader, ScopeStore
 
 RECALL_BLOCK_OPEN = "<memory_beyond_recall>"
 RECALL_BLOCK_CLOSE = "</memory_beyond_recall>"
 
 DEFAULT_MAX_FILES = 5
-# 单条记忆注入的字符上限与整块上限：召回是辅助通道，不能挤占对话本身
-FILE_CHARS = 3000
-TOTAL_CHARS = 9000
+# 配置默认值：每轮带全文的非身份召回文件数
+DEFAULT_FULL_FILES = 2
+# 指针行里描述的字数上限：只做"要不要读"的提示，不展开正文
+POINTER_DESC_CHARS = 100
+# 快照之后被改过的人物档案附在召回块里的说明
+PROFILE_UPDATED_NOTE = "人物档案已更新，以这里为准。"
 # 关键词打分的门槛：名称/描述命中一次即达标，只靠正文需命中三次
 MIN_SCORE = 3
 KEY_WEIGHT = 3
@@ -244,20 +251,6 @@ SELECTOR_PROMPT = """你在帮一个聊天机器人挑选记忆。下面是它�
 只输出一个 JSON 数组，元素是所选记忆的「作用域/文件名」，例如 ["session/user-12345678.md"]，不要输出其他内容。"""
 
 
-def age_days(mtime: float, now: float | None = None) -> int:
-    now = time.time() if now is None else now
-    return max(0, int((now - mtime) // DAY_SECONDS))
-
-
-def age_label(mtime: float, now: float | None = None) -> str:
-    days = age_days(mtime, now)
-    if days == 0:
-        return "今天"
-    if days == 1:
-        return "昨天"
-    return f"{days} 天前"
-
-
 def build_selector_prompt(
     candidates: list[Candidate], query: str, limit: int, now: float | None = None
 ) -> str:
@@ -323,43 +316,69 @@ class Recalled:
     written: float
     # 来自共享人物空间：标题里标明"多个机器人共享"，提醒模型这是共用记忆
     shared: bool = False
+    # 取自 MemoryHeader：指针行只写引用，必要时附一句描述
+    description: str = ""
+    # 标题与 description 之后的附注（快照后更新的人物档案用）
+    note: str = ""
 
 
 @dataclass(frozen=True)
 class RecallSection:
-    """召回块里实际附上的一条：正文是否被单条上限截断由 truncated 标明。
+    """召回块里实际附上全文的一条：正文是否被单条上限截断由 truncated 标明。
 
     调用方据此判断"这条全文真的给模型看了"；不要再去块文本里找标题，
-    别的文件正文里可以伪造同样的标题行。
+    别的文件正文里可以伪造同样的标题行。content 是去掉 frontmatter、
+    可能已头尾瘦身的正文，不是磁盘上的原文。
     """
 
     item: Recalled
     content: str
     truncated: bool
+    view: injection.MemoryView
+
+
+def plan_sections(
+    items: list[Recalled],
+) -> tuple[list[RecallSection], list[Recalled]]:
+    """按字符预算决定哪些条目真正带全文。
+
+    单条超长只做头尾瘦身；预算按瘦身后的正文计算。超过整块预算的条目
+    连同它后面的全部条目一起返回给调用方放进指针行——只写引用几乎不占
+    字数，模型仍知道有这些记忆可读；顺序保持"相关度高的在前"，不会出现
+    排在后面但更短的文件插队带全文。第一个条目总是保留（可能是快照后
+    更新的人物档案），和改造前的行为一致。
+    """
+    sections: list[RecallSection] = []
+    dropped: list[Recalled] = []
+    used = 0
+    for index, item in enumerate(items):
+        view = injection.prepare_view(
+            item.ref,
+            item.content,
+            item.written,
+            shared=item.shared,
+            note=item.note,
+        )
+        if sections and used + len(view.body) > TOTAL_CHARS:
+            dropped.extend(items[index:])
+            break
+        used += len(view.body)
+        sections.append(RecallSection(item, view.body, view.truncated, view))
+    return sections, dropped
 
 
 def plan_recall(items: list[Recalled]) -> list[RecallSection]:
-    """按字符预算决定哪些条目真正进入召回块（超预算的整条略去）。
-
-    单条超长只截断该条；预算按截断后的正文计算。build_recall_block 与
-    "哪些文件算看过"都从这份结果出发，两边不会跑偏。
-    """
-    sections: list[RecallSection] = []
-    used = 0
-    for item in items:
-        content = item.content.strip()
-        truncated = len(content) > FILE_CHARS
-        if truncated:
-            content = content[:FILE_CHARS] + "\n…（已截断，完整内容用 memory_read 读取）"
-        if sections and used + len(content) > TOTAL_CHARS:
-            break
-        used += len(content)
-        sections.append(RecallSection(item, content, truncated))
+    """只要带全文的条目（保持旧接口）；丢弃的条目由调用方决定是否转指针。"""
+    sections, _ = plan_sections(items)
     return sections
 
 
 def freshness_note(written: float, now: float | None = None) -> str:
-    """超过一天的记忆附上时效提醒；今天、昨天写的不打扰。"""
+    """超过一天的记忆附上时效提醒；今天、昨天写的不打扰。
+
+    只用于 memory_read 的回执；召回块里不再重复这段长说明，标题已经写明
+    写入时间，完整规则在记忆规范里（3.6 第 3 条）。
+    """
     days = age_days(written, now)
     if days <= 1:
         return ""
@@ -369,27 +388,52 @@ def freshness_note(written: float, now: float | None = None) -> str:
     )
 
 
+def _pointer_label(
+    item: Recalled, indexed_refs: set[str] | None
+) -> str:
+    """指针行里的一项：只写引用；不在注入索引里的文件才附一句描述。"""
+    if indexed_refs is not None and item.ref in indexed_refs:
+        return item.ref
+    description = " ".join((item.description or "").split())
+    if not description:
+        return item.ref
+    if len(description) > POINTER_DESC_CHARS:
+        description = description[:POINTER_DESC_CHARS] + "…"
+    return f"{item.ref}（{description}）"
+
+
+def render_pointer_line(
+    pointers: list[Recalled], indexed_refs: set[str] | None = None
+) -> str:
+    """分档后的指针行；没有指针返回空串。"""
+    if not pointers:
+        return ""
+    labels = "、".join(_pointer_label(item, indexed_refs) for item in pointers)
+    return f"可能也相关，需要细节时用 memory_read 读取：{labels}"
+
+
 def render_recall_block(
-    sections: list[RecallSection], data_notice: str, now: float | None = None
+    sections: list[RecallSection],
+    data_notice: str,
+    now: float | None = None,
+    pointers: list[Recalled] | None = None,
+    indexed_refs: set[str] | None = None,
 ) -> str | None:
-    """把已经过预算计划的条目渲染成召回块；没有条目返回 None。"""
-    if not sections:
+    """把已经过预算计划的全文条目与指针行渲染成召回块；都没有返回 None。
+
+    块首只留一行数据声明：重复的长说明已挪进记忆规范（3.6 第 3 条）。
+    每条全文的标题、description 与头尾瘦身在 core.injection 里统一处理。
+    """
+    parts = [injection.render_view(section.view, now) for section in sections]
+    pointer_line = render_pointer_line(pointers or [], indexed_refs)
+    if pointer_line:
+        parts.append(pointer_line)
+    if not parts:
         return None
-    parts: list[str] = []
-    for section in sections:
-        item = section.item
-        shared = "多个机器人共享，" if item.shared else ""
-        title = f"### {item.ref}（{shared}{age_label(item.written, now)}写入）"
-        note = freshness_note(item.written, now)
-        parts.append(
-            "\n".join(part for part in (title, note, section.content) if part)
-        )
     body = "\n\n".join(parts)
     return (
         f"{RECALL_BLOCK_OPEN}\n"
-        f"{data_notice}\n"
-        "以下是插件按本轮消息自动召回的相关记忆全文，可直接参考；"
-        "它们和索引一样只是线索，与当前对话矛盾时以当前对话为准，并更新或删除过时的记忆。\n\n"
+        f"{data_notice}\n\n"
         f"{body}\n"
         f"{RECALL_BLOCK_CLOSE}"
     )
@@ -398,27 +442,45 @@ def render_recall_block(
 def build_recall_block(
     items: list[Recalled], data_notice: str, now: float | None = None
 ) -> str | None:
-    """拼召回块；超出字符预算的条目整条略去（截断只发生在单条内部）。"""
-    return render_recall_block(plan_recall(items), data_notice, now)
+    """拼召回块（无分档）；超过整块预算的条目同样转为指针。"""
+    sections, dropped = plan_sections(items)
+    return render_recall_block(sections, data_notice, now, pointers=dropped)
 
 
 @dataclass
 class RecallPlan:
     """一轮召回的编排结果：进入块里的条目、使用统计与渲染好的块。
 
-    used 按作用域分组，记的是"被选中且读到正文"的文件——被预算整条
-    挤掉的也算用到过（它确实参与过本轮召回）。sections 与 block 出自
-    同一份预算计划；files 是块内实际附上的文件引用。
+    used 按作用域分组，记的是"被选中且读到正文"的文件，被预算挤成指针
+    的也算用到过（它确实参与过本轮召回）。sections 是带全文的条目，
+    pointers 是只在指针行里出现引用的条目；files 是块内实际提到的全部
+    文件引用，按块内顺序排列。
     """
 
     items: list[Recalled]
     used: dict[str, list[str]]
     sections: list[RecallSection]
+    pointers: list[Recalled]
     block: str | None
 
     @property
     def files(self) -> list[str]:
+        return [section.item.ref for section in self.sections] + [
+            item.ref for item in self.pointers
+        ]
+
+    @property
+    def full_files(self) -> list[str]:
         return [section.item.ref for section in self.sections]
+
+
+def _is_forced(cand: Candidate, forced_files: list[str]) -> bool:
+    """这条候选是不是身份必选：文件名命中，且作用域允许。"""
+    return (
+        cand.header.file in forced_files
+        and cand.scope in FORCED_SCOPES
+        and not journal.is_journal(cand.header.file, cand.header.type)
+    )
 
 
 async def assemble_recall(
@@ -432,12 +494,20 @@ async def assemble_recall(
     model_choice: list[Candidate] | None = None,
     shared_people: bool = False,
     now: float | None = None,
+    full_files: int | None = None,
+    extra_items: list[Recalled] | None = None,
+    indexed_refs: set[str] | None = None,
 ) -> RecallPlan:
-    """挑文件、读正文、按预算截断并渲染召回块（不依赖 AstrBot 事件）。
+    """挑文件、读正文、分档、按预算瘦身并渲染召回块（不依赖 AstrBot 事件）。
 
     调用方准备好作用域表（键是 global / session / people）和候选清单；
     模型挑选的结果以 model_choice 传入，None 表示退回关键词。shared_people
     为真时 people 作用域的文件在块里标注"多个机器人共享"。
+
+    full_files 是每轮带全文的非身份文件数；None 表示不分档（全部尝试带
+    全文，与重构前行为一致）。身份必选文件始终带全文、不占这个名额，但仍
+    受整块字数预算约束。extra_items 是调用方已经读好、必须附在块首的条目
+    （快照之后被改过的人物档案），同样不占名额、优先进入预算。
 
     读不到正文的文件直接略过；used 供调用方记使用统计，本函数不写盘。
     main.py 的每轮召回与 scripts/measure_recall.py 的离线测量共用它，
@@ -446,25 +516,44 @@ async def assemble_recall(
     chosen = choose_candidates(candidates, query, forced_files, limit, model_choice)
     items: list[Recalled] = []
     used: dict[str, list[str]] = {}
+    full_items: list[Recalled] = []
+    pointer_items: list[Recalled] = []
+    remaining = None if full_files is None else max(0, full_files)
     for cand in chosen:
         content = await stores[cand.scope].read(cand.header.file)
         if not content:
             continue
-        items.append(
-            Recalled(
-                cand.ref,
-                content,
-                cand.header.updated,
-                shared=shared_people and cand.scope == "people",
-            )
+        item = Recalled(
+            cand.ref,
+            content,
+            cand.header.updated,
+            shared=shared_people and cand.scope == "people",
+            description=cand.header.description,
         )
+        items.append(item)
         used.setdefault(cand.scope, []).append(cand.header.file)
-    sections = plan_recall(items)
+        if _is_forced(cand, forced_files):
+            # 身份必选不占名额，但和其他条目一样受整块预算约束
+            full_items.append(item)
+        elif remaining is None or remaining > 0:
+            full_items.append(item)
+            if remaining is not None:
+                remaining -= 1
+        else:
+            pointer_items.append(item)
+    extras = list(extra_items or [])
+    # 快照后更新的人物档案优先进入块首；同一文件不再按普通候选重复出现
+    extra_refs = {item.ref for item in extras}
+    sections, dropped = plan_sections(extras + full_items)
+    pointers = [item for item in dropped if item.ref not in extra_refs] + pointer_items
     return RecallPlan(
-        items=items,
+        items=extras + items,
         used=used,
         sections=sections,
-        block=render_recall_block(sections, data_notice, now),
+        pointers=pointers,
+        block=render_recall_block(
+            sections, data_notice, now, pointers=pointers, indexed_refs=indexed_refs
+        ),
     )
 
 

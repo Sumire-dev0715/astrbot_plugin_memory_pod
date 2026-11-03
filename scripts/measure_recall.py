@@ -15,9 +15,12 @@
 - 作用域：session 用会话目录名还原出的 umo（还原不出来再用存档里的 umo），
   people 用 umo 的平台前缀，global 按参数开启。默认与 dev 配置一致：人物
   记忆开、全局记忆关、遗忘关、关键词模式、每轮最多 5 个文件
-  （recall.DEFAULT_MAX_FILES）。
+  （recall.DEFAULT_MAX_FILES）、每轮 2 个非身份文件带全文
+  （recall.DEFAULT_FULL_FILES）、私聊人物档案钉在开头块。
 - 召回块调用 core.recall.assemble_recall，与 main.py 每轮召回是同一个函数，
-  "选中哪些文件、带多少字、怎么截断"的编排与线上一致。
+  "选中哪些文件、带多少字、怎么截断与分档"的编排与线上一致。
+- 开头块调用 core.injection.build_opening_block，与 main.py 一样把索引和
+  私聊发送者的人物档案放在同一个快照里；人物档案不再进入每轮召回。
 - 存档只保留角色与文本（core/archive.py 的 _simplify），没有 @ 段、每条消息
   的时间和共享成员表：@ 提到的人无法还原（正文里的数字 ID 仍会被识别）；
   人物作用域按平台目录读取，不套用 shared_people_bots 映射；时效提醒按归档
@@ -25,16 +28,12 @@
 - 发送者 ID 优先从消息开头的 [发送者：…] 标注取（prompts.sender_ids_in），
   取不到时用私聊会话键里的用户 ID；旧版本回存进历史的索引块、摘要块不是
   用户发言，不计入轮次。
-- 开头块是会话索引块（prompts.build_index_block）的字数；其中人物档案指
-  以全文形式钉在开头块里的人物文件字数——3.6 第 1 条（pin_private_profile）
-  之前为 0，人物档案仍在每轮召回块里。
 - 记忆用副本里的当前快照，不重建"那一轮当时"的历史状态：早期轮次可能
   召回后来才写入的记忆。改造前后用同一份数据、同一口径对比，结论不受
   影响。
 
---recall-full-files 是 3.6 第 2 条（召回分档）的入口，先保留：分档尚未实现，
-给定时只在 stderr 说明本次仍按改造前口径统计。改造前后在同一份数据上跑
-同一个脚本即可对比。
+--recall-full-files 是 3.6 第 2 条（召回分档）的入口，默认 2；取 1、2、3
+各跑一次即可看出全文档位对每轮成本的影响。
 """
 
 from __future__ import annotations
@@ -52,7 +51,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from core import archive, memstore, prompts, recall, registry  # noqa: E402
+from core import archive, injection, memstore, prompts, recall, registry  # noqa: E402
 
 
 @dataclass
@@ -66,8 +65,10 @@ class Report:
     skipped_archives: int = 0
     # 每轮的数字，按回放顺序追加（会话之间也连续）
     recall_chars: list[int] = field(default_factory=list)
+    # 召回块里带全文的文件数（不含被头尾截断的）与只出现在指针行的文件数
     recall_files: list[int] = field(default_factory=list)
     full_files: list[int] = field(default_factory=list)
+    pointer_files: list[int] = field(default_factory=list)
     opening_chars: list[int] = field(default_factory=list)
     profile_chars: list[int] = field(default_factory=list)
     truncations: int = 0
@@ -206,6 +207,8 @@ async def _measure(
     people: bool,
     global_memory: bool,
     limit: int,
+    full_files: int,
+    pin_private_profile: bool,
 ) -> Report:
     report = Report()
     store = memstore.MemoryStore(data_dir / "memories")
@@ -218,25 +221,56 @@ async def _measure(
             continue
         report.sessions += 1
         report.archives += len(archives)
-        platform, _, _ = registry.parse_umo(umo)
+        platform, kind, target = registry.parse_umo(umo)
         session_store = store.session_scope(umo)
         global_index = None
         if global_memory:
             global_index = (await store.global_scope().load_index()).text
-        opening = prompts.build_index_block(
-            global_index, (await session_store.load_index()).text
-        ) or ""
+        session_index = (await session_store.load_index()).text
         stores: dict[str, memstore.ScopeStore] = {"session": session_store}
         if global_memory:
             stores["global"] = store.global_scope()
         if people:
             stores["people"] = store.people_scope(platform)
+        # 私聊人物档案钉进开头块：发送者就是私聊会话键里的对方；
+        # 群聊没有固定发送者，不钉。人物档案不再进入每轮召回候选。
+        profiles: list[injection.MemoryView] = []
+        pinned: set[str] = set()
+        if pin_private_profile and people and kind == registry.KIND_PRIVATE and target:
+            name = f"user-{target}.md"
+            for label in ("session", "people"):
+                scoped = stores.get(label)
+                if scoped is None:
+                    continue
+                content = await scoped.read(name)
+                if content is None:
+                    continue
+                written = memstore.parse_stamp(
+                    memstore.parse_memory(content).updated
+                ) or scoped.mtime(name) or 0.0
+                ref = f"{label}/{name}"
+                profiles.append(
+                    injection.prepare_view(ref, content, written)
+                )
+                pinned.add(ref)
+        opening = injection.build_opening_block(
+            global_index, session_index, profiles
+        ) or ""
+        profile_chars = len(injection.render_profiles(profiles)) if profiles else 0
+        indexed_refs = {
+            f"session/{name}" for name in injection.indexed_names(session_index)
+        }
+        if global_index is not None:
+            indexed_refs |= {
+                f"global/{name}" for name in injection.indexed_names(global_index)
+            }
         candidates: list[recall.Candidate] = []
         for label, scope_store in stores.items():
             for header in await asyncio.to_thread(scope_store.headers):
-                candidates.append(recall.Candidate(label, header))
-        # 3.6 第 1 条实现之前，开头块里没有以全文形式钉住的人物档案
-        profile_chars = 0
+                cand = recall.Candidate(label, header)
+                if cand.ref in pinned:
+                    continue
+                candidates.append(cand)
         previous: list[str] | None = None
         for text, at in _user_messages(archives):
             sender, query = _round_query(text, umo)
@@ -248,14 +282,17 @@ async def _measure(
                 limit=limit,
                 data_notice=prompts.DATA_NOTICE,
                 now=at or None,
+                full_files=full_files,
+                indexed_refs=indexed_refs,
             )
             files = plan.files
             report.rounds += 1
             report.recall_chars.append(len(plan.block) if plan.block else 0)
-            report.recall_files.append(len(plan.sections))
+            report.recall_files.append(len(plan.sections) + len(plan.pointers))
             report.full_files.append(
                 sum(1 for section in plan.sections if not section.truncated)
             )
+            report.pointer_files.append(len(plan.pointers))
             report.truncations += sum(
                 1 for section in plan.sections if section.truncated
             )
@@ -275,6 +312,8 @@ def measure(
     people: bool = True,
     global_memory: bool = False,
     limit: int = recall.DEFAULT_MAX_FILES,
+    full_files: int = recall.DEFAULT_FULL_FILES,
+    pin_private_profile: bool = True,
 ) -> Report:
     """同步入口：在数据目录副本上回放并测量（只读）。"""
     return asyncio.run(
@@ -283,6 +322,8 @@ def measure(
             people=people,
             global_memory=global_memory,
             limit=limit,
+            full_files=max(0, full_files),
+            pin_private_profile=pin_private_profile,
         )
     )
 
@@ -303,7 +344,9 @@ def format_report(report: Report) -> str:
             f"中位数 {median(report.recall_chars):.0f}，"
             f"P90 {percentile(report.recall_chars, 0.9):.0f}",
             f"平均全文文件数：{_mean(report.full_files):.2f}",
-            f"平均召回文件数（含截断）：{_mean(report.recall_files):.2f}",
+            "平均召回文件数（全文+指针）："
+            f"{_mean(report.recall_files):.2f}"
+            f"（其中指针 {_mean(report.pointer_files):.2f}）",
             f"截断次数：{report.truncations}",
             "相邻两轮召回同一批文件的比例："
             f"{ratio:.1f}%（共 {report.adjacent_pairs} 对）",
@@ -329,8 +372,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--recall-full-files",
         type=int,
-        default=None,
-        help="每轮带全文的召回文件数（3.6 第 2 条；分档尚未实现，暂不影响统计）",
+        default=recall.DEFAULT_FULL_FILES,
+        help="每轮带全文的非身份召回文件数（默认 2；不小于每轮召回上限时全部带全文）",
     )
     parser.add_argument(
         "--no-people",
@@ -348,20 +391,15 @@ def main(argv: list[str] | None = None) -> int:
     ).is_dir():
         print(f"数据目录里没有 archive/ 或 memories/：{args.data_dir}", file=sys.stderr)
         return 2
-    if args.recall_full_files is not None:
-        if args.recall_full_files <= 0:
-            print("--recall-full-files 必须是正整数", file=sys.stderr)
-            return 2
-        print(
-            "提示：召回分档（recall_full_files）尚未实现，"
-            "本次仍按改造前口径统计",
-            file=sys.stderr,
-        )
+    if args.recall_full_files < 0:
+        print("--recall-full-files 不能为负数", file=sys.stderr)
+        return 2
     try:
         report = measure(
             args.data_dir,
             people=not args.no_people,
             global_memory=args.global_memory,
+            full_files=args.recall_full_files,
         )
     except Exception as exc:  # noqa: BLE001 - 只报异常类型，避免把正文带进 traceback
         # 隐私底线：归档/记忆里可能夹着正文，异常文本也可能带着它，不打印详情

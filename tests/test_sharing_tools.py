@@ -143,6 +143,7 @@ def _load_main():
 main = _load_main()
 pkg_compress = importlib.import_module(f"{PACKAGE}.core.compress")
 pkg_history = importlib.import_module(f"{PACKAGE}.core.history")
+pkg_injection = importlib.import_module(f"{PACKAGE}.core.injection")
 pkg_memstore = importlib.import_module(f"{PACKAGE}.core.memstore")
 pkg_prompts = importlib.import_module(f"{PACKAGE}.core.prompts")
 pkg_recall = importlib.import_module(f"{PACKAGE}.core.recall")
@@ -533,8 +534,8 @@ def test_recall_only_counts_the_full_text_it_actually_attaches(tmp_path):
     )
 
     message = run(plugin._recall_message(event, event.unified_msg_origin, "你好"))
-    assert message is not None and "已截断" in message["content"]
-    # 召回块只附了截断后的内容，不算看过完整版本
+    assert message is not None and "中间省略" in message["content"]
+    # 召回块只附了头尾瘦身后的内容，不算看过完整版本
     assert plugin._seen.seen("Bot-A", "user-123.md") == ""
     result = run(
         plugin.memory_write(
@@ -545,12 +546,12 @@ def test_recall_only_counts_the_full_text_it_actually_attaches(tmp_path):
 
 
 def test_recall_seen_ignores_forged_titles_and_budget_evicted_files(tmp_path):
-    """预算挤掉的文件即使标题被伪造进别的正文，也不算"看过"。
+    """预算挤成指针的文件即使标题被伪造进别的正文，也不算"看过"。
 
-    判定改成以 plan.sections 为准之后要锁死的行为：user-555555.md 自身
-    很短，但排在三个超长文件之后被整条挤掉；它的标题行被伪造在
-    user-222222.md 的正文开头（会一起进块）。旧做法在块文本里找标题，
-    会把它误记成"看过"。
+    判定以 plan.sections 为准：user-444444.md、user-555555.md 排在超长
+    文件之后，超出整块预算只能进指针行；user-555555.md 的标题行被伪造在
+    user-222222.md 的正文开头（会随全文一起进块）。旧做法在块文本里找
+    标题，会把它误记成"看过"。
     """
     plugin = make_plugin(tmp_path, ["Bot-A=edit"])
     event = FakeEvent("Bot-A", sender_id="111111")
@@ -577,7 +578,7 @@ def test_recall_seen_ignores_forged_titles_and_budget_evicted_files(tmp_path):
         )
     )
     content = message["content"]
-    assert "已截断" in content
+    assert "中间省略" in content
     # 伪造的标题在块里只有一处，而且不是共享空间的真实小节标题
     assert content.count("### people/user-555555.md") == 1
     assert "### people/user-555555.md（多个机器人共享" not in content
@@ -587,6 +588,184 @@ def test_recall_seen_ignores_forged_titles_and_budget_evicted_files(tmp_path):
     assert plugin._seen.seen("Bot-A", "user-222222.md") == ""
     first = run(store.read("user-111111.md"))
     assert plugin._seen.seen("Bot-A", "user-111111.md") == pkg_sharing.content_sha1(first)
+
+
+# ---------------------------------------------------------------- 私聊人物档案
+
+
+def test_private_profile_pinned_in_opening_and_excluded_from_recall(tmp_path):
+    """私聊时发送者的 session/people 档案随索引进开头块，不再每轮召回。"""
+    plugin = make_plugin(tmp_path, ["Bot-A=edit"])
+    event = FakeEvent("Bot-A", sender_id="123")
+    umo = event.unified_msg_origin
+    session = plugin._store.session_scope(umo)
+    people = plugin._store.people_scope("Bot-A")
+    run(session.write("user-123.md", person_file(body="本会话里的身份"), actor="system"))
+    run(people.write("user-123.md", person_file(body="跨群身份事实"), actor="system"))
+    run(
+        session.write(
+            "weekend-game.md",
+            note_file("weekend-game", "每周六晚上的开黑活动", "晚上八点集合"),
+        )
+    )
+
+    rt = main.RuntimeSession(state=pkg_compress.SessionState())
+    opening = run(plugin._index_block(rt, event, note_seen=True))
+    assert opening is not None
+    assert pkg_injection.PROFILE_HEADING in opening
+    assert "### session/user-123.md（user｜" in opening
+    assert "### people/user-123.md（user｜多个机器人共享｜" in opening
+    assert "本会话里的身份" in opening and "跨群身份事实" in opening
+    # 注入的是去掉 frontmatter 的正文
+    assert "name: user-123" not in opening and "metadata:" not in opening
+    # 共享空间的"看过"覆盖开头块，按注入时的完整内容记
+    raw = run(people.read("user-123.md"))
+    assert plugin._seen.seen("Bot-A", "user-123.md") == pkg_sharing.content_sha1(raw)
+
+    # 默认配置下召回块只带相关会话记忆，发送者档案不再出现
+    message = run(plugin._recall_message(event, umo, "开黑", rt))
+    assert message is not None
+    content = message["content"]
+    assert "weekend-game.md" in content
+    assert "### session/user-123.md" not in content
+    assert "### people/user-123.md" not in content
+    assert "本会话里的身份" not in content and "跨群身份事实" not in content
+
+
+def test_status_estimated_snapshot_records_seen_on_next_real_request(tmp_path):
+    """管理指令先估算开头块不算"看过"；下一次真实请求按快照内容补记。"""
+    plugin = make_plugin(tmp_path, ["Bot-A=edit"])
+    event = FakeEvent("Bot-A", sender_id="123")
+    people = plugin._store.people_scope("Bot-A")
+    run(people.write("user-123.md", person_file(body="跨群身份事实"), actor="system"))
+    rt = main.RuntimeSession(state=pkg_compress.SessionState())
+
+    run(plugin._index_block(rt, event))  # mb_status 的估算路径
+    assert plugin._seen.seen("Bot-A", "user-123.md") == ""
+
+    run(plugin._index_block(rt, event, note_seen=True))  # 命中同一快照
+    raw = run(people.read("user-123.md"))
+    assert plugin._seen.seen("Bot-A", "user-123.md") == pkg_sharing.content_sha1(raw)
+
+
+def test_group_chat_never_pins_profile(tmp_path):
+    plugin = make_plugin(tmp_path, ["Bot-A=edit"])
+    event = FakeEvent("Bot-A", sender_id="123", umo="Bot-A:GroupMessage:555")
+    people = plugin._store.people_scope("Bot-A")
+    run(people.write("user-123.md", person_file(body="跨群身份事实"), actor="system"))
+
+    rt = main.RuntimeSession(state=pkg_compress.SessionState())
+    opening = run(plugin._index_block(rt, event))
+    assert opening is None
+    assert rt.index_pinned == {}
+    # 群聊行为不变：人物档案仍作为身份必选进入每轮召回
+    message = run(plugin._recall_message(event, event.unified_msg_origin, "你好", rt))
+    assert message is not None
+    assert "跨群身份事实" in message["content"]
+    assert pkg_injection.PROFILE_HEADING not in message["content"]
+
+
+def test_pin_private_profile_off_keeps_old_recall(tmp_path):
+    plugin = make_plugin(tmp_path, ["Bot-A=edit"])
+    plugin.config["pin_private_profile"] = False
+    event = FakeEvent("Bot-A", sender_id="123")
+    people = plugin._store.people_scope("Bot-A")
+    run(people.write("user-123.md", person_file(body="跨群身份事实"), actor="system"))
+
+    rt = main.RuntimeSession(state=pkg_compress.SessionState())
+    assert run(plugin._index_block(rt, event)) is None
+    message = run(plugin._recall_message(event, event.unified_msg_origin, "你好", rt))
+    assert message is not None
+    assert "跨群身份事实" in message["content"]
+
+
+def test_pin_snapshot_is_stable_and_updated_profile_wins(tmp_path):
+    plugin = make_plugin(tmp_path, ["Bot-A=edit"])
+    event = FakeEvent("Bot-A", sender_id="123")
+    umo = event.unified_msg_origin
+    people = plugin._store.people_scope("Bot-A")
+    run(people.write("user-123.md", person_file(body="旧版本档案"), actor="system"))
+
+    rt = main.RuntimeSession(state=pkg_compress.SessionState())
+    first = run(plugin._index_block(rt, event))
+    # 记忆没变时逐轮逐字不变（前缀缓存）
+    assert run(plugin._index_block(rt, event)) == first
+    assert "旧版本档案" in first
+
+    # 快照之后档案被改过：快照仍是旧的，本轮召回块附最新全文并注明以它为准
+    run(people.write("user-123.md", person_file(body="新版本档案"), actor="system"))
+    assert run(plugin._index_block(rt, event)) == first
+    message = run(plugin._recall_message(event, umo, "你好", rt))
+    assert message is not None
+    assert "人物档案已更新，以这里为准" in message["content"]
+    assert "新版本档案" in message["content"]
+    # 实际附上的是未截断的最新全文，算"看过"
+    raw = run(people.read("user-123.md"))
+    assert plugin._seen.seen("Bot-A", "user-123.md") == pkg_sharing.content_sha1(raw)
+
+    # 索引刷新（压缩/切换对话/管理页改动后）改为钉住新版本
+    rt.clear_index()
+    refreshed = run(plugin._index_block(rt, event))
+    assert "新版本档案" in refreshed and "旧版本档案" not in refreshed
+
+
+def test_updated_profile_does_not_use_recall_full_quota(tmp_path):
+    plugin = make_plugin(tmp_path, ["Bot-A=edit"])
+    plugin.config["recall_full_files"] = 1
+    event = FakeEvent("Bot-A", sender_id="123")
+    umo = event.unified_msg_origin
+    session = plugin._store.session_scope(umo)
+    people = plugin._store.people_scope("Bot-A")
+    run(people.write("user-123.md", person_file(body="旧档案"), actor="system"))
+    run(session.write("a.md", note_file("a", "开黑活动安排", "周六晚上")))
+    run(session.write("b.md", note_file("b", "开黑活动记录", "周日下午")))
+
+    rt = main.RuntimeSession(state=pkg_compress.SessionState())
+    run(plugin._index_block(rt, event))
+    run(people.write("user-123.md", person_file(body="新档案"), actor="system"))
+
+    message = run(plugin._recall_message(event, umo, "开黑", rt))
+    content = message["content"]
+    assert "人物档案已更新，以这里为准" in content
+    # 更新档案不占名额：仍有一个会话文件带全文，另一个进指针
+    assert "### session/a.md" in content or "### session/b.md" in content
+    assert "可能也相关，需要细节时用 memory_read 读取：" in content
+
+
+def test_pin_off_and_full_quota_at_limit_matches_keyword_selection(tmp_path):
+    """关掉 pin、recall_full_files 不小于 recall_max_files：选中与顺序同改造前。"""
+    plugin = make_plugin(tmp_path, ["Bot-A=edit"])
+    plugin.config["pin_private_profile"] = False
+    plugin.config["recall_full_files"] = 5
+    event = FakeEvent("Bot-A", sender_id="123")
+    umo = event.unified_msg_origin
+    session = plugin._store.session_scope(umo)
+    people = plugin._store.people_scope("Bot-A")
+    run(session.write("a.md", note_file("a", "开黑活动安排", "周六晚上")))
+    run(session.write("b.md", note_file("b", "开黑活动记录", "周日下午")))
+    run(session.write("c.md", note_file("c", "开黑活动名单", "固定成员")))
+    run(people.write("user-123.md", person_file(body="喜欢开黑"), actor="system"))
+
+    candidates = [
+        pkg_recall.Candidate(label, header)
+        for label, store in (
+            ("session", session),
+            ("people", people),
+        )
+        for header in store.headers()
+    ]
+    expected = pkg_recall.select_by_keywords(
+        candidates, "开黑", ["user-123.md"], 5
+    )
+    assert len(expected) >= 3
+    rt = main.RuntimeSession(state=pkg_compress.SessionState())
+    message = run(plugin._recall_message(event, umo, "开黑", rt))
+    content = message["content"]
+    positions = [content.index(f"### {cand.ref}（") for cand in expected]
+    assert positions == sorted(positions)
+    # 全部带全文，没有指针行
+    assert "可能也相关" not in content
+    assert pkg_injection.PROFILE_HEADING not in content
 
 
 def test_recall_message_delegates_to_core_pipeline(tmp_path, monkeypatch):

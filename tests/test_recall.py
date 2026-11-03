@@ -158,15 +158,22 @@ def test_build_recall_block_structure_and_budget():
         Recalled("session/d.md", "D" * 10, NOW),
     ]
     block = recall.build_recall_block(items, "[数据]", now=NOW)
-    assert block.startswith(recall.RECALL_BLOCK_OPEN + "\n[数据]")
+    assert block.startswith(recall.RECALL_BLOCK_OPEN + "\n[数据]\n")
     assert block.endswith(recall.RECALL_BLOCK_CLOSE)
-    assert "### session/a.md（4 天前写入）" in block
-    assert "已截断" in block
-    assert "4 天前，记录的是当时的情况" in block
-    # a（截断后略超 3000 字）+ b 之后再放 c 会超出 9000 字预算：从 c 起整条略去
+    # 标题带类型与写入时间；长说明不再逐条重复
+    assert "### session/a.md（未标注｜4 天前写入）" in block
+    assert "中间省略" in block
+    assert "4 天前，记录的是当时的情况" not in block
+    # a（瘦身后略超 3000 字）+ b 之后 c 会超出 9000 字预算；c 与它后面的
+    # d 一起转为指针，顺序保持相关度高的在前
     assert "session/b.md" in block
-    assert "session/c.md" not in block
-    assert "session/d.md" not in block
+    assert "session/c.md" not in block.split("可能也相关")[0]
+    assert (
+        "可能也相关，需要细节时用 memory_read 读取：session/c.md、session/d.md"
+        in block
+    )
+    # 指针行里只有引用，不带正文
+    assert "C" * 10 not in block and "D" * 10 not in block
 
 
 def test_build_recall_block_empty():

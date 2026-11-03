@@ -34,6 +34,14 @@
       "description": "Max memories recalled per turn",
       "hint": "The most memory files attached per turn. Default 5. Each file is capped at 3,000 characters and all of them together at 9,000; anything longer is cut. 0 turns recall off."
     },
+    "pin_private_profile": {
+      "description": "Pin the sender's profile into the opening block in private chats",
+      "hint": "Only applies in private chats when people memory is on. The sender's user-<ID>.md from the session and people scopes is placed in the opening block together with the memory index, built at the start of the conversation and refreshed with the index (after compression, switching conversations, reset, or WebUI edits). It is no longer recalled every turn and does not use a recall slot. If the profile is changed after the snapshot, that turn's recall block attaches the latest full text and says to trust it. Default on; when off, profiles are recalled every turn as before."
+    },
+    "recall_full_files": {
+      "description": "Recalled files attached in full per turn",
+      "hint": "Each turn, the most relevant few non-identity recalled files are attached in full; the rest are collapsed into a single pointer line to read with memory_read when needed. Identity files (the sender, people mentioned with @, and so on) are always attached in full, do not use these slots, and still count against the per-file 3,000-character and 9,000-character total budgets. Set it to at least \"Max memories recalled per turn\" to attach every recalled file in full, matching the old behavior. Default 2."
+    },
     "enable_compression": {
       "description": "Enable context compression",
       "hint": "When the context grows past the threshold, older turns are summarized automatically. The platform's chat history is always kept in full; compression only changes what is sent to the model."

@@ -125,19 +125,22 @@ def test_measure_counts_rounds_files_and_pairs(tmp_path):
     assert report.sessions == 1
     assert report.archives == 1
     assert report.skipped_archives == 0
-    # 前两轮：人物档案（身份必选）+ 两条会话记忆，其中 long 被截断
-    # 第三轮：只带人物档案（闲聊与记忆无关）
-    assert report.recall_files == [3, 3, 1]
-    assert report.full_files == [2, 2, 1]
+    # 人物档案钉在开头块，不再进入每轮召回：
+    # 前两轮：两条会话记忆，其中 long 头尾瘦身；第三轮闲聊没有相关记忆
+    assert report.recall_files == [2, 2, 0]
+    assert report.full_files == [1, 1, 0]
+    assert report.pointer_files == [0, 0, 0]
     assert report.truncations == 2
     # 两轮同题召回同一批文件；第三轮不同
     assert report.adjacent_pairs == 2
     assert report.identical_pairs == 1
     # 发送者 ID 从标注取；没有标注时用私聊会话键里的用户 ID，结果一致
     assert report.recall_chars[0] == report.recall_chars[1] > 0
-    assert report.recall_chars[2] > 0
-    # 开头块是会话索引；改造前其中没有以全文形式钉住的人物档案
-    expected_opening = len(
+    assert report.recall_chars[2] == 0
+    # 开头块 = 会话索引 + 私聊发送者人物档案；三轮共用同一快照
+    assert len(set(report.opening_chars)) == 1
+    assert all(profile > 0 for profile in report.profile_chars)
+    assert report.opening_chars[0] > len(
         prompts.build_index_block(
             None,
             (tmp_path / "memories" / "session" / KEY / memstore.INDEX_FILENAME).read_text(
@@ -145,8 +148,6 @@ def test_measure_counts_rounds_files_and_pairs(tmp_path):
             ),
         )
     )
-    assert set(report.opening_chars) == {expected_opening}
-    assert report.profile_chars == [0, 0, 0]
 
 
 def test_report_text_has_numbers_only(tmp_path):
@@ -156,9 +157,10 @@ def test_report_text_has_numbers_only(tmp_path):
     assert "跳过的存档：0" in text
     assert "每轮召回字数：平均" in text
     assert "平均全文文件数" in text
+    assert "平均召回文件数（全文+指针）：1.33（其中指针 0.00）" in text
     assert "截断次数：2" in text
     assert "相邻两轮召回同一批文件的比例：50.0%（共 2 对）" in text
-    assert "其中人物档案 平均 0.0" in text
+    assert "其中人物档案 平均 0.0" not in text
     # 隐私：记忆正文与对话正文都不能出现在输出里
     for secret in ("秘密正文标记XYZ", "用户对话标记ABC", "这周六还开黑吗", "阿杰"):
         assert secret not in text
@@ -174,17 +176,20 @@ def test_measure_is_read_only(tmp_path):
 def test_sender_falls_back_to_private_session_key(tmp_path):
     build_data(tmp_path, with_tagged_round=False)
     report = script.measure(tmp_path)
-    # 没有标注时，私聊会话键里的目标 100123 仍是发送者，人物档案照常召回
-    assert report.recall_files == [3, 3, 1]
-    assert report.full_files[0] == 2
+    # 没有标注时，私聊会话键里的目标 100123 仍是发送者，人物档案照常钉在开头块
+    assert report.recall_files == [2, 2, 0]
+    assert report.full_files[0] == 1
+    assert all(profile > 0 for profile in report.profile_chars)
 
 
 def test_no_people_excludes_profile(tmp_path):
     build_data(tmp_path)
     with_people = script.measure(tmp_path)
     without = script.measure(tmp_path, people=False)
-    assert without.recall_files == [2, 2, 0]
-    assert without.recall_chars[0] < with_people.recall_chars[0]
+    # 人物记忆关闭时 pin 也不生效：开头块只有索引，没有人物档案
+    assert without.profile_chars == [0, 0, 0]
+    assert without.opening_chars[0] < with_people.opening_chars[0]
+    assert without.recall_files == with_people.recall_files == [2, 2, 0]
 
 
 def test_group_message_without_tag_has_no_forced_identity(tmp_path):
@@ -234,6 +239,41 @@ def test_global_memory_flag(tmp_path):
     assert plain.recall_files == [0]
     assert extended.recall_files == [1]
     assert extended.opening_chars[0] > plain.opening_chars[0]
+
+
+def test_recall_full_files_tiering_reports_full_and_pointer_counts(tmp_path):
+    session = tmp_path / "memories" / "session" / KEY
+    for index in range(1, 5):
+        write_file(
+            session / f"game-{index}.md",
+            memory(
+                f"game-{index}",
+                f"开黑活动安排{index}",
+                (f"周六晚上集合{index}" * 100),
+            ),
+        )
+    write_archive(
+        tmp_path,
+        "20260105-000000-000",
+        [{"role": "user", "text": "这周六开黑吗"}],
+    )
+    reports = [
+        script.measure(
+            tmp_path,
+            people=False,
+            pin_private_profile=False,
+            full_files=count,
+        )
+        for count in (1, 2, 3)
+    ]
+    assert [report.full_files for report in reports] == [[1], [2], [3]]
+    assert [report.pointer_files for report in reports] == [[3], [2], [1]]
+    # 全文越多，召回块字数越多
+    assert (
+        reports[0].recall_chars[0]
+        < reports[1].recall_chars[0]
+        < reports[2].recall_chars[0]
+    )
 
 
 def test_percentile_nearest_rank_and_median():
@@ -352,34 +392,37 @@ def test_cli_hides_exception_details(tmp_path, capsys, monkeypatch):
     assert "RuntimeError" in captured.err
 
 
-def test_cli_prints_report_and_accepts_inert_recall_full_files(tmp_path, capsys):
+def test_cli_prints_report_and_tiering(tmp_path, capsys):
     build_data(tmp_path)
     assert script.main(["--data-dir", str(tmp_path)]) == 0
-    plain = capsys.readouterr()
-    assert "轮数：3" in plain.out
-    assert plain.err == ""
+    default = capsys.readouterr()
+    assert "轮数：3" in default.out
+    assert default.err == ""
 
-    # 分档召回属于 3.6 第 2 条，本项只保留参数入口：接受并明确告知未生效，
-    # 输出与不传时相同。实现分档后这里要改成三种取值各测一次。
+    # 默认 2 与显式 2 完全一致；1 把第二篇降为指针，成本更低
     assert script.main(["--data-dir", str(tmp_path), "--recall-full-files", "2"]) == 0
-    extended = capsys.readouterr()
-    assert extended.out == plain.out
-    assert "尚未实现" in extended.err
+    explicit = capsys.readouterr()
+    assert explicit.out == default.out
+    assert explicit.err == ""
 
-    assert script.main(["--data-dir", str(tmp_path), "--recall-full-files", "0"]) == 2
+    assert script.main(["--data-dir", str(tmp_path), "--recall-full-files", "1"]) == 0
+    tighter = capsys.readouterr()
+    assert tighter.out != default.out
+    assert "其中指针 0.67" in tighter.out
+
+    # 0 合法：非身份文件全部只给指针；负数与不存在的目录仍是参数错误
+    assert script.main(["--data-dir", str(tmp_path), "--recall-full-files", "0"]) == 0
+    assert script.main(["--data-dir", str(tmp_path), "--recall-full-files", "-1"]) == 2
     assert script.main(["--data-dir", str(tmp_path / "missing")]) == 2
 
 
 def padded_memory(name, description, total: int) -> str:
-    """正文（去掉首尾空白）总长正好 total 字的合成记忆。"""
-    base = memory(name, description, "占位").rstrip("\n")
-    if len(base) < total:
-        base += "开" * (total - len(base))
-    return base + "\n"
+    """正文（去掉 frontmatter 后）总长正好 total 字的合成记忆。"""
+    return memory(name, description, "开" * total)
 
 
 def test_truncation_threshold_matches_recall_constant(tmp_path):
-    """整份内容刚好等于 FILE_CHARS 不算截断，多一个字才算。"""
+    """去掉 frontmatter 后的正文等于 FILE_CHARS 不算截断，多一个字才算。"""
     session = tmp_path / "memories" / "session" / KEY
     write_file(
         session / "edge.md",
