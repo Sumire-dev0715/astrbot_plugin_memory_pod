@@ -618,20 +618,6 @@ class MemoryBeyondPlugin(Star):
         permission = self._people_permission(self._platform_of(umo))
         return permission is None or permission == sharing.PERMISSION_EDIT
 
-    async def _shared_version_ok(
-        self, event: AstrMessageEvent, store: memstore.ScopeStore, file: str
-    ) -> bool:
-        """整文件覆盖前的版本检查（只对共享人物空间）。"""
-        platform_id = self._event_actor(event)
-        if not self._sharing.is_member(platform_id):
-            return True
-        current = await store.read(file)
-        if current is None:
-            return True
-        return await asyncio.to_thread(
-            self._seen.is_current, platform_id, file, current
-        )
-
     async def _note_shared_seen(
         self,
         event: AstrMessageEvent,
@@ -1091,9 +1077,18 @@ class MemoryBeyondPlugin(Star):
         forced: list[str],
         actor: str = "",
     ) -> None:
-        """身份必选的人物文件若已被遗忘，这个人又出现了——先恢复再召回。"""
+        """身份必选的人物文件若已被遗忘，这个人又出现了——先恢复再召回。
+
+        read 级成员不能恢复共享人物文件（恢复会把文件移回在册，属于写操作），
+        已遗忘的文件继续保持遗忘，等有写权限的机器人或管理员处理。
+        """
+        read_only_people = (
+            self._people_permission(actor) == sharing.PERMISSION_READ
+        )
         for label, store in scopes:
             if label not in recall.FORCED_SCOPES:
+                continue
+            if label == "people" and read_only_people:
                 continue
             for name in forced:
                 if store.exists(name) or not store.has_forgotten(name):
@@ -1924,7 +1919,7 @@ class MemoryBeyondPlugin(Star):
         """读取长期记忆文件的完整内容。注入的索引只是目录：回答涉及某人、某事的细节之前，先用本工具取回对应文件再作答，不要凭索引行猜；更新某条记忆之前也先读它的当前内容。
 
         Args:
-            scope(string): 作用域，global（机器人自我的全局记忆）、session（当前会话的记忆）或 people（同一平台所有会话共享的人物记忆，一人一个 user-<数字ID>.md）
+            scope(string): 作用域，global（机器人自我的全局记忆）、session（当前会话的记忆）或 people（人物记忆，一人一个 user-<数字ID>.md；通常同一平台所有会话共享，启用共享人物空间时是多个成员机器人共用的 _shared 目录）
             file(string): 记忆文件名，如 user-12345678.md；省略时读 MEMORY.md 索引全文
         """
         if not self._bool("enable_memory", True):
@@ -1933,15 +1928,28 @@ class MemoryBeyondPlugin(Star):
         if store is None:
             return refused
         file = (file or "").strip()
+        permission = (
+            self._people_permission(self._event_actor(event))
+            if scope == "people"
+            else None
+        )
         content = await store.read(file)
         restored = False
+        forgotten_read = False
         if content is None and self._forgetting_on() and store.has_forgotten(file):
-            # 模型主动读一条已遗忘的记忆：读取即恢复在册
-            report = await store.restore(file, actor=self._event_actor(event))
-            if report.ok:
-                content = await store.read(file)
-                restored = True
-                logger.info(LOG_PREFIX + f"{scope} 记忆 {file} 已从遗忘中恢复（模型读取）")
+            if permission == sharing.PERMISSION_READ:
+                # read 级成员不能把文件移回在册（那是一次写操作），只读遗忘副本
+                content = await store.read_forgotten(file)
+                forgotten_read = content is not None
+            else:
+                # 模型主动读一条已遗忘的记忆：读取即恢复在册
+                report = await store.restore(file, actor=self._event_actor(event))
+                if report.ok:
+                    content = await store.read(file)
+                    restored = True
+                    logger.info(
+                        LOG_PREFIX + f"{scope} 记忆 {file} 已从遗忘中恢复（模型读取）"
+                    )
         if content is None:
             existing = store.list_files()
             listing = "、".join(existing) if existing else "（该作用域还没有记忆文件）"
@@ -1957,6 +1965,11 @@ class MemoryBeyondPlugin(Star):
                 memstore.parse_memory(content).updated
             ) or store.mtime(file)
             notes = []
+            if forgotten_read:
+                notes.append(
+                    "（这条记忆当前处于已遗忘状态；你在这个共享人物空间里只有读取权限，"
+                    "只返回内容，未恢复在册）"
+                )
             if restored:
                 notes.append("（这条记忆此前因长期未用已被遗忘，刚刚已恢复在册）")
             note = recall.freshness_note(written) if written else ""
@@ -1978,7 +1991,7 @@ class MemoryBeyondPlugin(Star):
         """写入、修改或删除一个长期记忆文件（整文件覆盖；修改＝读出后改写重写入，删除＝delete 设 true）。一个文件只记一条事实，content 必须以 frontmatter 开头：--- / name: 与文件名一致 / description: 一句话钩子 / metadata: / type: user|feedback|project|reference|journal / ---，正文写事实本身。MEMORY.md 索引由插件自动维护，禁止直接写：要改索引行就重写对应文件的 description，要删索引行就删除对应文件。写前先查重，同一个人、同一件事始终更新同一个文件，不另建重复文件。type 为 journal 的是每日日志（文件名建议 daily-<日期>.md）：流水账不占单独索引行，只在索引末尾折叠成最近两篇加一行汇总，不参与自动召回，也不参与查重；需要时按日期用 memory_read 或 memory_search 检索。作用域边界：关于具体用户或本会话的信息一律写 session，记人以发送者标注中的数字 ID 为锚（文件名 user-<数字ID>.md，昵称只作正文附注）；global 只存机器人自身的偏好与行为准则；people（启用时）只存某人亲口说的、换个群也成立的身份类事实。
 
         Args:
-            scope(string): 作用域，global（机器人自我的全局记忆）、session（当前会话的记忆）或 people（同一平台所有会话共享的人物记忆，一人一个 user-<数字ID>.md）
+            scope(string): 作用域，global（机器人自我的全局记忆）、session（当前会话的记忆）或 people（人物记忆，一人一个 user-<数字ID>.md；通常同一平台所有会话共享，启用共享人物空间时是多个成员机器人共用的 _shared 目录）
             file(string): 记忆文件名，须以 .md 结尾，如 user-12345678.md；不可为 MEMORY.md
             content(string): 完整的文件内容，含 frontmatter（delete 为 false 时必填）
             delete(boolean): 设为 true 时删除该文件并自动移除其索引行，此时忽略 content
@@ -2004,26 +2017,30 @@ class MemoryBeyondPlugin(Star):
             if not content.strip():
                 return "content 为空。写入需提供完整文件内容；如要删除请设 delete=true。"
             existed = store.exists(file)
+            # 已遗忘的同名文件也会被整文件写入顶替（遗忘副本进回收站），
+            # 对 append 级成员同样是"覆盖"，不能当成新建放行
+            dormant = store.has_forgotten(file)
             refusal = sharing.write_refusal(
-                permission, exists=existed, delete=False
+                permission, exists=existed or dormant, delete=False
             )
             if refusal:
                 return refusal
+            expected = None
             if scope == "people" and self._sharing.is_member(actor) and existed:
-                try:
-                    unchanged = await self._shared_version_ok(event, store, file)
-                except OSError:
-                    return (
-                        f"读取共享人物记忆 {file} 的当前内容失败，未写入；"
-                        "请稍后重试，确认不会覆盖别人的修改。"
-                    )
-                if not unchanged:
+                expected = await asyncio.to_thread(
+                    self._seen.seen, actor, file
+                )
+                if not expected:
+                    # 没有可比较的版本：先读当前内容再覆盖
                     return sharing.version_conflict_message(file)
             report = await store.write(
                 file,
                 content,
                 source=self._sender_identity(event)[0],
                 actor=actor,
+                expected_sha1=expected,
+                # append 级成员"只能新建"也放进同一把锁，避免并发下绕过
+                forbid_overwrite=(permission == sharing.PERMISSION_APPEND),
             )
             if report.ok:
                 # 自己刚写的版本算看过，紧接着再整文件覆盖不会被版本检查误拦
@@ -2057,7 +2074,7 @@ class MemoryBeyondPlugin(Star):
         """修改一个已有的长期记忆文件。默认 replace 模式：把 old_text 替换成 new_text，文件其余内容原样保留；改一处、补一句、更新 description 时用它，不要用 memory_write 整文件重写（重写容易丢内容）。replace 时 old_text 必须与文件现有内容逐字一致（空格、换行、标点都算）且只出现一次，所以先用 memory_read 读出当前内容再复制片段；new_text 留空等于删掉这段。append 模式：old_text 留空时把 new_text 追加到文件末尾，old_text 是某个小节标题行（如 ## 作息与习惯）时追加到该小节末尾，追加前插件自动保存旧版。改了 frontmatter 的 description，索引行会自动同步。
 
         Args:
-            scope(string): 作用域，global（机器人自我的全局记忆）、session（当前会话的记忆）或 people（同一平台所有会话共享的人物记忆，一人一个 user-<数字ID>.md）
+            scope(string): 作用域，global（机器人自我的全局记忆）、session（当前会话的记忆）或 people（人物记忆，一人一个 user-<数字ID>.md；通常同一平台所有会话共享，启用共享人物空间时是多个成员机器人共用的 _shared 目录）
             file(string): 要修改的记忆文件名，如 user-12345678.md；不可为 MEMORY.md
             old_text(string): replace 模式下要被替换的原文片段，须与文件内容逐字一致且只出现一次；append 模式下留空表示追加到文件末尾，填小节标题行表示追加到该小节末尾
             new_text(string): replace 模式下的替换文字（留空表示删掉 old_text）；append 模式下要追加的文字

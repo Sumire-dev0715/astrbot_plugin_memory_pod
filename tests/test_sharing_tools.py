@@ -341,6 +341,25 @@ def test_append_permission_only_creates_and_appends(tmp_path):
     assert content.rstrip().endswith("补充：喜欢钓鱼")
 
 
+def test_append_member_cannot_replace_a_forgotten_shared_file(tmp_path):
+    plugin = make_plugin(tmp_path, ["Bot-A=edit", "Bot-B=append"])
+    event_a = FakeEvent("Bot-A")
+    event_b = FakeEvent("Bot-B")
+    store = plugin._store.people_scope("Bot-A")
+    run(plugin.memory_write(event_a, "people", "user-1.md", person_file("user-1")))
+    run(store.forget("user-1.md", actor="system"))
+    assert store.has_forgotten("user-1.md") and not store.exists("user-1.md")
+
+    result = run(
+        plugin.memory_write(
+            event_b, "people", "user-1.md", person_file("user-1", body="取代")
+        )
+    )
+    assert result == pkg_sharing.APPEND_OVERWRITE_REFUSAL
+    assert store.has_forgotten("user-1.md")
+    assert not store.exists("user-1.md")
+
+
 def test_read_permission_can_read_but_not_write(tmp_path):
     plugin = make_plugin(tmp_path, ["Bot-A=read"])
     event = FakeEvent("Bot-A")
@@ -412,6 +431,55 @@ def test_version_check_read_never_read_and_changed_by_other(tmp_path):
         )
     )
     assert result == pkg_sharing.version_conflict_message("user-123.md")
+
+
+def test_concurrent_overwrites_only_one_passes_version_check(tmp_path):
+    plugin = make_plugin(tmp_path, ["Bot-A=edit", "Bot-B=edit"])
+    event_a = FakeEvent("Bot-A")
+    event_b = FakeEvent("Bot-B")
+    run(plugin.memory_write(event_a, "people", "user-123.md", person_file()))
+    # A 自己刚写过（seen 已更新），B 也读到了同一版；两边随后同时整文件覆盖
+    assert "测试用户" in run(
+        plugin.memory_read(event_b, "people", "user-123.md")
+    )
+
+    async def both():
+        return await asyncio.gather(
+            plugin.memory_write(
+                event_a, "people", "user-123.md", person_file(body="A 的版本")
+            ),
+            plugin.memory_write(
+                event_b, "people", "user-123.md", person_file(body="B 的版本")
+            ),
+        )
+
+    results = run(both())
+    assert sum("已写入" in result for result in results) == 1
+    assert sum(
+        result == pkg_sharing.version_conflict_message("user-123.md")
+        for result in results
+    ) == 1
+    final = run(plugin._store.people_scope("Bot-A").read("user-123.md"))
+    assert ("A 的版本" in final) != ("B 的版本" in final)
+
+
+def test_read_member_cannot_restore_a_forgotten_shared_file(tmp_path):
+    plugin = make_plugin(tmp_path, ["Bot-A=edit", "Bot-B=read"])
+    plugin.config["enable_forgetting"] = True
+    event_a = FakeEvent("Bot-A", sender_id="123")
+    event_b = FakeEvent("Bot-B", sender_id="123")
+    store = plugin._store.people_scope("Bot-A")
+    run(plugin.memory_write(event_a, "people", "user-123.md", person_file()))
+    run(store.forget("user-123.md", actor="system"))
+    assert store.has_forgotten("user-123.md") and not store.exists("user-123.md")
+
+    result = run(plugin.memory_read(event_b, "people", "user-123.md"))
+    assert "只返回内容，未恢复在册" in result
+    assert store.has_forgotten("user-123.md") and not store.exists("user-123.md")
+
+    # 身份必选召回也不能替 read 级成员恢复
+    run(plugin._recall_message(event_b, event_b.unified_msg_origin, "你好"))
+    assert store.has_forgotten("user-123.md") and not store.exists("user-123.md")
 
 
 def test_recall_full_text_counts_as_seen(tmp_path):

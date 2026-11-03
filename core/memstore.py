@@ -821,12 +821,23 @@ class ScopeStore:
     # ------------------------------------------------------------ 写 / 删
 
     async def write(
-        self, name: str, content: str, source: str = "", actor: str = ""
+        self,
+        name: str,
+        content: str,
+        source: str = "",
+        actor: str = "",
+        expected_sha1: str | None = None,
+        forbid_overwrite: bool = False,
     ) -> WriteReport:
         """写入记忆文件并自动同步索引行（钩子取自 frontmatter description）。
 
         source 是本次写入的来源 ID（通常是当前发送者），并入文件的 source 戳；
         actor 是这次变更的执行者（工具调用记平台 ID），写进审计。
+        expected_sha1 非 None 时做覆盖前版本检查：持锁读到在册旧内容的哈希
+        必须与它一致，否则拒绝写入。检查与写入在同一把锁里，并发的两次
+        覆盖只有先到的那次能通过。
+        forbid_overwrite 为 true 时只允许新建：持锁确认在册或已遗忘的同名
+        文件都不存在，避免 append 级成员在并发下绕过"只能新建"。
         """
         # 与 _resolve 同样的归一化：索引守门与索引行都要用整理后的名字，
         # 否则 " MEMORY.md" / "/MEMORY.md" 能绕过守门，索引行也会写错
@@ -855,6 +866,14 @@ class ScopeStore:
                 return WriteReport(
                     False, f"读取 {name} 的现有内容失败，未写入：{exc}"
                 )
+            if forbid_overwrite and (active is not None or previous is not None):
+                return WriteReport(False, sharing.APPEND_OVERWRITE_REFUSAL)
+            if expected_sha1 is not None:
+                actual = history.content_sha1(active) if active is not None else ""
+                if actual != expected_sha1:
+                    return WriteReport(
+                        False, sharing.version_conflict_message(name)
+                    )
             return await self._commit(
                 name,
                 path,

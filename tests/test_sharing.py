@@ -117,6 +117,27 @@ def test_empty_config_keeps_upstream_platform_directories(tmp_path):
     assert store.people_scope("Bot-A") is not store.people_scope("Bot-B")
 
 
+def test_write_forbid_overwrite_covers_active_and_forgotten(tmp_path):
+    store = memstore.MemoryStore(tmp_path / "memories")
+    scope = store.people_scope("Bot-A")
+    created = run(scope.write("user-1.md", person_file("user-1"), forbid_overwrite=True))
+    assert created.ok
+    again = run(
+        scope.write(
+            "user-1.md", person_file("user-1", body="覆盖"), forbid_overwrite=True
+        )
+    )
+    assert not again.ok and again.message == sharing.APPEND_OVERWRITE_REFUSAL
+    run(scope.forget("user-1.md", actor="system"))
+    dormant = run(
+        scope.write(
+            "user-1.md", person_file("user-1", body="顶替遗忘副本"), forbid_overwrite=True
+        )
+    )
+    assert not dormant.ok and dormant.message == sharing.APPEND_OVERWRITE_REFUSAL
+    assert scope.has_forgotten("user-1.md")
+
+
 # ---------------------------------------------------------------- 追加模式
 
 
