@@ -13,7 +13,9 @@ MEMORY.md 在磁盘上的格式不变，仍是 ``- [名称](文件.md) — 描�
 3. feedback 类最后丢——行为指导长期没被提起不代表失效。
 
 剩下的行保持索引里的原顺序，末尾注明还有多少条未加载、可用
-memory_search 检索。
+memory_search 检索。如果可丢条目全部丢完仍然超限（索引里只有分组标题、
+手工说明这类非条目行），再从底部截去剩余行，保证注入不超过上限；这些
+不是记忆条目，不计入"还有 N 条"。
 
 这里只做纯渲染，不读盘。使用统计由调用方（ScopeStore.load_index）在
 生成快照时读取一次，快照缓存期间不重复读，因此记忆不变时注入的索引
@@ -115,19 +117,29 @@ def _lines_fit(
 def _journal_span(
     lines: list[str], journal_files: set[str] | None
 ) -> tuple[int, int] | None:
-    """末尾日志块的范围 (起始行, 汇总行)；格式兼容紧凑行。
+    """日志块的范围 (起始行, 汇总行)；格式兼容紧凑行。
 
     不看 memstore 的 ``](文件)`` 链接格式：注入文本已经渲染成
-    ``- 文件.md — 描述``，这里直接按文件名认日志行。
+    ``- 文件.md — 描述``，这里直接按文件名认日志行。汇总行后面可能有
+    手工加的行（WebUI 编辑器允许），所以取最后一条汇总行往前认块，
+    不要求它正好是索引最后一行。
     """
-    if not lines or not journal.is_summary_line(lines[-1]):
+    end = next(
+        (
+            index
+            for index in range(len(lines) - 1, -1, -1)
+            if journal.is_summary_line(lines[index])
+        ),
+        None,
+    )
+    if end is None:
         return None
-    start = len(lines) - 1
+    start = end
     while start > 0 and _is_journal_target(
         entry_target(lines[start - 1]), journal_files
     ):
         start -= 1
-    return start, len(lines) - 1
+    return start, end
 
 
 def _drop_note(count: int) -> str:
@@ -194,6 +206,15 @@ def render_for_injection(
                     break
                 dropped.add(index)
 
+            # 兜底：可丢条目已经丢完仍然超限（索引里全是分组标题、手工
+            # 说明这类非条目行）。从底部去掉剩余行，保证注入不超过上限；
+            # 这些行不是记忆条目，不计入"还有 N 条"。
+            for index in range(len(lines) - 1, -1, -1):
+                if _lines_fit(lines, dropped, max_lines, max_bytes):
+                    break
+                if index not in dropped:
+                    dropped.add(index)
+
     kept = [line for index, line in enumerate(lines) if index not in dropped]
     text = "\n".join(kept)
     dropped_targets = {
@@ -229,7 +250,8 @@ def render_for_injection(
             )
         )
         dropped_entries = non_journal_count + journal_count
-        text += _drop_note(dropped_entries)
+        if dropped_entries:
+            text += _drop_note(dropped_entries)
     else:
         dropped_entries = 0
     return IndexView(

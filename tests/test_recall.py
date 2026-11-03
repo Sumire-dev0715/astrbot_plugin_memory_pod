@@ -1,7 +1,8 @@
+import asyncio
 import time
 
 from core import recall
-from core.memstore import MemoryHeader
+from core.memstore import MemoryHeader, ScopeStore
 from core.recall import Candidate, Recalled
 
 NOW = 1_800_000_000.0
@@ -126,6 +127,29 @@ def test_selector_prompt_is_stable_while_memories_are_unchanged():
     assert other_query.split("新消息：", 1)[0] == manifest
     # 候选顺序就是调用方给它的顺序，不因时间重新排序
     assert manifest.index("session/a.md") < manifest.index("global/b.md")
+
+
+def test_selector_prompt_ignores_usage_changes(tmp_path):
+    """真实 store 里召回记下使用统计后，挑选清单仍逐字不变。"""
+    store = ScopeStore(tmp_path)
+    content = (
+        "---\n"
+        "name: a\n"
+        "description: 每周六开黑\n"
+        "metadata:\n"
+        "  type: project\n"
+        "---\n\n"
+        "正文\n"
+    )
+    asyncio.run(store.write("a.md", content))
+    before = recall.build_selector_prompt(
+        [Candidate("session", header) for header in store.headers()], "开黑", 5
+    )
+    store.note_used(["a.md"], 123.0)
+    after = recall.build_selector_prompt(
+        [Candidate("session", header) for header in store.headers()], "开黑", 5
+    )
+    assert after == before
 
 
 def test_parse_selector_response_accepts_refs_and_bare_names():

@@ -519,10 +519,11 @@ def _mtime_of(path: Path) -> float:
 
 @dataclass
 class IndexReport:
-    """MEMORY.md 的健康状况：体积、是否截断、与实际文件是否对得上。"""
+    """MEMORY.md 的健康状况：注入体积、是否丢行、与实际文件是否对得上。"""
 
     exists: bool
     lines: int
+    # 注入视图的字节数（紧凑渲染、去掉首尾空行后），不是磁盘文件大小
     size: int
     truncated: bool
     # 有文件但索引里没有对应行
@@ -2019,7 +2020,8 @@ class ScopeStore:
         只动匹配行与末尾追加，其余行原样保留——用户手工整理过的索引
         （分组标题、排序）不会被破坏。日志不占单独一行，统一折进末尾的
         日志块；这一步同时把升级前散落在索引里的老日志行改写成新格式。
-        返回 (总行数, 总字节数) 供守门。
+        返回注入视图的 (行数, 字节数) 供守门：注入时按紧凑行渲染，体积
+        按紧凑后的文本算，避免用磁盘链接格式误报超限。
         """
         index_path = self.root / INDEX_FILENAME
         existing = ""
@@ -2039,7 +2041,7 @@ class ScopeStore:
         lines = journal.fold_index(lines, entries)
         text = "\n".join(lines).strip("\n") + "\n"
         self._write_atomic(index_path, text)
-        return len(text.splitlines()), len(text.encode("utf-8"))
+        return self._injection_metrics(text)
 
     def _remove_index_line(self, filename: str) -> None:
         index_path = self.root / INDEX_FILENAME
@@ -2056,12 +2058,33 @@ class ScopeStore:
         self._write_atomic(index_path, text + "\n" if text else "")
 
     @staticmethod
+    def _injection_metrics(text: str) -> tuple[int, int]:
+        """索引注入视图的 (行数, 字节数)：按紧凑行、去掉首尾空行计算。
+
+        注入上限针对的是模型实际看到的文本，不是磁盘上的链接格式；用它
+        做写入回执与管理页的体积提示，才不会在紧缩小文件上误报超限。
+        """
+        lines = text.splitlines()
+        while lines and not lines[0].strip():
+            lines.pop(0)
+        while lines and not lines[-1].strip():
+            lines.pop()
+        size = sum(
+            len(index_view.compact_index_line(line).encode("utf-8")) + 1
+            for line in lines
+        )
+        return len(lines), size
+
+    @staticmethod
     def _index_health(lines: int, size: int) -> str | None:
-        """索引体积守门文案；健康时返回 None。上限是注入截断线，不是写入限制。"""
+        """索引体积守门文案；健康时返回 None。上限是注入线，不是写入限制。"""
         if lines > INDEX_MAX_LINES or size > INDEX_MAX_BYTES:
             return (
-                f"注意：MEMORY.md 已 {lines} 行 / {size} 字节，超出注入上限 "
-                f"{INDEX_MAX_LINES} 行 / {INDEX_MAX_BYTES} 字节，超出部分不会注入。"
+                f"注意：MEMORY.md 的注入视图已 {lines} 行 / {size} 字节"
+                f"（紧凑渲染后），超出注入上限 {INDEX_MAX_LINES} 行 / "
+                f"{INDEX_MAX_BYTES} 字节，超出上限的内容不会全部注入："
+                "日志块最先让位，其余条目按最近使用丢弃，可用 memory_search 找回；"
+                "没有条目可丢时从底部截去非条目行。"
                 "请把相关记忆合并进同一个文件、删除多余文件，索引会随之精简"
             )
         if (
@@ -2069,7 +2092,8 @@ class ScopeStore:
             or size > INDEX_MAX_BYTES * INDEX_WARN_RATIO
         ):
             return (
-                f"MEMORY.md 已 {lines} 行 / {size} 字节，接近注入上限 "
+                f"MEMORY.md 的注入视图已 {lines} 行 / {size} 字节"
+                f"（紧凑渲染后），接近注入上限 "
                 f"{INDEX_MAX_LINES} 行 / {INDEX_MAX_BYTES} 字节，"
                 "建议把相关记忆合并进同一个文件、删除多余文件"
             )
@@ -2104,11 +2128,13 @@ class ScopeStore:
             actual = lines[span[0] : span[1] + 1] if span is not None else []
             if actual != journal.build_block(self._journal_entries(headers)):
                 missing = sorted(set(missing) | journals)
-        snap = _truncate_index(raw, journals, headers)
+        snap = _truncate_index(raw, journals, headers, self.usage())
+        _, injected_size = self._injection_metrics(raw)
         return IndexReport(
             exists=True,
             lines=snap.total_lines,
-            size=len(raw.encode("utf-8")),
+            # 注入上限针对紧凑后的注入文本；管理页的体积条也按它显示
+            size=injected_size,
             truncated=snap.truncated,
             missing=missing,
             dangling=[name for name in listed if name not in files],
@@ -2131,9 +2157,7 @@ class ScopeStore:
                 text + "\n" if text else "",
             )
         message = "索引已保存"
-        health = self._index_health(
-            len(text.splitlines()), len(text.encode("utf-8"))
-        )
+        health = self._index_health(*self._injection_metrics(text))
         if health:
             message += "。" + health
         return WriteReport(True, message)

@@ -13,13 +13,18 @@ def run(coro):
     return asyncio.run(coro)
 
 
-def memory(name: str, description: str, updated: str = "2026-01-01 12:00") -> str:
+def memory(
+    name: str,
+    description: str,
+    updated: str = "2026-01-01 12:00",
+    mem_type: str = "user",
+) -> str:
     return (
         "---\n"
         f"name: {name}\n"
         f"description: {description}\n"
         "metadata:\n"
-        "  type: user\n"
+        f"  type: {mem_type}\n"
         f"  updated: {updated}\n"
         "---\n\n"
         "正文。\n"
@@ -140,6 +145,133 @@ def test_byte_limit_drops_journal_block_first():
     assert "日志共" not in view.text
     compact = [index_view.compact_index_line(line) for line in normal]
     assert view.text.startswith("\n".join(compact))
+
+
+def test_byte_limit_drops_oldest_normal_entries():
+    normal = lines(*(f"m{i}.md" for i in range(6)))
+    compact = [index_view.compact_index_line(line) for line in normal]
+    # 只够装最后两条；使用时间 m0 最早，按旧到新丢到只剩 m4、m5
+    max_bytes = sum(len(line.encode("utf-8")) + 1 for line in compact[-2:])
+    view = index_view.render_for_injection(
+        "\n".join(normal),
+        idle_times={f"m{i}.md": float(i) for i in range(6)},
+        max_bytes=max_bytes,
+    )
+    assert view.text.splitlines()[:2] == compact[-2:]
+    assert view.dropped_entries == 4
+    assert "还有 4 条未加载" in view.text
+
+
+def test_mixed_journal_and_normal_counts():
+    normal = lines(*(f"m{i}.md" for i in range(10)))
+    entries = [
+        journal.JournalEntry(f"daily-2026-11-0{day}.md", "日志")
+        for day in (1, 2, 3)
+    ]
+    raw = "\n".join(normal + journal.build_block(entries))
+    view = index_view.render_for_injection(
+        raw,
+        journal_files={entry.name for entry in entries},
+        idle_times={f"m{i}.md": float(i) for i in range(10)},
+        max_lines=9,
+    )
+    # 3 篇日志整块 + 最旧的 m0：共 4 条
+    assert "日志共" not in view.text
+    assert "m0.md" not in view.text
+    assert view.dropped_entries == 4
+    assert "还有 4 条未加载" in view.text
+    assert view.text.splitlines()[:9] == [
+        index_view.compact_index_line(line) for line in normal[1:]
+    ]
+
+
+def test_journal_block_before_manual_line_is_dropped_whole():
+    normal = lines(*(f"m{i}.md" for i in range(3)))
+    entries = [
+        journal.JournalEntry(f"daily-2026-11-0{day}.md", "日志")
+        for day in (1, 2, 3, 4, 5)
+    ]
+    raw = "\n".join(normal + journal.build_block(entries) + ["# 手工补充"])
+    view = index_view.render_for_injection(
+        raw, journal_files={entry.name for entry in entries}, max_lines=4
+    )
+    # 汇总行后面有手工行，也按一个完整的日志块丢掉，不留半截
+    assert "daily-2026" not in view.text and "日志共" not in view.text
+    assert "# 手工补充" in view.text
+    assert all(
+        index_view.compact_index_line(line) in view.text for line in normal
+    )
+    assert view.dropped_entries == 5
+    assert "还有 5 条未加载" in view.text
+
+
+def test_non_entry_lines_over_limit_fall_back_to_bottom_cut(tmp_path):
+    store = ScopeStore(tmp_path)
+    total = memstore.INDEX_MAX_LINES + 50
+    text = "\n".join(f"## 分组 {i}" for i in range(total))
+    report = run(store.write_index(text))
+    assert report.ok and "注入视图" in report.message
+
+    snap = run(store.load_index())
+    assert snap.truncated
+    assert snap.total_lines == total
+    assert snap.loaded_lines == memstore.INDEX_MAX_LINES
+    assert snap.text.splitlines()[0] == "## 分组 0"
+    assert snap.text.splitlines()[-1] == f"## 分组 {memstore.INDEX_MAX_LINES - 1}"
+    # 没有条目被丢，不写"还有 N 条"（分组标题不是记忆）
+    assert "还有" not in snap.text
+
+
+def test_health_uses_compact_injection_size(tmp_path):
+    store = ScopeStore(tmp_path)
+    names = [f"file-{i:03d}-" + "x" * 50 + ".md" for i in range(100)]
+    text = "\n".join(format_index_line(name, "描" * 43) for name in names)
+    compact = sum(
+        len(index_view.compact_index_line(line).encode("utf-8")) + 1
+        for line in text.splitlines()
+    )
+    assert len(text.encode("utf-8")) > memstore.INDEX_MAX_BYTES
+    assert compact < memstore.INDEX_MAX_BYTES * memstore.INDEX_WARN_RATIO
+
+    report = run(store.write_index(text))
+    # 磁盘链接格式超过 25KB，但注入视图没超，不应误报
+    assert "注入上限" not in report.message
+    snap = run(store.load_index())
+    assert not snap.truncated
+    detail = store.index_report()
+    assert detail.size == compact
+    assert detail.truncated is False
+
+
+def test_write_receipt_uses_compact_injection_size(tmp_path):
+    store = ScopeStore(tmp_path)
+    names = [f"file-{i:03d}-" + "x" * 50 + ".md" for i in range(100)]
+    report = None
+    for name in names:
+        report = run(store.write(name, memory(name[:-3], "描" * 43)))
+    assert report is not None and report.ok
+    raw = (tmp_path / INDEX_FILENAME).read_text("utf-8")
+    assert len(raw.encode("utf-8")) > memstore.INDEX_MAX_BYTES
+    # _sync_index_line 也用注入视图的紧凑体积，不按磁盘链接格式误报
+    assert "注入上限" not in report.message
+
+
+def test_feedback_is_dropped_last_via_load_index(tmp_path, monkeypatch):
+    monkeypatch.setattr(memstore, "INDEX_MAX_LINES", 1)
+    (tmp_path / "user.md").write_text(
+        memory("user", "用户", "2026-06-01 12:00", "user"), "utf-8"
+    )
+    (tmp_path / "fb.md").write_text(
+        memory("fb", "指导", "2026-01-01 12:00", "feedback"), "utf-8"
+    )
+    (tmp_path / INDEX_FILENAME).write_text(
+        "\n".join(lines("user.md", "fb.md")) + "\n", "utf-8"
+    )
+    store = ScopeStore(tmp_path)
+    snap = run(store.load_index())
+    # feedback 的 updated 更旧，但类型 priority 让它最后才被丢
+    assert "fb.md" in snap.text and "user.md" not in snap.text
+    assert "还有 1 条未加载" in snap.text
 
 
 # ---------------------------------------------------------------- 使用统计
