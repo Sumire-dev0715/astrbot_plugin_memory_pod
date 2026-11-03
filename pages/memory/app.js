@@ -210,6 +210,8 @@
     trashRestoreMessage: "恢复 {file}（{time} 删除的版本）。如果现在有同名文件，会先把当前内容存进历史再覆盖。",
     trashDeleteTitle: "彻底删除回收站条目",
     trashDeleteMessage: "确定永久删除回收站里的 {file}（{time} 删除）吗？这条回收站记录删除后无法恢复；如需连同它的历史版本一起清除，请先恢复，再在文件详情里「彻底删除（含历史）」。",
+    trashPurgeTitle: "彻底删除文件（含历史）",
+    trashPurgeMessage: "确定彻底删除 {file} 吗？它已经不在册（只剩回收站、已遗忘副本或历史版本）；当前作用域里这个文件的全部历史版本、已遗忘副本和回收站条目都会删除，无法恢复。",
     historyVersions: "历史版本",
     historyHint: "覆盖或修改前自动保存的旧内容；恢复时会先把当前版本存进历史。",
     noHistoryTitle: "还没有历史版本",
@@ -230,6 +232,7 @@
     action_delete_trash: "彻底删除",
     action_purge_file: "彻底删除文件",
     action_purge_scope: "清除作用域",
+    action_rename: "改名",
     purgeFile: "彻底删除（含历史）",
     purgeFileTitle: "彻底删除文件",
     purgeFileMessage: "确定彻底删除 {file} 吗？当前作用域里的在册文件、已遗忘副本、全部历史版本和回收站条目都会删除，无法恢复；其他作用域（包括迁移后保留的旧平台人物目录）里的同名文件不受影响。",
@@ -2158,6 +2161,7 @@
     "delete-trash",
     "purge-file",
     "purge-scope",
+    "rename",
   ];
 
   function actionLabel(action) {
@@ -2487,6 +2491,11 @@
       panel.append(emptyState("trash", t("noTrashTitle"), t("noTrashHint")));
       return panel;
     }
+    const active = new Set(
+      ((state.detail && state.detail.files) || []).map(function (f) {
+        return f.file;
+      })
+    );
     items.forEach(function (item) {
       panel.append(
         h(
@@ -2520,7 +2529,16 @@
               "button",
               { class: "btn small danger", onclick: function () { deleteTrashEntry(item); } },
               t("delete")
-            )
+            ),
+            // 在册文件已经不存在（只剩回收站、已遗忘副本或历史版本）时，
+            // 编辑器打不开它，这里给一个按文件名彻底清除的入口
+            active.has(item.file)
+              ? null
+              : h(
+                  "button",
+                  { class: "btn small danger", onclick: function () { purgeTrashFile(item); } },
+                  t("purgeFile")
+                )
           )
         )
       );
@@ -2575,6 +2593,26 @@
       toast(res.message || t("deleted"));
       state.trash = null;
       await loadDetail();
+    } catch (err) {
+      toast(err.message, "error");
+    }
+  }
+
+  async function purgeTrashFile(item) {
+    const ok = await confirmDialog({
+      title: t("trashPurgeTitle"),
+      message: t("trashPurgeMessage", { file: item.file }),
+      confirm: t("purgeFileConfirm"),
+      danger: true,
+    });
+    if (!ok) {
+      return;
+    }
+    try {
+      const res = await apiPost("file/purge", Object.assign(scopeParams(), { file: item.file }));
+      toast(res.message || t("deleted"));
+      state.trash = null;
+      await Promise.all([loadDetail(), loadOverview(true)]);
     } catch (err) {
       toast(err.message, "error");
     }

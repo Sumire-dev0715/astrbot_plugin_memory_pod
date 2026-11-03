@@ -138,6 +138,52 @@ def test_delete_moves_to_trash_and_restores(store):
     run(scenario())
 
 
+def test_rename_moves_history_and_leaves_no_trash(store):
+    """改名：旧名历史迁到新名下，审计记 rename，旧名不留回收站条目。"""
+
+    async def scenario():
+        await store.write("old.md", memory("old", "甲", "第一版"), actor="webui")
+        await store.write("old.md", memory("old", "甲", "第二版"), actor="webui")
+        old_content = await store.read("old.md")
+        assert store.history_versions("old.md")
+
+        # 管理页的改名顺序：先写新文件，再迁移历史并删旧文件
+        assert (await store.write("new.md", memory("new", "乙", "改名后"), actor="webui")).ok
+        result = await store.finalize_rename("old.md", "new.md", actor="webui")
+        assert result.ok, result.message
+        assert store.list_files() == ["new.md"]
+        assert store.history_versions("old.md") == []
+        assert not (store.root / history.HISTORY_DIRNAME / "old.md").exists()
+        assert [e for e in store.trash_entries() if e.file == "old.md"] == []
+
+        versions = store.history_versions("new.md")
+        actions = [v.action for v in versions]
+        assert "rename" in actions and "write" in actions
+        rename_version = next(v for v in versions if v.action == "rename")
+        assert store.read_history("new.md", rename_version.version) == old_content
+        assert rename_version.actor == "webui"
+        assert rename_version.source == "old.md"
+
+        rows = [
+            json.loads(line)
+            for line in (store.root / history.AUDIT_FILENAME)
+            .read_text("utf-8")
+            .splitlines()
+        ]
+        assert rows[-1]["action"] == history.ACTION_RENAME
+        assert rows[-1]["file"] == "new.md"
+        assert rows[-1]["source"] == "old.md"
+        assert rows[-1]["actor"] == "webui"
+
+        # 对新名字彻底删除，旧名迁过来的历史也一起清干净
+        assert (await store.delete_file_completely("new.md", actor="webui")).ok
+        assert store.history_versions("new.md") == []
+        assert store.trash_entries() == []
+        assert store.list_files() == []
+
+    run(scenario())
+
+
 def test_restore_trash_over_active_saves_current_first(store):
     async def scenario():
         await store.write("a.md", memory("a", "甲", "回收站版本"), actor="aiocqhttp")

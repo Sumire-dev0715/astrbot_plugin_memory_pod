@@ -328,13 +328,22 @@ def test_file_save_create_edit_rename(plugin, dash):
         save(dash, file="user-1.md", oldFile="user-1.md", description="x", body="b", baseMtime=base - 100)
     )
 
-    # 改名：先写新文件再删旧文件，索引跟着变
+    # 改名：先写新文件，再把旧名的历史迁到新名下、删旧文件；
+    # 旧名不留下回收站条目
     base = store.mtime("user-1.md")
     renamed_from = asyncio.run(store.read("user-1.md"))
     ok(save(dash, file="user-2.md", oldFile="user-1.md", description="改名", body="b", baseMtime=base))
     assert store.list_files() == ["user-2.md"]
-    renamed = [e for e in store.trash_entries() if e.file == "user-1.md"]
-    assert len(renamed) == 1 and store.read_trash(renamed[0].entry) == renamed_from
+    assert [e for e in store.trash_entries() if e.file == "user-1.md"] == []
+    assert store.history_versions("user-1.md") == []
+    renamed_versions = store.history_versions("user-2.md")
+    assert any(v.action == "rename" for v in renamed_versions)
+    assert any(
+        store.read_history("user-2.md", v.version) == renamed_from
+        for v in renamed_versions
+    )
+    # 改名前的旧名历史（编辑时存的 write 版本）也跟着迁过来
+    assert any(v.action == "write" for v in renamed_versions)
     report = store.index_report()
     assert report.missing == [] and report.dangling == []
     # 改名的目标已存在同样被拒
@@ -342,6 +351,11 @@ def test_file_save_create_edit_rename(plugin, dash):
     assert "已存在" in err(save(dash, file="user-3.md", oldFile="user-2.md", description="d", body="b"))
     # 原文件已被删掉
     assert "已不存在" in err(save(dash, file="x.md", oldFile="gone.md", description="d", body="b"))
+    # 改名后按新名字彻底删除，能连旧名迁过来的历史一起清干净
+    assert call(dash, "file/purge", body={"scope": "session", "key": KEY, "file": "user-2.md"})["status"] == "ok"
+    assert store.history_versions("user-2.md") == []
+    history_root = store.root / ".history"
+    assert not history_root.is_dir() or not any(history_root.iterdir())
 
 
 def test_file_save_raw_mode(plugin, dash):
@@ -914,6 +928,31 @@ def test_file_purge_removes_history_trash_and_forgotten(plugin, dash):
 
     assert "没有找到" in err(call(dash, "file/purge", body=q))
     assert "索引" in err(call(dash, "file/purge", body={**q, "file": "MEMORY.md"}))
+
+
+def test_trash_entry_without_active_file_can_be_purged_by_name(plugin, dash):
+    """回收站标签里不在册的条目可走 file/purge 彻底删除（含历史）。"""
+    store = session_store(plugin)
+    asyncio.run(store.write("gone.md", memory("gone", "甲", "第一版")))
+    asyncio.run(store.write("gone.md", memory("gone", "甲", "第二版")))
+    ok(call(dash, "file/delete", body={"scope": "session", "key": KEY, "file": "gone.md"}))
+
+    # 页面据此判断要不要显示「彻底删除（含历史）」按钮
+    detail = ok(call(dash, "scope", {"scope": "session", "key": KEY}))
+    assert detail["files"] == []
+    entries = ok(call(dash, "trash", {"scope": "session", "key": KEY}))["entries"]
+    assert [entry["file"] for entry in entries] == ["gone.md"]
+    assert store.history_versions("gone.md")
+
+    result = call(
+        dash,
+        "file/purge",
+        body={"scope": "session", "key": KEY, "file": "gone.md"},
+    )
+    assert result["status"] == "ok" and "彻底删除" in result["message"]
+    assert store.trash_entries() == []
+    assert store.history_versions("gone.md") == []
+    assert ok(call(dash, "scope", {"scope": "session", "key": KEY}))["trashCount"] == 0
 
 
 def test_scope_trash_count_does_not_read_audit(plugin, dash, monkeypatch):

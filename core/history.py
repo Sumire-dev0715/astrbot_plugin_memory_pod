@@ -58,6 +58,8 @@ ACTION_DELETE_FORGOTTEN = "delete-forgotten"
 ACTION_DELETE_TRASH = "delete-trash"
 ACTION_PURGE_FILE = "purge-file"
 ACTION_PURGE_SCOPE = "purge-scope"
+# 管理页改名：旧正文存为新名字下的一个版本，旧名的历史随后整份迁走
+ACTION_RENAME = "rename"
 
 # actor：谁改的
 ACTOR_TIDY = "tidy"
@@ -411,6 +413,47 @@ class HistoryLog:
             )
         except OSError:
             return 0
+
+    def move_versions(self, old: str, new: str) -> int:
+        """把旧文件名的全部历史版本迁到新文件名下，返回迁走的版本数。
+
+        改名后旧名字不再单独出现：管理页只按新名字查看、恢复和「彻底删除
+        （含历史）」。新名下已有同一时间戳的版本（删掉后重建再改名）时，
+        把迁过来的版本时间往后挪到不冲突为止；日期非法的陌生文件不碰。
+        """
+        if not old or not new or old == new:
+            return 0
+        source = self.history_root / old
+        dest = self.history_root / new
+        with self._lock:
+            if not source.is_dir():
+                return 0
+            try:
+                entries = list(source.iterdir())
+            except OSError:
+                return 0
+            moved = 0
+            for path in entries:
+                if not path.is_file() or not path.name.endswith(".md"):
+                    continue
+                match = _VERSION_ID_RE.match(path.name[: -len(".md")])
+                if match is None:
+                    continue
+                ts = _parse_stamp(match.group(1))
+                if ts is None:
+                    continue
+                target = dest / path.name
+                while target.exists():
+                    ts = round(ts + 0.001, 3)
+                    target = dest / f"{_stamp(ts)}-{match.group(2)}.md"
+                dest.mkdir(parents=True, exist_ok=True)
+                try:
+                    os.replace(path, target)
+                    moved += 1
+                except OSError:
+                    continue
+            _rmdir_if_empty(source)
+            return moved
 
     # ------------------------------------------------------------ 回收站
 

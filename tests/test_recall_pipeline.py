@@ -1,9 +1,10 @@
-"""召回编排（core.recall.assemble_recall）与重构前逻辑的选择对比。
+"""召回编排（core.recall.assemble_recall）与改造前选择结果的对比。
 
-参照实现 legacy_recall 是从 main.py 的 _recall_message 抽出去之前的原样
-代码（挑选、读文件、拼块），用来证明重构前后选中的文件、顺序、读到的
-原文与使用统计完全一致。3.6 第 2、3 条有意改变了块内呈现（分档、去
-frontmatter、头尾瘦身、标题格式），所以块文本不再逐字比较，渲染由
+改造前选中的文件和顺序由上游 v1.4.1（commit d217033 的 core/recall.py，
+单独导出到临时目录运行）在同一批合成数据上算出，作为固定期望值写在各
+测试里；legacy_recall 只按这份固定清单读正文，不再调用被测的挑选函数，
+避免同源循环证明。3.6 第 2、3 条有意改变了块内呈现（分档、去 frontmatter、
+头尾瘦身、标题格式），所以块文本不再逐字比较，渲染由
 tests/test_injection.py 与 tests/test_recall_tiers.py 单独覆盖。
 记忆全部是临时目录里的合成数据。
 """
@@ -31,51 +32,6 @@ def memory(name, description, body, mem_type="user"):
         "---\n\n"
         f"{body}\n"
     )
-
-
-def legacy_plan_and_block(items, data_notice, now):
-    """重构前 core.recall 的 plan_recall + build_recall_block 原样抄录。
-
-    故意不调用重构后的 recall.plan_recall / recall.render_recall_block：
-    对照实现必须是独立的第二份代码，否则同源循环证明不了"逐字相同"。
-    只复用这次重构没有改动的常量与时效文案（FILE_CHARS、TOTAL_CHARS、
-    age_label、freshness_note、块标记）。原文抄自重构前提交 6e6a11f 的
-    core/recall.py。
-    """
-    sections = []
-    used = 0
-    for item in items:
-        content = item.content.strip()
-        truncated = len(content) > recall.FILE_CHARS
-        if truncated:
-            content = (
-                content[: recall.FILE_CHARS]
-                + "\n…（已截断，完整内容用 memory_read 读取）"
-            )
-        if sections and used + len(content) > recall.TOTAL_CHARS:
-            break
-        used += len(content)
-        sections.append((item, content, truncated))
-    parts = []
-    for item, content, _ in sections:
-        shared = "多个机器人共享，" if item.shared else ""
-        title = f"### {item.ref}（{shared}{recall.age_label(item.written, now)}写入）"
-        note = recall.freshness_note(item.written, now)
-        parts.append(
-            "\n".join(part for part in (title, note, content) if part)
-        )
-    block = None
-    if parts:
-        body = "\n\n".join(parts)
-        block = (
-            f"{recall.RECALL_BLOCK_OPEN}\n"
-            f"{data_notice}\n"
-            "以下是插件按本轮消息自动召回的相关记忆全文，可直接参考；"
-            "它们和索引一样只是线索，与当前对话矛盾时以当前对话为准，并更新或删除过时的记忆。\n\n"
-            f"{body}\n"
-            f"{recall.RECALL_BLOCK_CLOSE}"
-        )
-    return [(item.ref, content, truncated) for item, content, truncated in sections], block
 
 
 def make_store(tmp_path, files, mtime=NOW):
@@ -106,26 +62,14 @@ def candidates_of(stores):
     return result
 
 
-async def legacy_recall(
-    stores,
-    candidates,
-    *,
-    query,
-    forced_files,
-    limit,
-    data_notice,
-    model_choice=None,
-    shared_people=False,
-    now=None,
-):
-    """重构前 _recall_message 里"候选收集之后"的原样逻辑（只作对照）。"""
-    chosen = model_choice
-    if chosen is None:
-        chosen = recall.select_by_keywords(candidates, query, forced_files, limit)
-    else:
-        keyword_forced = recall.select_by_keywords(candidates, "", forced_files, limit)
-        merged = keyword_forced + [c for c in chosen if c not in keyword_forced]
-        chosen = merged[:limit]
+async def legacy_recall(stores, candidates, expected, *, shared_people=False):
+    """按固定期望值读正文，返回 (选中候选, 条目, 使用统计)。
+
+    expected 是上游 v1.4.1 在同一批合成数据上选出的 "作用域/文件名"，
+    顺序原样保留；这里不做任何相关性计算，选中集合或顺序回归会直接暴露。
+    """
+    by_ref = {cand.ref: cand for cand in candidates}
+    chosen = [by_ref[ref] for ref in expected if ref in by_ref]
     items = []
     used = {}
     for cand in chosen:
@@ -141,22 +85,26 @@ async def legacy_recall(
                 )
             )
             used.setdefault(cand.scope, []).append(cand.header.file)
-    sections, block = legacy_plan_and_block(items, data_notice, now)
-    return chosen, items, used, sections, block
+    return chosen, items, used
 
 
-async def compare(stores, candidates, **kwargs):
-    """新实现与参照实现的选中文件、顺序、原文与使用统计必须一致。"""
+async def compare(stores, candidates, expected, **kwargs):
+    """新实现与固定期望值（选中的文件、顺序）以及读到的原文、使用统计一致。"""
     plan = await recall.assemble_recall(stores, candidates, **kwargs)
-    chosen, items, used, _sections, _block = await legacy_recall(
-        stores, candidates, **kwargs
+    chosen, items, used = await legacy_recall(
+        stores,
+        candidates,
+        expected,
+        shared_people=kwargs.get("shared_people", False),
     )
+    # 选中集合与顺序来自上游 v1.4.1，不经过被测函数
+    assert [item.ref for item in plan.items] == expected
     assert [item.ref for item in plan.items] == [item.ref for item in items]
     assert [item.content for item in plan.items] == [item.content for item in items]
     assert [item.shared for item in plan.items] == [item.shared for item in items]
     assert plan.used == used
     # 块内提到的文件与顺序不变；具体呈现（分档/瘦身）由新测试覆盖
-    assert plan.files == [item.ref for item in items]
+    assert plan.files == expected
     return plan, chosen
 
 
@@ -177,6 +125,9 @@ def test_keyword_recall_matches_pre_refactor(tmp_path):
         compare(
             stores,
             candidates,
+            # 上游 v1.4.1 在同一批数据上的选择：weekend-game 得分 6；
+            # daily 得分 2（低于门槛）、people 的其他人不按关键词扩散
+            ["people/user-123456.md", "session/weekend-game.md"],
             query="这周六还开黑吗",
             forced_files=["user-123456.md"],
             limit=5,
@@ -210,6 +161,8 @@ def test_model_choice_merge_matches_pre_refactor(tmp_path):
         compare(
             stores,
             candidates,
+            # 上游 v1.4.1：身份必选 user-123456 在前，再按模型挑的顺序接 b
+            ["people/user-123456.md", "session/b.md"],
             query="周六开黑",
             forced_files=["user-123456.md"],
             limit=5,
@@ -236,6 +189,8 @@ def test_model_empty_choice_falls_back_to_forced_only(tmp_path):
         compare(
             stores,
             candidates,
+            # 上游 v1.4.1：模型明确回答"没有相关的"时只留身份必选
+            ["people/user-123456.md"],
             query="周六开黑",
             forced_files=["user-123456.md"],
             limit=5,
@@ -262,6 +217,8 @@ def test_budget_truncation_matches_pre_refactor(tmp_path):
         compare(
             stores,
             candidates,
+            # 上游 v1.4.1：三个文件同分（3），同分取较新，时间相同则保持候选顺序
+            ["session/big-1.md", "session/big-2.md", "session/big-3.md"],
             query="开黑",
             forced_files=[],
             limit=5,
@@ -302,6 +259,8 @@ def test_missing_or_empty_file_is_skipped(tmp_path):
         compare(
             stores,
             candidates + [missing],
+            # 上游 v1.4.1：缺正文的 gone.md 不在候选里，选中的只有 a
+            ["session/a.md"],
             query="开黑",
             forced_files=[],
             limit=5,
@@ -326,6 +285,8 @@ def test_shared_people_marks_only_people_scope(tmp_path):
         compare(
             stores,
             candidates,
+            # 上游 v1.4.1：身份必选 people 在前，a 按关键词得分补上
+            ["people/user-123456.md", "session/a.md"],
             query="开黑",
             forced_files=["user-123456.md"],
             limit=5,

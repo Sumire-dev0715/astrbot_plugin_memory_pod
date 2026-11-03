@@ -1118,6 +1118,93 @@ class ScopeStore:
             await asyncio.to_thread(self._forget_usage, name)
         return WriteReport(True, f"已删除 {name}，对应索引行已同步移除")
 
+    async def finalize_rename(
+        self, old: str, new: str, actor: str = ""
+    ) -> WriteReport:
+        """改名收尾：迁移旧名的全部历史版本、删旧文件，并记一条 rename 审计。
+
+        调用方先把新内容写进新名字（write 会顺带更新索引）。这里在同一把锁里
+        把旧正文存成新名字下的一个历史版本（动作 rename），再把旧名字的历史
+        目录整份迁到新名字下，最后删掉旧文件——旧名不再留下回收站条目，之后
+        按新名字「彻底删除（含历史）」就能清掉这份记忆的全部备份。
+        """
+        old = (old or "").strip().lstrip("/")
+        new = (new or "").strip().lstrip("/")
+        if not old or not new or old == new:
+            return WriteReport(False, "改名前后必须是两个不同的文件名")
+        if not self.is_valid_name(old) or not self.is_valid_name(new):
+            return WriteReport(False, f"文件名不合法：{self.path_rules()}")
+        if (
+            old.lower() == INDEX_FILENAME.lower()
+            or new.lower() == INDEX_FILENAME.lower()
+        ):
+            return WriteReport(False, "MEMORY.md 索引由插件自动维护，不能改名")
+        async with self._lock:
+            old_path = self.root / old
+            new_path = self.root / new
+            if not old_path.is_file():
+                return WriteReport(False, f"文件不存在：{old}")
+            if not new_path.is_file():
+                return WriteReport(False, f"新文件 {new} 不在册，未完成改名")
+            try:
+                try:
+                    old_content: str | bytes | None = await asyncio.to_thread(
+                        self._read_for_update, old_path
+                    )
+                except UnicodeDecodeError:
+                    # 非 UTF-8 的老文件也按原始字节留一份，不因解码失败丢内容
+                    old_content = await asyncio.to_thread(
+                        self._read_bytes_if_exists, old_path
+                    )
+            except OSError as exc:
+                return WriteReport(False, f"读取旧文件 {old} 失败，未完成改名：{exc}")
+            if old_content is None:
+                return WriteReport(False, f"文件不存在：{old}")
+            try:
+                version = await asyncio.to_thread(
+                    self._history.save_version,
+                    new,
+                    old_content,
+                    history.ACTION_RENAME,
+                    actor,
+                    old,
+                )
+            except OSError as exc:
+                return WriteReport(False, f"旧版本保存失败，未完成改名：{exc}")
+            moved = await asyncio.to_thread(
+                self._history.move_versions, old, new
+            )
+            try:
+                await asyncio.to_thread(old_path.unlink)
+            except OSError as exc:
+                return WriteReport(
+                    False, f"新文件 {new} 已写入，但删除旧文件 {old} 失败：{exc}"
+                )
+            self._drop_header(old)
+            await asyncio.to_thread(self._remove_index_line, old)
+            await asyncio.to_thread(self._forget_usage, old)
+            before_sha = (
+                history.content_sha1(old_content)
+                if isinstance(old_content, str)
+                else hashlib.sha1(old_content).hexdigest()
+            )
+            new_content = await asyncio.to_thread(
+                self._read_if_exists, new_path
+            ) or ""
+            self._history.record(
+                history.ACTION_RENAME,
+                new,
+                actor,
+                old,
+                before_sha,
+                history.content_sha1(new_content),
+                ts=version.ts,
+            )
+        return WriteReport(
+            True,
+            f"已改名为 {new}，旧名的 {moved + 1} 个历史版本已迁到新名下",
+        )
+
     async def purge(self, actor: str = "") -> int:
         """把整个作用域目录移进 memories/.trash-scopes/，返回在册记忆文件数。
 

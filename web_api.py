@@ -657,7 +657,8 @@ class MemoryDashboard:
 
         mode=fields：按表单字段（名称取自文件名、类型、描述、正文）生成标准格式；
         mode=raw：原样保存管理员编辑的完整文本。
-        oldFile 与 file 不同时视为改名：先写新文件、再删旧文件。
+        oldFile 与 file 不同时视为改名：先写新文件，再把旧名的历史版本迁到
+        新名下并删除旧文件（不给旧名留回收站条目）。
         baseMtime 是打开文件时的写入时间，期间文件被改过（比如模型刚写过）
         就拒绝保存，避免覆盖。
         """
@@ -705,10 +706,16 @@ class MemoryDashboard:
         report = await store.write(name, content, actor=history.ACTOR_WEBUI)
         if not report.ok:
             raise ApiError(report.message)
+        message = report.message
         if renaming:
-            await store.delete(old, actor=history.ACTOR_WEBUI)
+            renamed = await store.finalize_rename(
+                old, name, actor=history.ACTOR_WEBUI
+            )
+            if not renamed.ok:
+                raise ApiError(renamed.message)
+            message = f"{message}；{renamed.message}"
         self._changed(key)
-        return _ok({"file": name, "mtime": store.mtime(name) or 0.0}, report.message)
+        return _ok({"file": name, "mtime": store.mtime(name) or 0.0}, message)
 
     async def file_delete(self) -> dict:
         body = await _body()

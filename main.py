@@ -718,10 +718,11 @@ class MemoryBeyondPlugin(Star):
     def _can_maintain_people(
         self, umo: str, store: memstore.ScopeStore
     ) -> bool:
-        """自动遗忘扫描能否处理这个人物作用域。
+        """定期维护（自动遗忘扫描、定期整理）能否处理这个人物作用域。
 
-        共享空间里只有 edit 级成员或非成员自己的目录触发扫描；append / read
-        级成员只读不写，不该因为他们的会话让共享文件对所有人退出索引。
+        共享空间里只有 edit 级成员或非成员自己的目录触发维护；append / read
+        级成员只读不写，不该因为他们的会话让共享文件对所有人退出索引或被
+        自动改写。管理页手动发起的整理不算自动维护，不受这里限制。
         """
         if not self._store.is_shared_people_scope(store):
             return True
@@ -1513,7 +1514,12 @@ class MemoryBeyondPlugin(Star):
         if self._global_on():
             targets.append(("global", None, None))
         if self._people_on():
-            targets.append(("people", self._people_scope(umo).root.name, ""))
+            people_store = self._people_scope(umo)
+            # 与遗忘扫描、后台提取一致：共享人物空间只有 edit 级成员的会话
+            # 能触发定期自动整理，read / append 成员不会间接改写共享文件。
+            # 管理页手动发起的整理不受此限制。
+            if self._can_maintain_people(umo, people_store):
+                targets.append(("people", people_store.root.name, ""))
         due = []
         for scope, key, cache_key in targets:
             sid = tidy.scope_id(scope, key)

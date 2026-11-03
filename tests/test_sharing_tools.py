@@ -1017,6 +1017,35 @@ def test_extract_gate_depends_on_permission(tmp_path):
     assert outsider._can_extract_people("Bot-C:FriendMessage:1") is True
 
 
+def test_auto_tidy_people_target_requires_edit(tmp_path):
+    """定期自动整理共享人物空间只由 edit 级成员的会话触发。"""
+
+    async def scheduled(level):
+        plugin = make_plugin(tmp_path / level, [f"Bot-A={level}"])
+        plugin.config["auto_consolidate"] = "auto"
+        plugin._tidy_checked = {}
+        plugin._tidy_gate = asyncio.Lock()
+        plugin._tasks = set()
+        seen = []
+
+        async def fake_auto(targets, mode):
+            seen.append([(scope, key) for scope, key, _ in targets])
+
+        plugin._auto_tidy = fake_auto
+        plugin._maybe_tidy("Bot-A:FriendMessage:1", 1000.0)
+        await asyncio.sleep(0.01)
+        return seen
+
+    edit_batches = run(scheduled("edit"))
+    assert ("people", pkg_sharing.SHARED_KEY) in edit_batches[0]
+    for level in ("append", "read"):
+        batches = run(scheduled(level))
+        # 会话作用域照旧；共享人物空间不排入
+        assert batches and all(
+            scope == "session" for batch in batches for scope, _ in batch
+        )
+
+
 def test_background_extraction_writes_people_only_for_edit(tmp_path):
     for level, expect_shared in (("edit", True), ("append", False), ("read", False)):
         plugin = make_plugin(tmp_path / level, [f"Bot-A={level}"])
