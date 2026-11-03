@@ -754,11 +754,16 @@ class ScopeStore:
         async with self._lock:
             # 同名文件若已被遗忘，把它当作上一版：created 戳得以延续，
             # 新内容落盘后那份遗忘副本随之作废
-            active = await asyncio.to_thread(self._read_if_exists, path)
-            previous = active
-            if previous is None:
-                previous = await asyncio.to_thread(
-                    self._read_if_exists, self._forgotten_path(name)
+            try:
+                active = await asyncio.to_thread(self._read_for_update, path)
+                previous = active
+                if previous is None:
+                    previous = await asyncio.to_thread(
+                        self._read_for_update, self._forgotten_path(name)
+                    )
+            except OSError as exc:
+                return WriteReport(
+                    False, f"读取 {name} 的现有内容失败，未写入：{exc}"
                 )
             return await self._commit(
                 name,
@@ -778,6 +783,17 @@ class ScopeStore:
             return path.read_text("utf-8") if path.is_file() else None
         except OSError:
             return None
+
+    @staticmethod
+    def _read_for_update(path: Path) -> str | None:
+        """覆盖前读取旧内容：不存在返回 None；存在但读不出来抛 OSError。
+
+        与 _read_if_exists 不同，这里绝不把"读失败"当成"没有旧文件"，
+        否则会在没有历史副本的情况下把读不出来的内容直接覆盖掉。
+        """
+        if not path.is_file():
+            return None
+        return path.read_text("utf-8")
 
     async def edit(
         self,
@@ -1229,7 +1245,9 @@ class ScopeStore:
                 return WriteReport(False, f"删除前保存到回收站失败，未删除 {name}：{exc}")
             await asyncio.to_thread(self._forget_usage, name)
             await asyncio.to_thread(self._prune_forgotten_dir)
-        return WriteReport(True, f"已彻底删除 {name}")
+        return WriteReport(
+            True, f"已把 {name} 移入回收站，可在保留期内恢复"
+        )
 
     def _discard_forgotten(
         self, name: str, actor: str = "", source: str = ""
@@ -1290,7 +1308,10 @@ class ScopeStore:
             if content is None:
                 return WriteReport(False, f"没有这个历史版本：{version}")
             path = self.root / name
-            current = await asyncio.to_thread(self._read_if_exists, path)
+            try:
+                current = await asyncio.to_thread(self._read_for_update, path)
+            except OSError as exc:
+                return WriteReport(False, f"读取现有 {name} 失败，未恢复：{exc}")
             saved = None
             if current is not None:
                 try:
@@ -1341,7 +1362,12 @@ class ScopeStore:
             if info is None or content is None:
                 return WriteReport(False, "回收站里没有这个条目")
             path = self.root / info.file
-            current = await asyncio.to_thread(self._read_if_exists, path)
+            try:
+                current = await asyncio.to_thread(self._read_for_update, path)
+            except OSError as exc:
+                return WriteReport(
+                    False, f"读取现有 {info.file} 失败，未恢复：{exc}"
+                )
             saved = None
             if current is not None:
                 try:
@@ -1401,14 +1427,25 @@ class ScopeStore:
         async with self._lock:
             path = self.root / name
             forgotten = self._forgotten_path(name)
-            active = await asyncio.to_thread(self._read_if_exists, path)
-            dormant = await asyncio.to_thread(self._read_if_exists, forgotten)
-            if active is not None:
+            active_present = path.is_file()
+            dormant_present = forgotten.is_file()
+            # 读正文只为了审计里记哈希；读不出来也要能删（这是管理员授权的彻底删除）
+            active = (
+                await asyncio.to_thread(self._read_if_exists, path)
+                if active_present
+                else None
+            )
+            dormant = (
+                await asyncio.to_thread(self._read_if_exists, forgotten)
+                if dormant_present
+                else None
+            )
+            if active_present:
                 try:
                     await asyncio.to_thread(path.unlink)
                 except OSError as exc:
                     return WriteReport(False, f"删除 {name} 失败：{exc}")
-            if dormant is not None:
+            if dormant_present:
                 try:
                     await asyncio.to_thread(forgotten.unlink)
                 except OSError as exc:
@@ -1420,11 +1457,18 @@ class ScopeStore:
             removed_trash = await asyncio.to_thread(
                 self._history.remove_trash_for, name
             )
+            removed_archives = await asyncio.to_thread(
+                self._history.remove_from_archives,
+                self._scopes_trash_dir,
+                self._scope_label,
+                name,
+            )
             if (
-                active is None
-                and dormant is None
+                not active_present
+                and not dormant_present
                 and not removed_history
                 and not removed_trash
+                and not removed_archives
             ):
                 return WriteReport(False, f"没有找到 {name}")
             self._drop_header(name)
@@ -1443,7 +1487,7 @@ class ScopeStore:
         return WriteReport(
             True,
             f"已彻底删除 {name}（含 {removed_history} 个历史版本、"
-            f"{removed_trash} 个回收站条目）",
+            f"{removed_trash} 个回收站条目、{removed_archives} 个作用域归档副本）",
         )
 
     # ------------------------------------------------------------ 原样导入导出
@@ -1581,7 +1625,13 @@ class ScopeStore:
                 )
             else:
                 target = self.root / name
-                old = self._read_if_exists(target)
+                try:
+                    old = self._read_for_update(target)
+                except OSError:
+                    results[-1] = ImportResult(
+                        name, IMPORT_INVALID, "读取现有文件失败，未导入"
+                    )
+                    continue
                 version = None
                 if old is not None:
                     try:
@@ -1638,8 +1688,12 @@ class ScopeStore:
             return IMPORT_INVALID, "内容为空"
         if len(entry.content.encode("utf-8")) > MAX_FILE_BYTES:
             return IMPORT_INVALID, f"超过单文件上限 {MAX_FILE_BYTES // 1024}KB"
-        active = self._read_if_exists(self.root / name)
-        dormant = self._read_if_exists(self._forgotten_path(name))
+        try:
+            active = self._read_for_update(self.root / name)
+            dormant = self._read_for_update(self._forgotten_path(name))
+        except OSError:
+            # 读不出旧内容就不能导入覆盖：否则会在没有副本的情况下丢内容
+            return IMPORT_INVALID, "读取现有文件失败，未导入"
         if entry.forgotten and active is not None:
             # 目标这份正在用，已遗忘的导入件不去顶替它
             if active == entry.content:
@@ -1904,6 +1958,9 @@ class MemoryStore:
     ):
         self.base_dir = base_dir
         self._scopes: dict[Path, ScopeStore] = {}
+        # 作用域对象可能同时被事件循环、WebUI 线程与保留期清理线程取用；
+        # 同一目录只能有一个 ScopeStore（串行写入的锁挂在它上面）
+        self._scopes_lock = threading.RLock()
         self.history_keep_days = max(0, int(history_keep_days))
         self.trash_keep_days = max(0, int(trash_keep_days))
 
@@ -1914,7 +1971,9 @@ class MemoryStore:
             self.trash_keep_days = max(0, int(trash_keep_days))
         except (TypeError, ValueError):
             return
-        for store in self._scopes.values():
+        with self._scopes_lock:
+            stores = list(self._scopes.values())
+        for store in stores:
             store.set_retention(self.history_keep_days, self.trash_keep_days)
 
     def _scope_label(self, path: Path) -> str:
@@ -1926,15 +1985,16 @@ class MemoryStore:
 
     def _scope(self, path: Path) -> ScopeStore:
         path = path.resolve()
-        store = self._scopes.get(path)
-        if store is None:
-            store = ScopeStore(
-                path,
-                scope_label=self._scope_label(path),
-                scopes_trash_dir=self.base_dir / history.SCOPE_TRASH_DIRNAME,
-            )
-            store.set_retention(self.history_keep_days, self.trash_keep_days)
-            self._scopes[path] = store
+        with self._scopes_lock:
+            store = self._scopes.get(path)
+            if store is None:
+                store = ScopeStore(
+                    path,
+                    scope_label=self._scope_label(path),
+                    scopes_trash_dir=self.base_dir / history.SCOPE_TRASH_DIRNAME,
+                )
+                store.set_retention(self.history_keep_days, self.trash_keep_days)
+                self._scopes[path] = store
         return store
 
     def global_scope(self) -> ScopeStore:
@@ -1976,9 +2036,8 @@ class MemoryStore:
             p.name for p in root.iterdir() if p.is_dir() and is_scope_key(p.name)
         )
 
-    def cleanup_history(self, now: float | None = None) -> dict[str, dict[str, int]]:
-        """按保留期清理各作用域的历史与回收站（同步方法，放进线程执行）。"""
-        now = time.time() if now is None else now
+    def scopes_for_cleanup(self) -> list[ScopeStore]:
+        """参与保留期清理的作用域；应在事件循环里取好再进工作线程。"""
         stores = [self.global_scope()]
         for key in self.session_keys():
             store = self.session_scope_by_key(key)
@@ -1988,6 +2047,20 @@ class MemoryStore:
             store = self.people_scope_by_key(key)
             if store is not None:
                 stores.append(store)
+        return stores
+
+    def cleanup_history(
+        self,
+        now: float | None = None,
+        scopes: list[ScopeStore] | None = None,
+    ) -> dict[str, dict[str, int]]:
+        """按保留期清理各作用域的历史与回收站（同步方法，放进线程执行）。
+
+        scopes 由调用方在事件循环里用 scopes_for_cleanup() 取好；不传时
+        在这里现取（_scope 有锁，也不会产生同一目录的两个实例）。
+        """
+        now = time.time() if now is None else now
+        stores = self.scopes_for_cleanup() if scopes is None else list(scopes)
         result: dict[str, dict[str, int]] = {}
         for store in stores:
             removed = store.cleanup_history(now)

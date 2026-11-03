@@ -359,7 +359,9 @@ class MemoryBeyondPlugin(Star):
 
     async def _cleanup_history(self, now: float) -> None:
         try:
-            await asyncio.to_thread(self._store.cleanup_history, now)
+            # 作用域对象在事件循环里取好再进线程：同一目录只能有一个实例
+            scopes = self._store.scopes_for_cleanup()
+            await asyncio.to_thread(self._store.cleanup_history, now, scopes)
         except Exception:  # noqa: BLE001 - 清理失败不能影响对话
             logger.warning(LOG_PREFIX + "历史与回收站清理失败", exc_info=True)
 
@@ -902,7 +904,9 @@ class MemoryBeyondPlugin(Star):
                 sender_id, self._mentioned_ids(event), query
             )
             if forced and self._forgetting_on():
-                await self._remember_identity(scopes, forced)
+                await self._remember_identity(
+                    scopes, forced, self._event_actor(event)
+                )
             candidates: list[recall.Candidate] = []
             stores: dict[str, memstore.ScopeStore] = {}
             for label, store in scopes:
@@ -944,7 +948,10 @@ class MemoryBeyondPlugin(Star):
             return None
 
     async def _remember_identity(
-        self, scopes: list[tuple[str, memstore.ScopeStore]], forced: list[str]
+        self,
+        scopes: list[tuple[str, memstore.ScopeStore]],
+        forced: list[str],
+        actor: str = "",
     ) -> None:
         """身份必选的人物文件若已被遗忘，这个人又出现了——先恢复再召回。"""
         for label, store in scopes:
@@ -953,7 +960,7 @@ class MemoryBeyondPlugin(Star):
             for name in forced:
                 if store.exists(name) or not store.has_forgotten(name):
                     continue
-                report = await store.restore(name)
+                report = await store.restore(name, actor=actor)
                 if report.ok:
                     logger.info(
                         LOG_PREFIX + f"{label} 记忆 {name} 已从遗忘中恢复（此人再次出现）"
@@ -1778,7 +1785,7 @@ class MemoryBeyondPlugin(Star):
         restored = False
         if content is None and self._forgetting_on() and store.has_forgotten(file):
             # 模型主动读一条已遗忘的记忆：读取即恢复在册
-            report = await store.restore(file)
+            report = await store.restore(file, actor=self._event_actor(event))
             if report.ok:
                 content = await store.read(file)
                 restored = True

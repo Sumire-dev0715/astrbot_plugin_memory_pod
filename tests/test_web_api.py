@@ -307,8 +307,11 @@ def test_file_save_create_edit_rename(plugin, dash):
 
     # 改名：先写新文件再删旧文件，索引跟着变
     base = store.mtime("user-1.md")
+    renamed_from = asyncio.run(store.read("user-1.md"))
     ok(save(dash, file="user-2.md", oldFile="user-1.md", description="改名", body="b", baseMtime=base))
     assert store.list_files() == ["user-2.md"]
+    renamed = [e for e in store.trash_entries() if e.file == "user-1.md"]
+    assert len(renamed) == 1 and store.read_trash(renamed[0].entry) == renamed_from
     report = store.index_report()
     assert report.missing == [] and report.dangling == []
     # 改名的目标已存在同样被拒

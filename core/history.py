@@ -33,6 +33,8 @@ from pathlib import Path
 HISTORY_DIRNAME = ".history"
 TRASH_DIRNAME = ".trash"
 AUDIT_FILENAME = ".audit.jsonl"
+# 与 memstore.FORGOTTEN_DIRNAME 一致：整作用域归档里的已遗忘子目录
+FORGOTTEN_DIRNAME = "forgotten"
 # 被 purge 的整个作用域目录挪到 memories/.trash-scopes/<层>-<键>-<时间>/
 SCOPE_TRASH_DIRNAME = ".trash-scopes"
 
@@ -74,6 +76,8 @@ _VERSION_ID_RE = re.compile(r"^(\d{8}-\d{6}-\d{3})-([A-Za-z][A-Za-z0-9_-]*)$")
 _TRASH_NAME_RE = re.compile(
     r"^(\d{8}-\d{6}-\d{3})__([A-Za-z0-9][A-Za-z0-9._-]{0,120}\.md)$"
 )
+# .trash-scopes 归档名：<层>-<键>-<时间>；键本身可能含连字符，按末尾时间戳切开
+_ARCHIVE_NAME_RE = re.compile(r"^(.*)-(\d{8}-\d{6}-\d{3})$")
 
 # 文件名像手动备份时，写入回执提示不需要
 _BACKUP_MARKERS = ("backup", "bak", "备份", "副本")
@@ -91,9 +95,13 @@ def _stamp(ts: float) -> str:
     return f"{head}-{millis % 1000:03d}"
 
 
-def _parse_stamp(text: str) -> float:
-    base = time.mktime(time.strptime(text[:15], _STAMP_FORMAT))
-    return base + int(text[16:19]) / 1000
+def _parse_stamp(text: str) -> float | None:
+    """文件名里的时间戳；日期非法（手工改名、损坏副本）返回 None。"""
+    try:
+        base = time.mktime(time.strptime(text[:15], _STAMP_FORMAT))
+        return base + int(text[16:19]) / 1000
+    except (ValueError, OverflowError):
+        return None
 
 
 def content_sha1(content: str) -> str:
@@ -172,7 +180,9 @@ class HistoryLog:
 
     def __init__(self, root: Path):
         self.root = Path(root)
-        self._lock = threading.Lock()
+        # 历史与回收站的写、删、清理共用一把可重入锁：清理线程不能与
+        # save_version / move_to_trash 交错删掉刚建出来的目录
+        self._lock = threading.RLock()
 
     # ------------------------------------------------------------ 路径
 
@@ -264,17 +274,18 @@ class HistoryLog:
         ts = _now() if ts is None else ts
         ts = round(ts * 1000) / 1000
         folder = self.history_root / file
-        while True:
-            version = f"{_stamp(ts)}-{action}"
-            path = folder / f"{version}.md"
-            if not path.exists():
-                break
-            ts = round(ts + 0.001, 3)
-        _write_atomic(path, content)
-        try:
-            st = path.stat()
-        except OSError:
-            st = None
+        with self._lock:
+            while True:
+                version = f"{_stamp(ts)}-{action}"
+                path = folder / f"{version}.md"
+                if not path.exists():
+                    break
+                ts = round(ts + 0.001, 3)
+            _write_atomic(path, content)
+            try:
+                st = path.stat()
+            except OSError:
+                st = None
         return HistoryVersion(
             file=file,
             version=version,
@@ -308,6 +319,9 @@ class HistoryLog:
             except OSError:
                 continue
             ts = _parse_stamp(match.group(1))
+            if ts is None:
+                # 名称像版本文件但日期非法：不参与列表，也不在清理时误删
+                continue
             row = audit.get((file, match.group(2), match.group(1)), {})
             result.append(
                 HistoryVersion(
@@ -342,19 +356,31 @@ class HistoryLog:
             return None
 
     def remove_versions(self, file: str) -> int:
-        """彻底删除某个文件的全部历史版本，返回删掉的版本数。"""
+        """彻底删除某个文件的全部历史版本，返回真正删掉的版本数。"""
         folder = self.history_root / file
-        if not folder.is_dir():
-            return 0
-        count = 0
+        with self._lock:
+            if not folder.is_dir():
+                return 0
+            count = self._count_versions(folder)
+            try:
+                shutil.rmtree(folder)
+            except OSError:
+                pass
+            if not folder.exists():
+                return count
+            # rmtree 可能失败或只删了一部分：按残留重新算，绝不虚报
+            return max(0, count - self._count_versions(folder))
+
+    @staticmethod
+    def _count_versions(folder: Path) -> int:
         try:
-            for path in folder.iterdir():
-                if path.is_file() and path.name.endswith(".md"):
-                    count += 1
+            return sum(
+                1
+                for path in folder.iterdir()
+                if path.is_file() and path.name.endswith(".md")
+            )
         except OSError:
-            pass
-        shutil.rmtree(folder, ignore_errors=True)
-        return count
+            return 0
 
     # ------------------------------------------------------------ 回收站
 
@@ -385,6 +411,9 @@ class HistoryLog:
             except OSError:
                 continue
             ts = _parse_stamp(match.group(1))
+            if ts is None:
+                # 日期非法的陌生文件：不展示，也不在清理时误删
+                continue
             row = audit.get((match.group(2), match.group(1)), {})
             result.append(
                 TrashEntry(
@@ -433,16 +462,17 @@ class HistoryLog:
         """把文件移进回收站并记审计；返回回收站条目。"""
         before_sha1 = _file_sha1(path)
         ts = round(_now() * 1000) / 1000
-        while True:
-            entry = f"{_stamp(ts)}__{file}"
-            dest = self.trash_root / entry
-            if not dest.exists():
-                break
-            ts = round(ts + 0.001, 3)
-        self.trash_root.mkdir(parents=True, exist_ok=True)
-        os.replace(path, dest)
-        st = dest.stat()
-        self.record(action, file, actor, source, before_sha1, "", ts=ts)
+        with self._lock:
+            while True:
+                entry = f"{_stamp(ts)}__{file}"
+                dest = self.trash_root / entry
+                if not dest.exists():
+                    break
+                ts = round(ts + 0.001, 3)
+            self.trash_root.mkdir(parents=True, exist_ok=True)
+            os.replace(path, dest)
+            st = dest.stat()
+            self.record(action, file, actor, source, before_sha1, "", ts=ts)
         return TrashEntry(
             entry=entry,
             file=file,
@@ -460,11 +490,12 @@ class HistoryLog:
         if not entry:
             return False
         path = self.trash_root / entry
-        try:
-            path.unlink()
-        except OSError:
-            return False
-        _rmdir_if_empty(self.trash_root)
+        with self._lock:
+            try:
+                path.unlink()
+            except OSError:
+                return False
+            _rmdir_if_empty(self.trash_root)
         return True
 
     def delete_entry(self, entry: str, actor: str = "") -> bool:
@@ -474,42 +505,80 @@ class HistoryLog:
             return False
         path = self.trash_root / entry
         before_sha1 = _file_sha1(path)
-        try:
-            path.unlink()
-        except OSError:
-            return False
-        match = _TRASH_NAME_RE.match(entry)
-        self.record(
-            ACTION_DELETE_TRASH,
-            match.group(2) if match else entry,
-            actor,
-            "",
-            before_sha1,
-            "",
-        )
-        _rmdir_if_empty(self.trash_root)
+        with self._lock:
+            try:
+                path.unlink()
+            except OSError:
+                return False
+            match = _TRASH_NAME_RE.match(entry)
+            self.record(
+                ACTION_DELETE_TRASH,
+                match.group(2) if match else entry,
+                actor,
+                "",
+                before_sha1,
+                "",
+            )
+            _rmdir_if_empty(self.trash_root)
         return True
 
     def remove_trash_for(self, file: str) -> int:
-        """彻底删除某个文件的全部回收站条目，返回删掉的条数。"""
-        if not self.trash_root.is_dir():
+        """彻底删除某个文件的全部回收站条目，返回真正删掉的条数。"""
+        with self._lock:
+            if not self.trash_root.is_dir():
+                return 0
+            count = 0
+            try:
+                entries = list(self.trash_root.iterdir())
+            except OSError:
+                return 0
+            for path in entries:
+                match = _TRASH_NAME_RE.match(path.name)
+                if match is None or match.group(2) != file or not path.is_file():
+                    continue
+                try:
+                    path.unlink()
+                    count += 1
+                except OSError:
+                    continue
+            _rmdir_if_empty(self.trash_root)
+            return count
+
+    def remove_from_archives(
+        self, scopes_dir: Path, scope_label: str, file: str
+    ) -> int:
+        """从本作用域的 .trash-scopes 归档里删掉这个文件的全部副本。
+
+        只匹配 `<scope_label>-<时间>` 的归档，不会碰别的会话或别的平台里
+        同名的文件；用于管理员要求彻底遗忘时连同此前 purge 的备份一起清掉。
+        """
+        if not scopes_dir.is_dir():
             return 0
-        count = 0
         try:
-            entries = list(self.trash_root.iterdir())
+            archives = []
+            for path in scopes_dir.iterdir():
+                if not path.is_dir():
+                    continue
+                match = _ARCHIVE_NAME_RE.match(path.name)
+                if match is not None and match.group(1) == scope_label:
+                    archives.append(path)
         except OSError:
             return 0
-        for path in entries:
-            match = _TRASH_NAME_RE.match(path.name)
-            if match is None or match.group(2) != file or not path.is_file():
-                continue
-            try:
-                path.unlink()
-                count += 1
-            except OSError:
-                continue
-        _rmdir_if_empty(self.trash_root)
-        return count
+        removed = 0
+        for archive in archives:
+            for path in (archive / file, archive / FORGOTTEN_DIRNAME / file):
+                try:
+                    if path.is_file():
+                        path.unlink()
+                        removed += 1
+                except OSError:
+                    continue
+            _rmdir_if_empty(archive / FORGOTTEN_DIRNAME)
+            other = HistoryLog(archive)
+            removed += other.remove_versions(file)
+            removed += other.remove_trash_for(file)
+            _rmdir_if_empty(archive / HISTORY_DIRNAME)
+        return removed
 
     # ------------------------------------------------------------ 保留期清理
 
@@ -524,54 +593,59 @@ class HistoryLog:
         now = _now() if now is None else now
         removed_versions = 0
         removed_trash = 0
-        if history_keep_days > 0 and self.history_root.is_dir():
-            cutoff = now - history_keep_days * DAY
-            try:
-                folders = list(self.history_root.iterdir())
-            except OSError:
-                folders = []
-            for folder in folders:
-                if not folder.is_dir():
-                    continue
-                versions: list[tuple[float, Path]] = []
+        with self._lock:
+            if history_keep_days > 0 and self.history_root.is_dir():
+                cutoff = now - history_keep_days * DAY
                 try:
-                    for path in folder.iterdir():
-                        if not path.name.endswith(".md"):
-                            continue
-                        match = _VERSION_ID_RE.match(path.name[: -len(".md")])
-                        if match is not None and path.is_file():
-                            versions.append((_parse_stamp(match.group(1)), path))
+                    folders = list(self.history_root.iterdir())
                 except OSError:
-                    continue
-                versions.sort(key=lambda item: item[0], reverse=True)
-                for ts, path in versions[MIN_KEEP_VERSIONS:]:
-                    if ts >= cutoff:
+                    folders = []
+                for folder in folders:
+                    if not folder.is_dir():
+                        continue
+                    versions: list[tuple[float, Path]] = []
+                    try:
+                        for path in folder.iterdir():
+                            if not path.name.endswith(".md"):
+                                continue
+                            match = _VERSION_ID_RE.match(path.name[: -len(".md")])
+                            if match is None or not path.is_file():
+                                continue
+                            ts = _parse_stamp(match.group(1))
+                            if ts is not None:
+                                versions.append((ts, path))
+                    except OSError:
+                        continue
+                    versions.sort(key=lambda item: item[0], reverse=True)
+                    for ts, path in versions[MIN_KEEP_VERSIONS:]:
+                        if ts >= cutoff:
+                            continue
+                        try:
+                            path.unlink()
+                            removed_versions += 1
+                        except OSError:
+                            continue
+                    _rmdir_if_empty(folder)
+                _rmdir_if_empty(self.history_root)
+            if trash_keep_days > 0 and self.trash_root.is_dir():
+                cutoff = now - trash_keep_days * DAY
+                try:
+                    entries = list(self.trash_root.iterdir())
+                except OSError:
+                    entries = []
+                for path in entries:
+                    match = _TRASH_NAME_RE.match(path.name)
+                    if match is None or not path.is_file():
+                        continue
+                    ts = _parse_stamp(match.group(1))
+                    if ts is None or ts >= cutoff:
                         continue
                     try:
                         path.unlink()
-                        removed_versions += 1
+                        removed_trash += 1
                     except OSError:
                         continue
-                _rmdir_if_empty(folder)
-            _rmdir_if_empty(self.history_root)
-        if trash_keep_days > 0 and self.trash_root.is_dir():
-            cutoff = now - trash_keep_days * DAY
-            try:
-                entries = list(self.trash_root.iterdir())
-            except OSError:
-                entries = []
-            for path in entries:
-                match = _TRASH_NAME_RE.match(path.name)
-                if match is None or not path.is_file():
-                    continue
-                if _parse_stamp(match.group(1)) >= cutoff:
-                    continue
-                try:
-                    path.unlink()
-                    removed_trash += 1
-                except OSError:
-                    continue
-            _rmdir_if_empty(self.trash_root)
+                _rmdir_if_empty(self.trash_root)
         return {"versions": removed_versions, "trash": removed_trash}
 
 

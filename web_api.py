@@ -188,7 +188,7 @@ class MemoryDashboard:
             ("file/delete", "POST", self.file_delete, "记忆管理：删除记忆文件"),
             ("file/forget", "POST", self.file_forget, "记忆管理：遗忘记忆文件"),
             ("forgotten/restore", "POST", self.forgotten_restore, "记忆管理：恢复已遗忘的文件"),
-            ("forgotten/delete", "POST", self.forgotten_delete, "记忆管理：彻底删除已遗忘的文件"),
+            ("forgotten/delete", "POST", self.forgotten_delete, "记忆管理：删除已遗忘的文件（移入回收站）"),
             ("index/save", "POST", self.index_save, "记忆管理：保存索引"),
             ("index/rebuild", "POST", self.index_rebuild, "记忆管理：重建索引"),
             ("session/reset", "POST", self.session_reset, "记忆管理：重置压缩状态"),

@@ -2,6 +2,8 @@
 
 import asyncio
 import json
+import os
+import threading
 
 import pytest
 
@@ -10,6 +12,7 @@ from core.archive import ArchiveStore
 from core.consolidate import Operation
 from core.memstore import (
     CONFLICT_OVERWRITE,
+    IMPORT_INVALID,
     INDEX_FILENAME,
     ImportEntry,
     MemoryStore,
@@ -61,6 +64,38 @@ def test_write_overwrite_keeps_old_version_and_restores(store):
             for v in store.history_versions("a.md")
         )
 
+    run(scenario())
+
+
+def test_write_refuses_unreadable_existing_file(store):
+    async def scenario():
+        await store.write("a.md", memory("a", "甲", "第一版"), actor="aiocqhttp")
+        path = store.root / "a.md"
+        path.chmod(0o000)
+        try:
+            report = await store.write(
+                "a.md", memory("a", "甲", "第二版"), actor="aiocqhttp"
+            )
+        finally:
+            path.chmod(0o644)
+        assert not report.ok and "读取" in report.message
+        assert "第一版" in path.read_text("utf-8")
+        assert store.history_versions("a.md") == []
+
+        # 导入覆盖同样不能把读不出来的旧内容直接顶掉
+        path.chmod(0o000)
+        try:
+            results = await store.import_files(
+                [ImportEntry("a.md", memory("a", "甲", "导入版"))],
+                CONFLICT_OVERWRITE,
+            )
+        finally:
+            path.chmod(0o644)
+        assert results[0].outcome == IMPORT_INVALID
+        assert "第一版" in path.read_text("utf-8")
+
+    if getattr(os, "geteuid", lambda: -1)() == 0:  # root 不受权限位限制
+        pytest.skip("以 root 运行时无法用权限位模拟读失败")
     run(scenario())
 
 
@@ -141,7 +176,8 @@ def test_delete_forgotten_keeps_copy_in_trash(store):
         await store.write("old.md", memory("old", "旧"), actor="aiocqhttp")
         await store.forget("old.md", actor="webui")
         forgotten = await store.read_forgotten("old.md")
-        assert (await store.delete_forgotten("old.md", actor="webui")).ok
+        report = await store.delete_forgotten("old.md", actor="webui")
+        assert report.ok and "回收站" in report.message
         entries = [e for e in store.trash_entries() if e.file == "old.md"]
         assert len(entries) == 1
         assert entries[0].action == history.ACTION_DELETE_FORGOTTEN
@@ -287,6 +323,67 @@ def test_purge_moves_whole_scope_to_trash_scopes(tmp_path):
     run(scenario())
 
 
+def test_memory_store_returns_one_scope_per_directory_across_threads(tmp_path):
+    store = MemoryStore(tmp_path / "memories")
+    barrier = threading.Barrier(8)
+    seen: list = []
+
+    def fetch():
+        barrier.wait()
+        seen.append(store.session_scope(UMO))
+
+    threads = [threading.Thread(target=fetch) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert len({id(scope) for scope in seen}) == 1
+
+
+def test_memory_store_retention_safe_while_scopes_created(tmp_path):
+    store = MemoryStore(tmp_path / "memories")
+    errors: list[BaseException] = []
+
+    def create():
+        for i in range(300):
+            store.session_scope(f"session-{i}")
+
+    def retain():
+        try:
+            for _ in range(3000):
+                store.set_retention(90, 90)
+        except BaseException as exc:  # noqa: BLE001 - 记录测试里的并发异常
+            errors.append(exc)
+
+    create_thread = threading.Thread(target=create)
+    retain_thread = threading.Thread(target=retain)
+    create_thread.start()
+    retain_thread.start()
+    create_thread.join()
+    retain_thread.join()
+    assert errors == []
+
+
+def test_memory_store_cleanup_history_covers_all_scopes(tmp_path, monkeypatch):
+    store = MemoryStore(tmp_path / "memories")
+    session = store.session_scope(UMO)
+    people = store.people_scope("aiocqhttp")
+    base = 1_800_000_000.0
+    monkeypatch.setattr(history, "_now", lambda: base)
+    for scope in (session, people):
+        for i in range(13):
+            run(scope.write("a.md", memory("a", "甲", f"第 {i} 版")))
+    assert len(session.history_versions("a.md")) == 12
+    assert len(people.history_versions("a.md")) == 12
+
+    store.set_retention(30, 30)
+    scopes = store.scopes_for_cleanup()
+    removed = store.cleanup_history(now=base + 100 * DAY, scopes=scopes)
+    assert sum(item["versions"] for item in removed.values()) == 4
+    assert len(session.history_versions("a.md")) == history.MIN_KEEP_VERSIONS
+    assert len(people.history_versions("a.md")) == history.MIN_KEEP_VERSIONS
+
+
 # ---------------------------------------------------------------- 隔离
 
 
@@ -383,7 +480,103 @@ def test_trash_cleanup_respects_keep_days(store, monkeypatch):
     assert len(store.trash_entries()) == 1
 
 
+def test_cleanup_waits_for_history_lock(store):
+    log = store._history
+    started = threading.Event()
+    done = threading.Event()
+
+    def worker():
+        started.set()
+        log.cleanup(1, 1, now=1_900_000_000.0)
+        done.set()
+
+    log._lock.acquire()
+    try:
+        thread = threading.Thread(target=worker)
+        thread.start()
+        assert started.wait(1)
+        # 清理拿不到历史锁就不能开始，避免与正在写版本/移回收站的操作交错
+        assert not done.wait(0.1)
+    finally:
+        log._lock.release()
+    thread.join(2)
+    assert done.is_set()
+
+
+def test_malformed_archive_names_do_not_break_listing_or_cleanup(store):
+    versions = store.root / history.HISTORY_DIRNAME / "a.md"
+    versions.mkdir(parents=True, exist_ok=True)
+    bad_version = versions / "99999999-999999-999-write.md"
+    bad_version.write_text("坏的版本文件", "utf-8")
+    trash = store.root / history.TRASH_DIRNAME
+    trash.mkdir(parents=True, exist_ok=True)
+    bad_trash = trash / "99999999-999999-999__a.md"
+    bad_trash.write_text("坏的回收站文件", "utf-8")
+
+    assert store.history_versions("a.md") == []
+    assert store.trash_entries() == []
+    store.set_retention(1, 1)
+    # 日期非法既不能让清理抛错，也不能被误判成过期删掉
+    assert store.cleanup_history(now=1_900_000_000.0, force=True) == {
+        "versions": 0,
+        "trash": 0,
+    }
+    assert bad_version.is_file() and bad_trash.is_file()
+
+
+def test_remove_versions_counts_only_real_deletions(store, monkeypatch):
+    run(store.write("a.md", memory("a", "甲", "第一版")))
+    run(store.write("a.md", memory("a", "甲", "第二版")))
+    log = store._history
+    with monkeypatch.context() as patch:
+        # 模拟 rmtree 失败：版本文件还在，就不能报告已删除
+        patch.setattr(history.shutil, "rmtree", lambda *args, **kwargs: None)
+        assert log.remove_versions("a.md") == 0
+    assert log.remove_versions("a.md") == 1
+
+
 # ---------------------------------------------------------------- 彻底删除
+
+
+def test_delete_file_completely_clears_purged_scope_archives(tmp_path):
+    store = MemoryStore(tmp_path / "memories").session_scope(UMO)
+
+    async def scenario():
+        await store.write("a.md", memory("a", "甲", "第一版"), actor="aiocqhttp")
+        await store.write("a.md", memory("a", "甲", "第二版"), actor="aiocqhttp")
+        await store.purge(actor="transfer")
+        archived = next((tmp_path / "memories" / ".trash-scopes").iterdir())
+        assert (archived / "a.md").is_file()
+        assert (archived / history.HISTORY_DIRNAME / "a.md").is_dir()
+
+        await store.write("a.md", memory("a", "甲", "purge 之后又写的"), actor="aiocqhttp")
+        report = await store.delete_file_completely("a.md", actor="webui")
+        assert report.ok and "归档副本" in report.message
+        assert not (archived / "a.md").exists()
+        assert not (archived / history.HISTORY_DIRNAME / "a.md").exists()
+        assert store.list_files() == []
+
+    run(scenario())
+
+
+def test_delete_file_completely_does_not_touch_other_scope_archives(tmp_path):
+    store = MemoryStore(tmp_path / "memories")
+    first = store.session_scope("a")
+    second = store.session_scope("a-b")
+
+    async def scenario():
+        for scope in (first, second):
+            await scope.write("a.md", memory("a", "甲"), actor="aiocqhttp")
+            await scope.purge(actor="transfer")
+        archives = list((tmp_path / "memories" / ".trash-scopes").iterdir())
+        assert len(archives) == 2
+
+        assert (await first.delete_file_completely("a.md", actor="webui")).ok
+        remaining = [p for p in archives if (p / "a.md").is_file()]
+        assert len(remaining) == 1
+        assert remaining[0].name.startswith("session-a-b-")
+
+    run(scenario())
 
 
 def test_delete_file_completely_removes_history_and_trash(store):
@@ -420,6 +613,24 @@ def test_delete_file_completely_removes_forgotten_copy(store):
     run(scenario())
 
 
+def test_delete_file_completely_removes_unreadable_active(store):
+    async def scenario():
+        await store.write("a.md", memory("a", "甲"), actor="aiocqhttp")
+        path = store.root / "a.md"
+        path.chmod(0o000)
+        try:
+            report = await store.delete_file_completely("a.md", actor="webui")
+        finally:
+            if path.exists():
+                path.chmod(0o644)
+        assert report.ok
+        assert not path.exists()
+
+    if getattr(os, "geteuid", lambda: -1)() == 0:
+        pytest.skip("以 root 运行时无法用权限位模拟读失败")
+    run(scenario())
+
+
 # ---------------------------------------------------------------- 审计
 
 
@@ -437,6 +648,23 @@ def test_delete_file_completely_removes_forgotten_copy(store):
 )
 def test_looks_like_manual_backup(name, expected):
     assert history.looks_like_manual_backup(name) is expected
+
+
+def test_restore_audit_records_actor(store):
+    async def scenario():
+        await store.write("a.md", memory("a", "甲"), actor="aiocqhttp")
+        await store.forget("a.md", actor="webui")
+        assert (await store.restore("a.md", actor="aiocqhttp")).ok
+        rows = [
+            json.loads(line)
+            for line in (store.root / history.AUDIT_FILENAME)
+            .read_text("utf-8")
+            .splitlines()
+        ]
+        assert rows[-1]["action"] == history.ACTION_RESTORE
+        assert rows[-1]["actor"] == "aiocqhttp"
+
+    run(scenario())
 
 
 def test_audit_records_every_change(store):
