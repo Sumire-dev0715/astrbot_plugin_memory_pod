@@ -1420,7 +1420,8 @@ class MemoryDashboard:
         # 的整理覆盖。导入不碰目标自己的待整理对话（那是另一段内容）。
         for item in scopes:
             await self._stop_pending(item.ref)
-        reports = await self.transfer.import_bundle(scopes, policy)
+        async with self._background_lock():
+            reports = await self.transfer.import_bundle(scopes, policy)
         for item in scopes:
             self._changed_ref(item.ref)
             await self._drop_tidy_pending(item.ref)
@@ -1469,16 +1470,18 @@ class MemoryDashboard:
             # 目标会话的在途整理先停掉，免得它在搬动结果之后又写一遍；
             # 目标自己的待整理对话保留，copy 模式尤其不能连带丢掉
             await self._stop_pending(dst)
-        report = await self.transfer.transfer(
-            src,
-            dst,
-            dst_umo=dst_umo,
-            files=files,
-            include_forgotten=bool(body.get("includeForgotten", True)),
-            mode=mode,
-            policy=transfer.check_policy(body.get("policy")),
-            dry_run=dry_run,
-        )
+        # 与后台整理/定期整理互斥，搬动结果不会被迟到的整理覆盖
+        async with (self._background_lock() if not dry_run else _null_async()):
+            report = await self.transfer.transfer(
+                src,
+                dst,
+                dst_umo=dst_umo,
+                files=files,
+                include_forgotten=bool(body.get("includeForgotten", True)),
+                mode=mode,
+                policy=transfer.check_policy(body.get("policy")),
+                dry_run=dry_run,
+            )
         if dst.scope == SCOPE_PEOPLE and dst.key == sharing.SHARED_KEY:
             report.setdefault("warnings", []).append(SHARED_PEOPLE_WARNING)
         if dry_run:
@@ -1520,14 +1523,16 @@ class MemoryDashboard:
             await self._stop_pending_keys(
                 self._platform_pending_keys(src_platform)
             )
-        result = await self.transfer.remap_platform(
-            src_platform,
-            dst_platform,
-            mode=mode,
-            policy=transfer.check_policy(body.get("policy")),
-            include_people=include_people,
-            dry_run=dry_run,
-        )
+        # 与后台整理/定期整理互斥，改名结果不会被迟到的整理覆盖
+        async with (self._background_lock() if not dry_run else _null_async()):
+            result = await self.transfer.remap_platform(
+                src_platform,
+                dst_platform,
+                mode=mode,
+                policy=transfer.check_policy(body.get("policy")),
+                include_people=include_people,
+                dry_run=dry_run,
+            )
         if (
             include_people
             and self.plugin._store.people_key(dst_platform) == sharing.SHARED_KEY
