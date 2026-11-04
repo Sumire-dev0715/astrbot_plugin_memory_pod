@@ -621,3 +621,30 @@ def test_removing_permission_validation_makes_check_fail(
         "third_party_forget", tmp_path, "violating"
     )
     assert not all(outcome.ok for outcome in run.outcomes)
+
+
+def test_cli_redacts_key_from_unexpected_errors(tmp_path, monkeypatch, capsys):
+    """脚本自身异常的原文里即使带出 key，标准输出也必须抹掉。"""
+    from scripts.eval import run_eval
+
+    class ExplodingClient:
+        def __init__(self, *args, **kwargs):
+            raise RuntimeError("boom fake-key")
+
+    monkeypatch.setattr(run_eval, "OpenAICompatClient", ExplodingClient)
+    env_file = _write_env(tmp_path)
+    code = run_eval.main(
+        [
+            "--env-file",
+            str(env_file),
+            "--only",
+            "private_profile_intro",
+            "--runs",
+            "1",
+            "--json",
+        ]
+    )
+    output = capsys.readouterr().out
+    assert code == 2
+    assert "fake-key" not in output
+    assert "***" in output

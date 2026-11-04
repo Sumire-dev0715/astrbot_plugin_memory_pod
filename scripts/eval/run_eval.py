@@ -45,6 +45,17 @@ DEFAULT_CONCURRENCY = 6
 EVAL_DEADLINE_SECONDS = 3600
 PASS_RATE_FLOOR = 0.9
 REQUIRED_ENV = ("MB_EVAL_BASE_URL", "MB_EVAL_MODEL", "MB_EVAL_API_KEY")
+# 本次评测读到的密钥；所有写到标准输出的文本都先抹掉它。异常信息、第三方
+# 报错都可能把请求头或请求内容带出来，不能依赖每条路径自己记得脱敏。
+_SECRETS: tuple[str, ...] = ()
+
+
+def _redact(text: str) -> str:
+    """抹掉本次评测的密钥；输出前统一调用。"""
+    for secret in _SECRETS:
+        if secret:
+            text = text.replace(secret, "***")
+    return text
 
 
 @dataclass
@@ -75,6 +86,8 @@ class Aggregate:
 
 def load_env_file(path: Path) -> dict:
     """读 KEY=VALUE 环境文件；只返回键值，不打印文件内容。"""
+    global _SECRETS
+    _SECRETS = ()
     if not path.is_file():
         raise ConfigError(
             f"找不到评测环境文件：{path}"
@@ -105,6 +118,8 @@ def load_env_file(path: Path) -> dict:
             "评测环境文件缺少配置项：" + "、".join(missing)
             + f"（文件：{path}）"
         )
+    # load_env_file 也可能被测试或库直接调用；密钥从这里开始全局生效
+    _SECRETS = (values["MB_EVAL_API_KEY"],)
     return values
 
 
@@ -242,7 +257,8 @@ def _error_summary(message: str) -> dict:
 
 
 def _print(summary: dict) -> None:
-    sys.stdout.write(json.dumps(summary, ensure_ascii=False) + "\n")
+    """唯一的输出口：序列化后统一抹掉密钥，再写标准输出。"""
+    sys.stdout.write(_redact(json.dumps(summary, ensure_ascii=False)) + "\n")
     sys.stdout.flush()
 
 
