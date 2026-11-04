@@ -970,7 +970,15 @@ class MemoryBeyondPlugin(Star):
                 return fixed + estimator.text(state.summary) + estimator.messages(tail)
 
             total = total_now() if window > 0 else 0
-            if self._compression_triggered(tail, total, window, turn_limit):
+            # AstrBot 也会看到本轮注入的索引/摘要/召回块，轮数要一并算
+            extra_messages = (
+                (1 if index_msg else 0)
+                + (1 if state.summary else 0)
+                + (1 if recall_msg else 0)
+            )
+            if self._compression_triggered(
+                tail, total, window, turn_limit, extra_messages
+            ):
                 await self._compress(event, rt, umo, contexts, total)
                 tail = current_tail()
                 total = total_now() if window > 0 else 0
@@ -2253,21 +2261,32 @@ class MemoryBeyondPlugin(Star):
         }
 
     def _compression_triggered(
-        self, tail: list[dict], total: int, window: int, turn_limit: int
+        self,
+        tail: list[dict],
+        total: int,
+        window: int,
+        turn_limit: int,
+        extra_messages: int = 0,
     ) -> bool:
         """本轮是否触发压缩：token 超过阈值，或达到 AstrBot 轮数上限 - 2。"""
         if window > 0 and total > int(window * self._threshold()):
             return True
-        return self._turn_limit_reached(tail, turn_limit)
+        return self._turn_limit_reached(tail, turn_limit, extra_messages)
 
     @staticmethod
-    def _turn_limit_reached(tail: list[dict], turn_limit: int) -> bool:
-        """AstrBot 会在请求前按轮数截断，插件要提前 2 轮抢先压缩。"""
+    def _turn_limit_reached(
+        messages: list[dict], turn_limit: int, extra_messages: int = 0
+    ) -> bool:
+        """AstrBot 的 truncate_by_turns 按非 system 消息条数对半计轮。
+
+        每轮通常两条消息（user + assistant），工具调用和注入块会多出消息。
+        这里按 AstrBot 的实际口径算，并把本轮还会注入的索引/摘要/召回块
+        一并算上；达到上限减 2 时抢先压缩，免得被 AstrBot 直接截断。
+        """
         if turn_limit <= 0:
             return False
-        return len(split_turns(tail)) >= max(
-            1, turn_limit - ASTRBOT_TURN_HEADROOM
-        )
+        pairs = (len(messages) + extra_messages) // 2
+        return pairs >= max(1, turn_limit - ASTRBOT_TURN_HEADROOM)
 
     @staticmethod
     def _provider_model_name(provider) -> str:

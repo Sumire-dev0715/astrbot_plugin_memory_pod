@@ -202,6 +202,29 @@ def test_no_turn_limit_keeps_short_context_untouched(tmp_path):
     assert calls == []
 
 
+def test_turn_limit_counts_message_pairs_like_astrbot(tmp_path):
+    """AstrBot 按非 system 消息条数对半计轮；工具调用多出来的消息也算。"""
+    plugin, _ = make_request_plugin(tmp_path, astrbot_conf(max_turns=4))
+    one_turn = [
+        {"role": "user", "content": "查天气"},
+        {"role": "assistant", "content": "", "tool_calls": [{"id": "t1"}]},
+        {"role": "tool", "tool_call_id": "t1", "content": "晴"},
+        {"role": "assistant", "content": "今天晴"},
+    ]
+    # 4 条消息 = 2 轮（AstrBot 口径），上限 4 - 2 = 2，达到即触发
+    assert plugin._compression_triggered(
+        one_turn, 0, 1_000_000, 4
+    )
+    # 只有 user + assistant 一条对时还不到 2 轮
+    assert not plugin._compression_triggered(
+        one_turn[:2], 0, 1_000_000, 4
+    )
+    # 本轮还会注入 3 个块，也算进 AstrBot 看到的轮数
+    assert plugin._compression_triggered(
+        one_turn[:2], 0, 1_000_000, 4, extra_messages=3
+    )
+
+
 # ---------------------------------------------------------------- 关闭压缩
 
 
