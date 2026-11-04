@@ -90,6 +90,9 @@ class Context:
     snapshots: dict[str, str] = field(default_factory=dict)
     # 实际写进提示词的待整理轮次；整理成功后只删这些
     record_seqs: set[int] = field(default_factory=set)
+    # 只给了文件名、没有附全文的 "scope/file"：改写正文一律拒绝，
+    # session/global 的删除也拒绝；people 的删除按本人/管理员规则处理
+    listed_only: set[str] = field(default_factory=set)
 
 
 @dataclass
@@ -152,11 +155,12 @@ async def _full_files(
     transcript: str,
     speakers: list[str],
     snapshots: dict[str, str],
-) -> tuple[list[str], list[str]]:
+) -> tuple[list[str], list[str], set[str]]:
     """挑出要附全文的文件与只列名字的文件；同时记下全部候选的哈希。
 
-    返回 (附全文的段落, 只列名称的段落)。发送者/被提到的人的身份文件优先，
-    其余按关键词相关度挑；日志不参与（由插件决定写到哪一篇）。
+    返回 (附全文的段落, 只列名称的段落, 只列名称的 "scope/file" 集合)。
+    发送者/被提到的人的身份文件优先，其余按关键词相关度挑；日志不参与
+    （由插件决定写到哪一篇）。
     """
     full: list[str] = []
     listed: list[str] = []
@@ -235,21 +239,19 @@ async def _full_files(
                 header += "\n（" + "；".join(notes) + "）"
             full.append(header + "\n" + content.strip())
 
+    listed_only: set[str] = set()
     for scope, store in stores.items():
         for header in await run_in_thread(store.headers):
             if journal.is_journal(header.file, header.type):
                 continue
-            if f"{scope}/{header.file}" in chosen:
+            key = f"{scope}/{header.file}"
+            if key in chosen:
                 continue
-            note = (
-                "（已经很长，优先按小节替换）"
-                if header.size > LONG_FILE_CHARS
-                else ""
-            )
+            listed_only.add(key)
             listed.append(
-                f"- {scope}/{header.file}：{header.description or '（无描述）'}{note}"
+                f"- {key}：{header.description or '（无描述）'}"
             )
-    return full, listed
+    return full, listed, listed_only
 
 
 async def run_in_thread(func, *args):
@@ -271,7 +273,9 @@ async def build_context(
     transcript, record_seqs = render_rounds(records, now)
     speakers = prompts.sender_ids_in(transcript)
     snapshots: dict[str, str] = {}
-    full, listed = await _full_files(stores, transcript, speakers, snapshots)
+    full, listed, listed_only = await _full_files(
+        stores, transcript, speakers, snapshots
+    )
 
     sections: list[str] = []
     if SCOPE_SESSION in stores:
@@ -323,10 +327,10 @@ async def build_context(
 
 {WRITE_RULES}
 
-已有记忆的索引：
+已有记忆的索引（只是目录，需要细节看下面的全文或列出的文件名）：
 {chr(10).join(sections)}
 
-只列名称的文件（没有全文；需要补充就 append）：
+只列名称的文件（看不到全文；不要覆盖它们，需要补充就 append）：
 {listed_text}
 
 相关文件的全文：
@@ -344,7 +348,12 @@ async def build_context(
 frontmatter 由插件生成，不要写。一次最多 {MAX_OPERATIONS} 条；没有值得记的就输出空数组 []。
 
 然后在 <journal></journal> 标签里写这段对话的流水（几行，可以带 [[链接]]）；没什么可记的就留空。日志写到哪个文件由插件决定，文件名不要写。"""
-    return Context(prompt=prompt, snapshots=snapshots, record_seqs=record_seqs)
+    return Context(
+        prompt=prompt,
+        snapshots=snapshots,
+        record_seqs=record_seqs,
+        listed_only=listed_only,
+    )
 
 
 # ---------------------------------------------------------------- 解析与校验
@@ -416,10 +425,18 @@ def validate_operations(
     sender: str,
     senders: set[str] | None = None,
     journal_files: set[str] | None = None,
+    listed_only: set[str] | None = None,
 ) -> tuple[list[Operation], list[str]]:
-    """逐条校验模型给的操作；返回 (合格的操作, 被跳过的说明)。"""
+    """逐条校验模型给的操作；返回 (合格的操作, 被跳过的说明)。
+
+    listed_only 是只给了文件名、没附全文的 "scope/file"：按小节替换和精确
+    替换会改掉模型没读过的正文，一律拒绝；session/global 的删除同样拒绝。
+    people 的删除仍交给下面的本人/管理员规则，管理员要求忘掉某人时可能
+    只见过那个人的文件名。
+    """
     ops: list[Operation] = []
     skipped: list[str] = []
+    listed_only = listed_only or set()
     if not isinstance(raw, list):
         return ops, ["模型输出不是数组"]
     processed = 0
@@ -452,6 +469,16 @@ def validate_operations(
             skipped.append(f"{file}：日志由插件决定写到哪，模型不能直接写")
             continue
         exists = file in files_by_scope[scope]
+        # 只给了文件名、没附全文的文件：改写正文可能抹掉没读过的内容。
+        # people 的删除仍按下面的本人/管理员规则放行——管理员要求忘掉某个
+        # 人时，插件本就不一定附上那个人的档案。
+        key = f"{scope}/{file}"
+        if key in listed_only and (
+            op in (OP_SECTION, OP_REPLACE)
+            or (op == OP_DELETE and scope != SCOPE_PEOPLE)
+        ):
+            skipped.append(f"{file}：只给了文件名、没有全文，不能删除或改写")
+            continue
         # 共享人物空间的权限：read 不写，append 只能 create / append
         if scope == SCOPE_PEOPLE and people_shared:
             if permission is None:

@@ -1883,6 +1883,7 @@ class MemoryBeyondPlugin(Star):
             sender=sender,
             senders=senders,
             journal_files=journal_files,
+            listed_only=context.listed_only,
         )
         for item in skipped:
             logger.info(LOG_PREFIX + f"会话 {umo} 后台整理跳过：{item}")

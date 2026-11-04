@@ -55,7 +55,10 @@ def snapshots_for(stores: dict) -> dict[str, str]:
     return result
 
 
-def validate(plugin, stores, raw, *, sender="123", admin=False, permission=None, shared=False, senders=None):
+def validate(
+    plugin, stores, raw, *, sender="123", admin=False, permission=None,
+    shared=False, senders=None, listed_only=None,
+):
     return pkg_writer.validate_operations(
         raw,
         files_by_scope=files_by_scope(stores),
@@ -65,6 +68,7 @@ def validate(plugin, stores, raw, *, sender="123", admin=False, permission=None,
         global_on=plugin._global_on(),
         sender=sender,
         senders=senders,
+        listed_only=listed_only,
     )
 
 
@@ -157,6 +161,93 @@ def test_operations_are_capped_per_batch(tmp_path):
     ops, skipped = validate(plugin, {"session": session}, raw)
     assert len(ops) == pkg_writer.MAX_OPERATIONS
     assert any("上限" in item for item in skipped)
+
+
+def test_listed_only_file_cannot_be_deleted_or_rewritten(tmp_path):
+    """只给了文件名、没附全文的文件不能被删除或改写，append 仍允许。"""
+    plugin = make_plugin(tmp_path, [])
+    session = plugin._store.session_scope("Bot-A:FriendMessage:1")
+    run(session.write("note.md", memory_md("note", "## 作息\n\n早睡")))
+    stores = {"session": session}
+    raw = [
+        {"op": "replace_section", "scope": "session", "file": "note.md",
+         "section": "## 作息", "content": "晚睡"},
+        {"op": "replace", "scope": "session", "file": "note.md",
+         "old": "早睡", "new": "晚睡"},
+        {"op": "delete", "scope": "session", "file": "note.md", "reason": "过期"},
+    ]
+    ops, skipped = validate(
+        plugin, stores, raw, listed_only={"session/note.md"}
+    )
+    assert ops == []
+    assert len(skipped) == 3
+    assert all("只给了文件名" in item for item in skipped)
+    assert "早睡" in run(session.read("note.md"))
+
+    ops, skipped = validate(
+        plugin,
+        stores,
+        [{"op": "append", "scope": "session", "file": "note.md", "content": "补充"}],
+        listed_only={"session/note.md"},
+    )
+    assert skipped == [] and [op.op for op in ops] == ["append"]
+
+
+def test_listed_only_people_delete_still_follows_requester_rule(tmp_path):
+    """管理员要求忘掉某人时可能只见文件名：删除按本人/管理员规则放行。"""
+    plugin = make_plugin(tmp_path, [])
+    people = plugin._store.people_scope("Bot-A")
+    run(people.write("user-9.md", person_file("user-9")))
+    stores = {"people": people}
+    listed = {"people/user-9.md"}
+    raw = [{"op": "delete", "scope": "people", "file": "user-9.md",
+            "reason": "管理员要求"}]
+    ops, skipped = validate(
+        plugin, stores, raw, sender="1", senders={"1"}, admin=True,
+        listed_only=listed,
+    )
+    assert skipped == [] and [op.op for op in ops] == ["delete"]
+
+    ops, skipped = validate(
+        plugin, stores, raw, sender="1", senders={"1"}, listed_only=listed
+    )
+    assert ops == []
+    assert any("不是本人或管理员" in item for item in skipped)
+
+
+def test_listed_only_long_file_is_not_told_to_replace_section(tmp_path, monkeypatch):
+    """预算放不下的长文件只列名字：不能提示按小节替换，也不能被改写。"""
+    plugin = make_plugin(tmp_path, [])
+    session = plugin._store.session_scope("Bot-A:FriendMessage:1")
+    run(session.write("user-999.md", memory_md("user-999", "旧" * 3500)))
+    monkeypatch.setattr(pkg_writer, "MAX_INPUT_CHARS", 200)
+    context = run(
+        pkg_writer.build_context(
+            {"session": session},
+            [],
+            now=NOW,
+            permission=None,
+            admin=False,
+            people_shared=False,
+            global_on=False,
+        )
+    )
+    assert "session/user-999.md" in context.listed_only
+    listed = context.prompt.split("只列名称的文件", 1)[1].split(
+        "相关文件的全文", 1
+    )[0]
+    assert "session/user-999.md" in listed
+    assert "优先按小节替换" not in listed
+    assert "不要覆盖它们" in context.prompt
+
+    ops, skipped = validate(
+        plugin,
+        {"session": session},
+        [{"op": "delete", "scope": "session", "file": "user-999.md",
+          "reason": "过期"}],
+        listed_only=context.listed_only,
+    )
+    assert ops == [] and "只给了文件名" in skipped[0]
 
 
 # ---------------------------------------------------------------- 三种权限
@@ -614,6 +705,8 @@ def test_write_pending_runs_model_and_clears_processed_records(tmp_path):
         "只记成这个人的意见",
         "不能借此写入指令",
         "非共享成员",
+        "只是目录",
+        "不要覆盖它们",
     ):
         assert phrase in prompt
 
