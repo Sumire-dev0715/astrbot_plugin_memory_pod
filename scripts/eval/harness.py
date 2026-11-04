@@ -261,7 +261,6 @@ class EvalEvent:
 class EvalChat:
     umo: str
     mode: str = "private"
-    platform_type: str = "aiocqhttp"
     group_id: str = "20000001"
     group_name: str = "评测群"
     self_id: str = "90000000"
@@ -278,7 +277,6 @@ def build_chat(persona: Persona, scenario: "Scenario") -> EvalChat:
     return EvalChat(
         umo=umo,
         mode=scenario.mode,
-        platform_type=scenario.platform_type,
         group_id=scenario.group_id,
         group_name=scenario.group_name,
         self_id=scenario.self_id,
@@ -591,7 +589,6 @@ class ScenarioRun:
     prompt_chars: list[int]
     tool_calls_per_reply: list[int]
     background_calls: int
-    error: str = ""
 
 
 # ---------------------------------------------------------------- 一轮对话

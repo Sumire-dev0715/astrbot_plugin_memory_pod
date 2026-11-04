@@ -48,30 +48,15 @@ class Filter:
         ADMIN = "admin"
 
     @staticmethod
-    def _mark(kind: str):
-        def decorator(func):
-            func.__astrbot_hook__ = kind
-            return func
+    def _noop(*args, **kwargs):
+        return lambda func: func
 
-        return decorator
-
-    def on_llm_request(self, *args, **kwargs):
-        return self._mark("on_llm_request")
-
-    def on_llm_response(self, *args, **kwargs):
-        return self._mark("on_llm_response")
-
-    def on_agent_begin(self, *args, **kwargs):
-        return self._mark("on_agent_begin")
-
-    def on_llm_tool_respond(self, *args, **kwargs):
-        return self._mark("on_llm_tool_respond")
-
-    def permission_type(self, *args, **kwargs):
-        return self._mark("permission_type")
-
-    def command(self, *args, **kwargs):
-        return self._mark("command")
+    on_llm_request = _noop
+    on_llm_response = _noop
+    on_agent_begin = _noop
+    on_llm_tool_respond = _noop
+    permission_type = _noop
+    command = _noop
 
     def llm_tool(self, name: str | None = None, **kwargs):
         def decorator(func):
