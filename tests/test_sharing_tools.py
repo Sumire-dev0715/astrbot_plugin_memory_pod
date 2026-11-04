@@ -260,6 +260,7 @@ def make_plugin(tmp_path, members):
     plugin._write_scheduled = set()
     plugin._write_tasks = {}
     plugin._tasks = set()
+    plugin._inflight = {}
     plugin._pending_loop = None
     plugin._tidy_checked = {}
     plugin._background_gate = asyncio.Semaphore(1)

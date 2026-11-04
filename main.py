@@ -83,6 +83,9 @@ RECALL_SELECT_TIMEOUT = 15
 # 遗忘扫描：每个作用域目录至多每隔这么久扫一次（秒）；默认多久没用到算遗忘（天）
 FORGET_SWEEP_INTERVAL = 6 * 3600
 FORGET_DEFAULT_DAYS = 90
+# 一轮请求超过空闲时间也不能提前整理：只要请求还在生成，空闲扫描就跳过。
+# 真卡死的请求最多挡这么久，之后按普通空闲处理，避免永远不整理。
+PENDING_INFLIGHT_MAX = 3600.0
 # 工具循环守卫在事件额外字段里的键（on_llm_request 建好，工具钩子取用）
 LOOP_GUARD_KEY = "memory_beyond_loop_guard"
 
@@ -217,6 +220,8 @@ class MemoryBeyondPlugin(Star):
         self._write_scheduled: set[str] = set()
         self._write_tasks: dict[str, asyncio.Task] = {}
         self._pending_loop: asyncio.Task | None = None
+        # 会话键 -> 本轮请求开始时间：生成期间空闲扫描不能抢先整理
+        self._inflight: dict[str, float] = {}
         # 共享人物空间：成员表从配置解析
         self._sharing = sharing.Membership()
         self._sharing_warned: set[str] = set()
@@ -1065,9 +1070,14 @@ class MemoryBeyondPlugin(Star):
         )
         if not tag:
             return
-        first_line = prompt.split("\n", 1)[0]
+        first_line, sep, rest = prompt.partition("\n")
         if first_line == tag:
-            return  # 同一请求被重复处理时不叠加标注
+            # 同一请求被重复处理时不叠加标注；正文其余部分仍要把伪造的
+            # 半角前缀改写掉，否则用户只要把首行写成自己的真实标注，
+            # 后面伪造的 [发送者：…] 就能原样进入会话历史
+            body = prompts.neutralize_sender_forgery(rest) if sep else ""
+            req.prompt = f"{tag}\n{body}" if sep else tag
+            return
         req.prompt = f"{tag}\n{prompts.neutralize_sender_forgery(prompt)}"
 
     async def _index_block(
@@ -1413,17 +1423,18 @@ class MemoryBeyondPlugin(Star):
 
     # ============================================================ 定期整理
 
-    def _maybe_tidy(self, event: AstrMessageEvent, now: float) -> None:
-        """本会话涉及的每个作用域至多每隔几分钟看一眼该不该整理，要整理的放后台。"""
-        mode = self.tidy_mode()
-        if mode == tidy.MODE_OFF:
-            return
+    def _tidy_targets(
+        self, event: AstrMessageEvent
+    ) -> list[tuple[str, str | None, str | None]]:
+        """这次请求涉及、可以触发定期整理的 (作用域, 目录名, 快照键)。"""
         umo = str(event.unified_msg_origin)
-        # (作用域, 目录名, 索引快照要作废的会话)；含义同 _maybe_forget
+        # 含义同 _maybe_forget
         targets: list[tuple[str, str | None, str | None]] = [
             ("session", self._store.session_scope(umo).root.name, umo)
         ]
-        if self._global_on():
+        # global 只在发送者是管理员时写（PLAN 3.7.4）：定期自动整理也不能
+        # 让普通会话间接合并、改写或删除全局记忆
+        if self._global_on() and self._is_admin_event(event):
             targets.append(("global", None, None))
         # 与遗忘扫描、后台整理一致：目录与权限都按事件的 platform_id 取；
         # 共享人物空间只有 edit 级成员的会话能触发定期自动整理，read /
@@ -1433,6 +1444,15 @@ class MemoryBeyondPlugin(Star):
             self._event_actor(event), people_store
         ):
             targets.append(("people", people_store.root.name, ""))
+        return targets
+
+    def _maybe_tidy(self, event: AstrMessageEvent, now: float) -> None:
+        """本会话涉及的每个作用域至多每隔几分钟看一眼该不该整理，要整理的放后台。"""
+        mode = self.tidy_mode()
+        if mode == tidy.MODE_OFF:
+            return
+        umo = str(event.unified_msg_origin)
+        targets = self._tidy_targets(event)
         due = []
         for scope, key, cache_key in targets:
             sid = tidy.scope_id(scope, key)
@@ -1618,8 +1638,11 @@ class MemoryBeyondPlugin(Star):
             self._is_admin_event(event),
             sender_id,
             now,
-            platform=self._event_actor(event) or self._platform_of(umo),
+            platform=self._event_actor(event),
         )
+        # 这一轮还在生成：空闲计时不能从请求入口算起，否则生成期间就会被
+        # 后台整理抢先处理掉（回复到达时轮次已经没了）
+        self._inflight[key] = now
         if dropped:
             logger.warning(
                 LOG_PREFIX
@@ -1649,12 +1672,13 @@ class MemoryBeyondPlugin(Star):
         if not umo or book is None:
             return
         key = memstore.safe_key(umo)
+        self._inflight.pop(key, None)
         state, found, dropped = book.finish_reply(
             key,
             umo,
             self._completion_text(resp),
             now,
-            platform=self._event_actor(event) or self._platform_of(umo),
+            platform=self._event_actor(event),
         )
         if dropped:
             logger.warning(
@@ -1662,6 +1686,13 @@ class MemoryBeyondPlugin(Star):
                 + f"会话 {umo} 的待整理记录超过上限，丢弃了最旧的 {dropped} 轮"
             )
         if not found:
+            if state.records:
+                # 轮次在生成期间被后台整理处理掉了，这条最终回复没有地方
+                # 可补；至少留下日志，不再静默丢失
+                logger.info(
+                    LOG_PREFIX
+                    + f"会话 {umo} 的最终回复找不到对应的待整理轮次，未记录"
+                )
             return
         if state.note_pending:
             self._schedule_write(umo, "note")
@@ -1720,6 +1751,12 @@ class MemoryBeyondPlugin(Star):
         for state in self._pending.all():
             if not state.records or state.failures >= pending.MAX_FAILURES:
                 continue
+            key = memstore.safe_key(state.umo)
+            started = self._inflight.get(key)
+            if started is not None and now - started < PENDING_INFLIGHT_MAX:
+                # 这轮请求还在生成（可能已经超过空闲时间），回复还没到，
+                # 不能现在整理
+                continue
             last = max(state.last_round_at, state.last_attempt)
             if last > 0 and now - last < idle:
                 continue
@@ -1756,16 +1793,25 @@ class MemoryBeyondPlugin(Star):
     def _write_stores(
         self, umo: str, platform: str, admin: bool
     ) -> tuple[dict[str, memstore.ScopeStore], str | None, bool]:
-        """这次后台整理可用的作用域与共享人物空间权限。"""
+        """这次后台整理可用的作用域与共享人物空间权限。
+
+        身份优先用事件 platform_id；记录里没有时，只在 UMO 前缀不是共享
+        成员的情况下用它兜底。和现场路径 `_people_store_for_event` 一样：
+        取不到 platform_id 又指向共享目录时 fail-closed，不能按 UMO 前缀里
+        的成员身份写 `_shared`。
+        """
         # 配置页可能刚改过成员；每次落盘前都按最新成员表取权限
         self._refresh_sharing()
         stores: dict[str, memstore.ScopeStore] = {
             "session": self._store.session_scope(umo)
         }
-        platform = platform or self._platform_of(umo)
-        people_store = self._store.people_scope(platform)
+        identity = platform or self._platform_of(umo)
+        if not platform and self._sharing.is_member(identity):
+            # 身份无法确认：这次不提供 people 作用域，相关操作会被拒
+            return stores, None, True
+        people_store = self._store.people_scope(identity)
         people_shared = self._store.is_shared_people_scope(people_store)
-        permission = self._people_permission(platform) if people_shared else None
+        permission = self._people_permission(identity) if people_shared else None
         # read 级成员看不到可写的人物空间；write 规则里也写明不能写
         if not (people_shared and permission == sharing.PERMISSION_READ):
             stores["people"] = people_store
@@ -1788,8 +1834,9 @@ class MemoryBeyondPlugin(Star):
         senders = {record.sender for record in records}
         # 整批轮次都来自管理员才允许写 global，不能由末尾一轮代表整批
         admin = all(record.admin for record in records)
-        platform = state.platform or self._platform_of(umo)
-        actor = f"extract@{platform}"
+        # 记录里的 platform 是事件给的；审核日志的 actor 可以退回 UMO 前缀
+        platform = state.platform
+        actor = f"extract@{platform or self._platform_of(umo)}"
         stores, permission, people_shared = self._write_stores(
             umo, platform, admin
         )
@@ -1817,7 +1864,9 @@ class MemoryBeyondPlugin(Star):
             message = "整理模型调用失败：" + (
                 "；".join(attempts_log) or "没有可用的模型提供商"
             )
-            failed, abandoned = self._pending.record_failure(key, now, message)
+            failed, abandoned = self._pending.record_failure(
+                key, now, message, context.record_seqs
+            )
             if abandoned:
                 logger.warning(
                     LOG_PREFIX
@@ -1852,7 +1901,7 @@ class MemoryBeyondPlugin(Star):
         raw_ops, journal_text = writer.parse_response(text)
         if raw_ops is None:
             failed, abandoned = self._pending.record_failure(
-                key, now, "整理模型输出无法解析"
+                key, now, "整理模型输出无法解析", context.record_seqs
             )
             if abandoned:
                 logger.warning(
@@ -1887,9 +1936,24 @@ class MemoryBeyondPlugin(Star):
         )
         for item in skipped:
             logger.info(LOG_PREFIX + f"会话 {umo} 后台整理跳过：{item}")
+        # 管理员彻底删除过的文件：这批旧对话不能再把它写回来。只跳过这些
+        # 文件的操作，同一批对话里的其他内容照常整理。
+        blocked = current.blocked_specs()
+        if blocked:
+            kept = []
+            for op in ops:
+                if f"{op.scope}/{op.file}" in blocked:
+                    logger.info(
+                        LOG_PREFIX
+                        + f"会话 {umo} 后台整理跳过 {op.scope}/{op.file}："
+                        "文件已被彻底删除"
+                    )
+                else:
+                    kept.append(op)
+            ops = kept
         if raw_ops and not ops:
             failed, abandoned = self._pending.record_failure(
-                key, now, "整理操作全部不合格"
+                key, now, "整理操作全部不合格", context.record_seqs
             )
             if abandoned:
                 logger.warning(
@@ -1916,10 +1980,11 @@ class MemoryBeyondPlugin(Star):
             logger.info(LOG_PREFIX + f"会话 {umo} {result.message}")
             self._pending.mark_attempt(key, now, result.message)
             return ""
-        if ops and result.applied == 0:
-            # 模型给的操作一条都没写成功：记为一次失败，满 3 次后放弃
+        if ops and not result.ok:
+            # 有操作没写成功（全部或部分）：保留这批记录，下次重试。
+            # 不能因为写成功了一部分就把整批对话删掉，失败操作的内容会丢。
             failed, abandoned = self._pending.record_failure(
-                key, now, "整理操作全部未写入"
+                key, now, result.message, context.record_seqs
             )
             if abandoned:
                 logger.warning(
@@ -1930,8 +1995,11 @@ class MemoryBeyondPlugin(Star):
             else:
                 logger.info(
                     LOG_PREFIX
-                    + f"会话 {umo} 后台整理的操作全部未写入，保留记录下次重试"
+                    + f"会话 {umo} 后台整理有操作未写入（{result.message}），"
+                    "保留记录下次重试"
                 )
+            # 已经写成功的部分也要让索引快照刷新
+            self._invalidate_changes(umo, list(result.changes))
             return ""
         journal_file = ""
         journal_failed = False
@@ -1959,6 +2027,20 @@ class MemoryBeyondPlugin(Star):
             message += f"；日志 {'新开' if journal_new else '续写'} {journal_file}"
         elif journal_failed:
             message += "；日志写入失败"
+            # 日志没落盘就是这次整理没成功：记录留着下次重试，模型给出的
+            # 流水还能重新生成，不能连记录一起丢掉
+            failed, abandoned = self._pending.record_failure(
+                key, now, message, context.record_seqs
+            )
+            if abandoned:
+                logger.warning(
+                    LOG_PREFIX
+                    + f"会话 {umo} 后台整理连续失败 {failed.failures} 次，已放弃"
+                    "这批待整理记录"
+                )
+            # 操作已经落盘的部分照常作废索引快照
+            self._invalidate_changes(umo, list(result.changes))
+            return ""
         self._pending.drop_records(key, context.record_seqs, now, message)
         changes = list(result.changes)
         if journal_file:
@@ -2141,7 +2223,11 @@ class MemoryBeyondPlugin(Star):
                 except asyncio.TimeoutError:
                     attempts_log.append(f"{label} 第 {attempt} 次超时（{timeout}s）")
                 except Exception as exc:  # noqa: BLE001 - provider 实现不可控
-                    attempts_log.append(f"{label} 第 {attempt} 次失败：{exc}")
+                    # 异常原文可能带请求内容或鉴权信息，而这段记录会进
+                    # 管理页和 /mb_status；只留类型。
+                    attempts_log.append(
+                        f"{label} 第 {attempt} 次失败（{type(exc).__name__}）"
+                    )
                 if attempt < tries:
                     await asyncio.sleep(min(2 ** (attempt - 1), 4))
         return None, attempts_log
@@ -2658,8 +2744,6 @@ class MemoryBeyondPlugin(Star):
         content = (content or "").strip()
         if not content:
             return "content 不能为空：请用一句话写清用户要求记住、更正或忘掉什么。"
-        if len(content) > pending.MAX_NOTE_CHARS:
-            content = content[: pending.MAX_NOTE_CHARS]
         umo = str(getattr(event, "unified_msg_origin", "") or "")
         if not umo:
             return "无法确定当前会话，这条要求没有记下。"
@@ -2674,7 +2758,7 @@ class MemoryBeyondPlugin(Star):
             content,
             sender_id,
             time.time(),
-            platform=self._event_actor(event) or self._platform_of(umo),
+            platform=self._event_actor(event),
         )
         if dropped:
             logger.warning(

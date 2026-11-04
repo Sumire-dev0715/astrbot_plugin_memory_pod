@@ -85,24 +85,27 @@ def test_replace_section_can_clear_body():
     assert updated == "## 甲\n\n## 乙\n乙正文\n"
 
 
-def test_replace_section_missing_or_duplicate_lists_all_headings():
+def test_replace_section_errors_do_not_echo_other_headings():
+    """报错会进管理页，不能把文件里的其他小节标题带出去。"""
     content = "## 甲\n一\n\n### 甲子\n二\n\n## 乙\n三\n"
     missing, error = insights.replace_section(content, "## 丙", "新")
     assert missing == ""
     assert "没有找到" in error
-    assert "## 甲" in error and "### 甲子" in error and "## 乙" in error
+    assert "## 甲" not in error and "### 甲子" not in error and "## 乙" not in error
+    assert "## 丙" not in error
 
     duplicate = "## 甲\n一\n\n## 甲\n二\n"
     missing, error = insights.replace_section(duplicate, "## 甲", "新")
     assert missing == ""
     assert "出现了 2 处" in error
-    assert "## 甲" in error
+    assert "## 甲" not in error
 
 
 def test_replace_section_rejects_non_heading_old_text():
     missing, error = insights.replace_section("## 甲\n正文\n", "正文", "新")
     assert missing == ""
-    assert "现有标题" in error and "## 甲" in error
+    assert "现有标题" not in error and "## 甲" not in error
+    assert "小节标题行" in error
 
 
 def test_scope_edit_section_goes_through_history(tmp_path):
@@ -163,7 +166,7 @@ def test_section_scan_skips_frontmatter_and_fenced_code():
     # frontmatter 里的 # 行不能当标题：既不能删掉 frontmatter，也不能误判重复
     missing, error = insights.replace_section(content, "# 这不是标题", "新")
     assert missing == ""
-    assert "没有找到" in error and "# 用户档案" in error
+    assert "没有找到" in error and "# 用户档案" not in error
 
     updated, error = insights.replace_section(content, "## 代码", "新代码")
     assert error == ""

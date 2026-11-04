@@ -174,31 +174,26 @@ def _scan_headings(content: str) -> tuple[list[_Line], list[_Heading]]:
     return lines, headings
 
 
-def _heading_names(headings: list[_Heading]) -> str:
-    return "；".join(item.text for item in headings) or "（文件里没有标题行）"
-
-
 def _locate_section(
     content: str, heading: str
 ) -> tuple[list[_Line], int, int, str]:
-    """定位标题行与本节结束行；出错时返回 (行表, -1, -1, 错误)。"""
+    """定位标题行与本节结束行；出错时返回 (行表, -1, -1, 错误)。
+
+    错误信息会进管理页的整理结果，不能把文件里的其他小节标题带出去。
+    """
     lines, headings = _scan_headings(content)
     target = (heading or "").replace("\r\n", "\n").strip()
     if not target or "\n" in target or not _HEADING_RE.match(target):
         return lines, -1, -1, (
             "old_text 必须是一个小节标题行（如 ## 作息与习惯）。"
-            f"现有标题：{_heading_names(headings)}"
         )
     matches = [item for item in headings if item.text == target]
     if not matches:
-        return lines, -1, -1, (
-            f"没有找到小节标题 {target!r}。现有标题：{_heading_names(headings)}"
-        )
+        return lines, -1, -1, "没有找到这个标题的小节。"
     if len(matches) > 1:
         return lines, -1, -1, (
-            f"小节标题 {target!r} 在文件里出现了 {len(matches)} 处，"
+            f"这个标题在文件里出现了 {len(matches)} 处，"
             "无法确定操作哪一节；请先整理重复的标题。"
-            f"现有标题：{_heading_names(headings)}"
         )
     start = matches[0]
     end = len(lines)

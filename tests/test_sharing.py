@@ -190,7 +190,9 @@ def test_edit_append_rejects_missing_or_duplicate_heading(tmp_path):
     )
     missing = run(scope.edit("user-123.md", "## 乙", "x", mode="append"))
     assert not missing.ok
-    assert "现有标题" in missing.message and "## 甲" in missing.message
+    # 报错会进管理页，不能回显文件里的其他小节标题
+    assert "现有标题" not in missing.message and "## 甲" not in missing.message
+    assert "没有找到" in missing.message
     duplicate = run(scope.edit("user-123.md", "## 甲", "x", mode="append"))
     assert not duplicate.ok
     assert "2 处" in duplicate.message

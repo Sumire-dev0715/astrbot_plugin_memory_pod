@@ -97,7 +97,12 @@ class Context:
 
 @dataclass
 class ApplyResult:
-    """一次应用的结果；stale 表示有文件在模型看过后被改过，整批没写。"""
+    """一次应用的结果。
+
+    stale 表示有文件在模型看过后被改过，整批没写；ok 只在全部操作都写
+    成功（或本来就没有操作）时为真——部分成功也算失败，调用方要保留
+    待整理记录重试。
+    """
 
     ok: bool = False
     stale: bool = False
@@ -394,7 +399,16 @@ def parse_response(text: str) -> tuple[list | None, str]:
     journal_text = journal_match.group(1).strip() if journal_match else ""
     operations_match = _OPERATIONS_RE.search(text)
     if operations_match:
-        data = _load_json(operations_match.group(1))
+        block = operations_match.group(1)
+        if not block.strip():
+            # 明确给了空操作块：没有操作是合法的
+            data = []
+        else:
+            data = _load_json(block)
+            if data is None:
+                # 给了操作块却解析不出来：这是模型输出坏了，不能当成
+                # "只给了日志"成功处理，否则它想写的操作会被静默丢掉
+                return None, journal_text
     else:
         data = _load_json(_OPERATIONS_RE.sub("", _JOURNAL_RE.sub("", text)))
     if isinstance(data, dict):
@@ -404,9 +418,11 @@ def parse_response(text: str) -> tuple[list | None, str]:
                 journal_text = raw_journal.strip()
             elif isinstance(raw_journal, list):
                 journal_text = "\n".join(str(item) for item in raw_journal).strip()
+        if "operations" not in data:
+            return None, journal_text
         data = data.get("operations")
     if data is None:
-        # 只给了日志、没给操作块（或操作块为空文本）：没有操作是合法的
+        # 只给了日志、没给操作块：没有操作是合法的
         return ([], journal_text) if journal_text else (None, "")
     if not isinstance(data, list):
         return None, journal_text
@@ -506,16 +522,16 @@ def validate_operations(
         # 计算，避免末尾一轮的身份代表整批。
         person = _person_id(file)
         requesters = senders if senders is not None else {sender}
-        # 批次里只出现本人（或整批都是管理员）才允许删改；混入第三方
-        # 轮次时保守拒绝，避免末尾一轮的身份代表别人的要求
-        if (
-            person
-            and op in (OP_DELETE, OP_SECTION, OP_REPLACE)
-            and requesters != {person}
-            and not admin
-        ):
-            skipped.append(f"{file}：不是本人或管理员，不能删除或更正")
-            continue
+        # user-<ID>.md 是某个人的记忆：修改它（含 append）都要求本人或
+        # 管理员；people 里名字不合规的旧文件无法确认归属，只有管理员能动。
+        # session 里其他普通文件名不按人物档案处理。新建文件不在这里拦，
+        # 内容该不该写由后台提示词的规则判断（评测也靠这一点验证违规会被
+        # 检查项发现）。
+        if not admin and op != OP_CREATE:
+            owned = requesters == {person} if person else scope != SCOPE_PEOPLE
+            if not owned:
+                skipped.append(f"{file}：不是本人或管理员，不能删改这条记忆")
+                continue
 
         if op == OP_CREATE:
             mem_type = str(entry.get("type", "")).strip().lower()
@@ -650,7 +666,8 @@ async def apply_operations(
     applied = 0
     skipped: list[str] = []
     changes: list[tuple[str, str, str]] = []
-    for op in ops:
+
+    async def _apply(op: Operation) -> memstore.WriteReport:
         store = stores[op.scope]
         if op.op == OP_CREATE:
             content = memstore.compose_memory(
@@ -660,15 +677,15 @@ async def apply_operations(
                 op.content,
                 source=source,
             )
-            report = await store.write(
+            return await store.write(
                 op.file,
                 content,
                 actor=actor,
                 source=source,
                 forbid_overwrite=op.forbid_overwrite,
             )
-        elif op.op == OP_APPEND:
-            report = await store.edit(
+        if op.op == OP_APPEND:
+            return await store.edit(
                 op.file,
                 op.section,
                 op.content,
@@ -676,8 +693,8 @@ async def apply_operations(
                 actor=actor,
                 source=source,
             )
-        elif op.op == OP_SECTION:
-            report = await store.edit(
+        if op.op == OP_SECTION:
+            return await store.edit(
                 op.file,
                 op.section,
                 op.content,
@@ -685,8 +702,8 @@ async def apply_operations(
                 actor=actor,
                 source=source,
             )
-        elif op.op == OP_REPLACE:
-            report = await store.edit(
+        if op.op == OP_REPLACE:
+            return await store.edit(
                 op.file,
                 op.old,
                 op.new,
@@ -694,8 +711,15 @@ async def apply_operations(
                 actor=actor,
                 source=source,
             )
-        else:
-            report = await store.delete(op.file, actor=actor)
+        return await store.delete(op.file, actor=actor)
+
+    for op in ops:
+        try:
+            report = await _apply(op)
+        except OSError as exc:
+            # 磁盘错误之类：记一条跳过，保留待整理记录；异常原文不进
+            # 管理页/日志文案，只留类型
+            report = memstore.WriteReport(False, f"写入失败（{type(exc).__name__}）")
         if report.ok:
             applied += 1
             changes.append((op.scope, op.file, op.op))
@@ -705,7 +729,9 @@ async def apply_operations(
     if skipped:
         message += "；跳过：" + "；".join(skipped)
     return ApplyResult(
-        ok=applied > 0 or not ops,
+        # 只要有一条没写成功就不算成功：调用方保留待整理记录重试，
+        # 不能因为写成功了一部分就把整批对话删掉
+        ok=applied == len(ops),
         applied=applied,
         skipped=skipped,
         changes=changes,
