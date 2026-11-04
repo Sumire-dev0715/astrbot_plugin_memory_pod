@@ -925,8 +925,8 @@ class MemoryDashboard:
         """哪些会话的待整理旧对话可能把刚彻底删除的文件写回来。
 
         session 只涉及本会话；people 是同一人物目录下的所有会话（共享空间
-        的目录名是 _shared，和会话键无关）；global 对所有会话可见，任何
-        有记录且整批是管理员的会话都可能写回。
+        的目录名是 _shared，和会话键无关）；global 对所有会话可见，有
+        待整理记录的会话都可能写回。
         """
         book = getattr(self.plugin, "_pending", None)
         if book is None:
