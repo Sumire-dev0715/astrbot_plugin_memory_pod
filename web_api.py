@@ -963,28 +963,29 @@ class MemoryDashboard:
             report = await store.delete_file_completely(
                 name, actor=history.ACTOR_WEBUI
             )
-        if not report.ok:
-            # 正文可能只残留在 tidy/*.runs.json 的 before 里（整理合并后
-            # 回收站又按保留期清掉了）。这时 memstore 报"没有找到"，但撤销
-            # 整理仍能把内容写回；把整理记录清掉后按成功处理。
-            if report.message == f"没有找到 {name}":
-                removed = await asyncio.to_thread(
-                    self.plugin._tidy.remove_file, sid, name
-                )
-                if removed:
-                    self._mark_purged(pending_keys, scope, name)
-                    self._changed(key)
-                    return _ok(
-                        {"file": name},
-                        f"已清除 {name} 在整理记录里的残留内容",
+            if not report.ok:
+                # 正文可能只残留在 tidy/*.runs.json 的 before 里（整理合并后
+                # 回收站又按保留期清掉了）。这时 memstore 报"没有找到"，但
+                # 撤销整理仍能把内容写回；把整理记录清掉后按成功处理。
+                if report.message == f"没有找到 {name}":
+                    removed = await asyncio.to_thread(
+                        self.plugin._tidy.remove_file, sid, name
                     )
-            raise ApiError(report.message)
-        # 整理记录与待确认方案里也留着改动前原文；彻底删除要一并清掉，
-        # 否则撤销整理会把刚删掉的正文写回来
-        await asyncio.to_thread(self.plugin._tidy.remove_file, sid, name)
-        # 待整理对话里也可能还有同一条事实：给这些旧对话记下屏蔽，下一次
-        # 整理跳过对这个文件的操作，既不写回，也不丢掉其他无关的对话
-        self._mark_purged(pending_keys, scope, name)
+                    if removed:
+                        self._mark_purged(pending_keys, scope, name)
+                        self._changed(key)
+                        return _ok(
+                            {"file": name},
+                            f"已清除 {name} 在整理记录里的残留内容",
+                        )
+                raise ApiError(report.message)
+            # 整理记录与待确认方案里也留着改动前原文；彻底删除要一并清掉，
+            # 否则撤销整理会把刚删掉的正文写回来
+            await asyncio.to_thread(self.plugin._tidy.remove_file, sid, name)
+            # 待整理对话里也可能还有同一条事实：给这些旧对话记下屏蔽，下一
+            # 次整理跳过对这个文件的操作，既不写回，也不丢掉其他无关对话。
+            # 屏蔽和删除在同一把锁内完成，中间没有后台整理插进来的窗口。
+            self._mark_purged(pending_keys, scope, name)
         self._changed(key)
         return _ok({"file": name}, report.message)
 
