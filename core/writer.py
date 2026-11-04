@@ -323,10 +323,10 @@ async def build_context(
 
 {WRITE_RULES}
 
-已有记忆的索引（只是目录，需要细节看下面的全文或列出的文件名）：
+已有记忆的索引：
 {chr(10).join(sections)}
 
-只列名称的文件（看不到全文；不要覆盖它们，需要补充就 append）：
+只列名称的文件（没有全文；需要补充就 append）：
 {listed_text}
 
 相关文件的全文：
@@ -336,7 +336,7 @@ async def build_context(
 {transcript}
 
 输出格式：先在一对 <operations></operations> 标签里给一个 JSON 数组，元素只能是下面几种：
-{{"op": "create", "scope": "session|people|global", "file": "文件名.md", "type": "user|feedback|project|reference", "description": "一句话钩子", "content": "正文（不含 frontmatter）"}}
+{{"op": "create", "scope": "session|people|global", "file": "文件名.md", "type": "user|feedback|project|reference", "description": "一句话钩子", "content": "正文"}}
 {{"op": "append", "scope": "session|people|global", "file": "文件名.md", "section": "可选的小节标题行", "content": "要追加的文字"}}
 {{"op": "replace_section", "scope": "...", "file": "文件名.md", "section": "## 小节标题", "content": "这一节的新正文"}}
 {{"op": "replace", "scope": "...", "file": "文件名.md", "old": "文件里恰好出现一次的原文", "new": "替换后的文字"}}

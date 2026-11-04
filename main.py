@@ -645,10 +645,7 @@ class MemoryBeyondPlugin(Star):
             )
 
     def _guidance(self, umo: str = "") -> str:
-        return prompts.memory_guidance(
-            self._global_on(),
-            self._forgetting_on(),
-        )
+        return prompts.memory_guidance()
 
     @staticmethod
     def _platform_of(umo: str) -> str:
@@ -2570,11 +2567,11 @@ class MemoryBeyondPlugin(Star):
     async def memory_read(
         self, event: AstrMessageEvent, scope: str, file: str = "MEMORY.md"
     ) -> str:
-        """读取长期记忆文件的完整内容。索引只是目录：回答涉及某人、某事的细节之前，先用本工具取回对应文件再作答，不要凭索引行猜。
+        """读取长期记忆文件的完整内容。
 
         Args:
-            scope(string): 作用域，global（机器人自我的全局记忆）、session（当前会话的记忆）或 people（人物记忆，一人一个 user-<数字ID>.md；通常同一平台所有会话共享）
-            file(string): 记忆文件名，如 user-12345678.md；省略时读 MEMORY.md 索引全文
+            scope(string): 作用域：global（机器人自我）、session（当前会话）或 people（人物记忆）
+            file(string): 记忆文件名，如 user-12345678.md；省略时读当前作用域的 MEMORY.md
         """
         if not self._bool("enable_memory", True):
             return "记忆功能已在插件配置中停用。"
@@ -2650,10 +2647,10 @@ class MemoryBeyondPlugin(Star):
 
     @filter.llm_tool(name="memory_note")
     async def memory_note(self, event: AstrMessageEvent, content: str) -> str:
-        """用户明确要求记住、更正或忘掉某件事时调用，用一句话写清要求。插件会把这条要求和发送者、时间记进本会话的待整理记录，在本轮回复结束后整理进长期记忆。
+        """用户明确要求记住、更正或忘掉某件事时调用，用一句话写清要求。
 
         Args:
-            content(string): 一句话写清用户的要求，例如"用户要求记住他的生日是 3 月 5 日"或"用户要求忘掉上次说的搬家计划"
+            content(string): 一句话写清用户的要求，例如"用户要求记住他的生日是 3 月 5 日"
         """
         if not self._bool("enable_memory", True):
             return "记忆功能已在插件配置中停用。"
@@ -2693,12 +2690,12 @@ class MemoryBeyondPlugin(Star):
         scope: str = "all",
         mode: str = "all",
     ) -> str:
-        """在长期记忆里全文搜索。索引被截断、或不确定某条记忆是否存在时，用本工具查找；它直接搜文件内容，不依赖索引。
+        """在长期记忆里全文搜索。索引被截断、或不确定某条记忆是否存在时使用，直接搜索文件内容。
 
         Args:
-            query(string): 搜索词，可用空格分隔多个词；默认要同时命中所有词，mode=any 时命中任意一个即可
-            scope(string): 搜索范围，global、session、people 或 all（默认，启用的作用域都搜）
-            mode(string): all（默认，所有词都要命中）或 any（命中任意一个词即可）；结果按非日志优先、命中词数、updated 倒序排列，最多 8 条，每条附文件名、类型、更新日期和最多 2 行命中片段
+            query(string): 搜索词，可用空格分隔多个词
+            scope(string): 搜索范围：global、session、people 或 all（默认）
+            mode(string): all（默认，所有词都要命中）或 any（命中任意一个词即可）
         """
         if not self._bool("enable_memory", True):
             return "记忆功能已在插件配置中停用。"

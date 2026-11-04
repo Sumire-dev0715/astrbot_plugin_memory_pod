@@ -32,15 +32,9 @@ def test_collect_sizes_has_required_fields():
     assert sizes["background_prompt"] > 0
     assert sizes["within_limit"] is True
     assert sizes["chat_total"] <= 1200
-    assert set(sizes["variants"]) == {
-        "global_off_forgetting_off",
-        "global_off_forgetting_on",
-        "global_on_forgetting_off",
-        "global_on_forgetting_on",
-    }
-    # 开启遗忘会多一段规范说明：默认配置通过，但最坏变体如实标出超线。
-    assert sizes["variants"]["global_off_forgetting_on"] > 1200
-    assert sizes["within_limit_all_variants"] is False
+    # 3.7.6 只保留聊天侧行动所需的文本；旧的作用域/遗忘变体说明已删除
+    assert "variants" not in sizes
+    assert "within_limit_all_variants" not in sizes
 
 
 def test_cli_json_output():

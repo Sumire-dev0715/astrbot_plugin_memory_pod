@@ -786,7 +786,7 @@ def test_empty_config_behaves_like_upstream(tmp_path):
     assert "已记下" in run(plugin.memory_note(event, "记住用户是工程师"))
 
     guidance = plugin._guidance(event.unified_msg_origin)
-    assert guidance == pkg_prompts.memory_guidance(False, False)
+    assert guidance == pkg_prompts.memory_guidance()
     assert "共享人物空间" not in guidance
 
 

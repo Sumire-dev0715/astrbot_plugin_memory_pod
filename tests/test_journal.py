@@ -473,7 +473,7 @@ def test_truncate_index_keeps_journal_block_when_it_fits():
 
 def test_chat_guidance_leaves_journal_rules_to_background():
     """聊天侧只读，不再写 journal 的写入规则；规则在后台提示词里。"""
-    text = prompts.memory_guidance(True)
+    text = prompts.memory_guidance()
     assert "daily-<日期>.md" not in text
     assert "写入查重" not in text
 

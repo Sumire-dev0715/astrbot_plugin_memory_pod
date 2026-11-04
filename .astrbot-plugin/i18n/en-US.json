@@ -1,6 +1,6 @@
 {
   "metadata": {
-    "display_name": "Memory Beyond",
+    "display_name": "鲸群记忆",
     "short_desc": "Helps your bot remember people and things, so long chats don't make it forget.",
     "desc": "Gives your chatbot a better memory using indexed files, no embedding model needed. Also includes context compression. Please read the first part of the README before use!"
   },

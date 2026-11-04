@@ -2,15 +2,13 @@
 
 统计模型每轮实际看到的固定文本：
 
-- 记忆规范（按默认配置的全局记忆、遗忘开关组合生成）；
+- 记忆规范；
 - 三个工具说明：工具名、AstrBot 取的 docstring 第一段 description，以及
   参数 description（模型实际收到的完整 schema）；
 - 索引块外壳与召回块外壳（块首数据声明、标题与标记，不含具体记忆正文）；
 - 后台整理提示词（空索引、空对话时的模板体积）。
 
-`chat_total` = 默认配置下的记忆规范 + 三个工具的完整 schema，验收线
-1200 字。全局记忆/遗忘开关的四种组合另列在 variants 里；开启遗忘会追加
-一段规范说明，`within_limit_all_variants` 会如实标出它是否超线。
+`chat_total` = 记忆规范 + 三个工具的完整 schema，验收线 1200 字。
 
 用法：
     python scripts/prompt_sizes.py --json
@@ -32,11 +30,6 @@ from scripts.eval import astrbot_stub  # noqa: E402
 from scripts.eval.harness import tool_schema  # noqa: E402
 
 CHAT_LIMIT = 1200
-
-
-def _load_config_defaults() -> dict:
-    schema = json.loads((REPO_ROOT / "_conf_schema.json").read_text("utf-8"))
-    return {key: meta.get("default") for key, meta in schema.items()}
 
 
 def _tool_docs(plugin_cls) -> dict[str, dict]:
@@ -94,23 +87,10 @@ def collect_sizes() -> dict:
     recall = mods["core.recall"]
     writer = mods["core.writer"]
 
-    config = _load_config_defaults()
-    guidance = prompts.memory_guidance(
-        include_global=bool(config.get("enable_global_memory", False)),
-        include_forgetting=bool(config.get("enable_forgetting", False)),
-    )
+    guidance = prompts.memory_guidance()
     tools = _tool_docs(plugin_cls)
     tool_total = sum(item["description"] for item in tools.values())
     tool_schema_total = sum(sum(item.values()) for item in tools.values())
-    variants: dict[str, int] = {}
-    for global_on in (False, True):
-        for forgetting_on in (False, True):
-            key = f"global_{'on' if global_on else 'off'}_" \
-                  f"forgetting_{'on' if forgetting_on else 'off'}"
-            variants[key] = (
-                len(prompts.memory_guidance(global_on, forgetting_on))
-                + tool_schema_total
-            )
 
     index_shell = len(injection.build_opening_block(None, "X", [], now=0.0)) - 1
     index_shell_with_global = (
@@ -141,9 +121,7 @@ def collect_sizes() -> dict:
         "background_prompt": len(context.prompt),
         "background_rules": len(writer.WRITE_RULES),
         "chat_total": chat_total,
-        "variants": variants,
         "within_limit": chat_total <= CHAT_LIMIT,
-        "within_limit_all_variants": max(variants.values()) <= CHAT_LIMIT,
         "limit": CHAT_LIMIT,
     }
 
@@ -171,14 +149,6 @@ def main(argv: list[str] | None = None) -> int:
             f"聊天侧合计 chat_total：{sizes['chat_total']} 字"
             f"（上限 {sizes['limit']}，{'通过' if sizes['within_limit'] else '超出'}）"
         )
-        for key, value in sizes["variants"].items():
-            flag = "通过" if value <= sizes["limit"] else "超出"
-            print(f"  变体 {key}：{value} 字（{flag}）")
-        if not sizes["within_limit_all_variants"]:
-            print(
-                "注意：开启遗忘后记忆规范会多一段说明，完整 schema 合计超过 "
-                f"{sizes['limit']} 字；默认配置的 chat_total 不受影响。"
-            )
     return 0 if sizes["within_limit"] else 1
 
 
