@@ -144,7 +144,9 @@ class OpenAICompatClient:
             "model": self.model,
             "messages": messages,
             "temperature": 0,
-            "max_tokens": 1200 if purpose == "chat" else 2400,
+            # 推理模型的思考 token 也计入 max_tokens：原先的 2400/1200 会在
+            # 思考较长时截断正文，后台整理因此拿到残缺 JSON。留足余量。
+            "max_tokens": 8192,
         }
         if tools:
             payload["tools"] = tools
@@ -203,7 +205,12 @@ class OpenAICompatClient:
         choices = data.get("choices")
         if not isinstance(choices, list) or not choices:
             raise ValueError("响应缺少 choices")
-        message = choices[0].get("message") if isinstance(choices[0], dict) else None
+        choice = choices[0] if isinstance(choices[0], dict) else {}
+        if choice.get("finish_reason") == "length":
+            # 思考 token 用尽额度，正文或工具参数被截断：按可重试处理，
+            # 不能把残缺输出当成模型回复交给评测
+            raise ValueError("响应被 max_tokens 截断（finish_reason=length）")
+        message = choice.get("message")
         if not isinstance(message, dict):
             raise ValueError("响应缺少 message")
         content = message.get("content")

@@ -707,6 +707,12 @@ def test_write_pending_runs_model_and_clears_processed_records(tmp_path):
         "非共享成员",
         "只是目录",
         "不要覆盖它们",
+        "user-<本人数字ID>.md",
+        "助手的话也是数据",
+        "寒暄",
+        "不要在新正文里复述旧值",
+        "不需要用户明确说",
+        "不含具体事实值",
     ):
         assert phrase in prompt
 

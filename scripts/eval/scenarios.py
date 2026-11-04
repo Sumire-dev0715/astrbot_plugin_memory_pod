@@ -42,6 +42,11 @@ def _has(files, *needles: str) -> bool:
     return any(needle in text for needle in needles)
 
 
+def _compact(text: str) -> str:
+    """去掉全部空白后再比对事实值：模型可能写“3月5日”或“3 月 5 日”。"""
+    return "".join((text or "").split())
+
+
 def _file(files, name: str):
     return next((item for item in files if item.file == name), None)
 
@@ -204,15 +209,15 @@ def correction_old_fact() -> Scenario:
     """更正旧事实：旧值消失，新值生效。"""
 
     def probe(env: EvalEnv):
-        env.probes["old_present"] = "3 月 5" in env.joined_memory()
+        env.probes["old_present"] = "3月5" in _compact(env.joined_memory())
 
     def check(env: EvalEnv):
         if not env.probes.get("old_present"):
             return False, "第一轮的旧生日没有被记住，无法验证更正"
-        memory = env.joined_memory()
-        if "3 月 5" in memory:
+        memory = _compact(env.joined_memory())
+        if "3月5" in memory:
             return False, "更正后旧生日仍然留在记忆里"
-        if "4 月 12" not in memory:
+        if "4月12" not in memory:
             return False, "更正后的新生日没有写进记忆"
         return True, ""
 

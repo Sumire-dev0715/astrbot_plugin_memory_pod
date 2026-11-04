@@ -120,6 +120,28 @@ def test_client_retries_5xx_and_parses_tool_calls():
     assert reply.prompt_tokens == 12
 
 
+def test_client_retries_truncated_response():
+    """finish_reason=length 的残缺回复不能当成功结果。"""
+    truncated = _reply()
+    truncated["choices"][0]["finish_reason"] = "length"
+    server = _Server([(200, truncated), (200, _reply())])
+    try:
+        client = OpenAICompatClient(
+            server.url,
+            "eval-model",
+            "sk-local-secret",
+            sleep=lambda _seconds: None,
+            max_attempts=2,
+        )
+        reply = asyncio.run(
+            client.complete([{"role": "user", "content": "hi"}], None)
+        )
+    finally:
+        server.close()
+    assert len(server.paths) == 2
+    assert reply.content == "你好"
+
+
 def test_client_accepts_base_with_v1():
     server = _Server([(200, _reply())])
     try:
