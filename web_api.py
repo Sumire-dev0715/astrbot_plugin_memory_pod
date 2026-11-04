@@ -37,9 +37,9 @@ try:  # v4.26 起的插件 Web API 请求对象
 except ImportError:  # 更早的版本走 Quart
     _plugin_request = None
 
-PLUGIN_NAME = "astrbot_plugin_memory_beyond"
+PLUGIN_NAME = "astrbot_plugin_memory_pod"
 ROUTE_PREFIX = f"/{PLUGIN_NAME}/"
-LOG_PREFIX = "[MemoryBeyond] "
+LOG_PREFIX = "[MemoryPod] "
 
 SCOPE_GLOBAL = "global"
 SCOPE_SESSION = "session"

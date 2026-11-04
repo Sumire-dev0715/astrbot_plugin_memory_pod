@@ -4,7 +4,7 @@
 用法：
 
     python scripts/measure_recall.py \
-        --data-dir /path/to/plugin_data/astrbot_plugin_memory_beyond
+        --data-dir /path/to/plugin_data/astrbot_plugin_memory_pod
 
 数据目录应当是插件数据目录的副本（里面有 archive/ 与 memories/）。脚本只读：
 不写使用统计、不改任何记忆文件；输出只有统计数字，不打印任何记忆或对话正文。

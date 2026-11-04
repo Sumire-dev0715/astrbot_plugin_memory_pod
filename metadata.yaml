@@ -1,8 +1,17 @@
-name: astrbot_plugin_memory_beyond
-desc: 使用索引式档案存储的方案，为你的聊天机器人加上更好的记忆系统，无需Embedding模型；自带上下文压缩方案，使用前请阅读README开头字段！
-help: 装上即用。机器人会自己调用 memory_read / memory_write / memory_edit / memory_search 工具读写记忆；上下文快满时自动摘要压缩。建议在插件配置中填写 max_context_tokens（模型上下文窗口大小），并按 README 调整 AstrBot 的两处内置设置。管理员指令：/mb_status 查看状态，/mb_reset 重置本会话压缩状态，/mb_probe 测试摘要链路。在 AstrBot WebUI 侧边栏的「插件页面」里可以查看和编辑每个会话的记忆、设置定期整理、备份与迁移记忆（需要 AstrBot v4.24.1 及以上）。
-version: v1.4.1-local.7
-author: AlanBacker
-display_name: Memory Beyond 增强记忆
-short_desc: 用更好的方案让机器人记住人和事，聊再久也不失忆。
+name: astrbot_plugin_memory_pod
+desc: 基于 Memory Beyond v1.4.1 的增强版长期记忆与上下文压缩插件：索引式 Markdown 记忆，无需 Embedding；新增自动历史版本与回收站、journal 日志折叠、共享人物空间、追加/按节编辑、搜索或模式与片段。
+help: 装上即用。机器人通过 memory_read / memory_write / memory_edit / memory_search 读写记忆；上下文快满时自动摘要压缩。新增：覆盖/删除前自动保存历史，回收站可恢复；journal 日志不占单独索引行、不参与自动召回与查重；shared_people_bots 可让多个机器人共享人物记忆，并按 edit/append/read 控制写权限；memory_edit 支持 append/section；memory_search 支持 any 与命中片段。建议在插件配置中填写 max_context_tokens，并按 README 调整 AstrBot 的两处内置设置。管理页需要 AstrBot v4.24.1 及以上。管理员指令：/mb_status、/mb_reset、/mb_probe。
+version: v1.5.0
+author: Sumire-dev0715
+display_name: 鲸群记忆
+short_desc: 让机器人记住人，跨会话、跨机器人共享，还能回溯和整理。
+repo: https://github.com/Sumire-dev0715/astrbot_plugin_memory_pod
 astrbot_version: ">=4.5.7"
+tags:
+  - 记忆
+  - 长期记忆
+  - 上下文压缩
+  - 共享记忆
+  - 历史版本
+  - 日志
+  - 记忆整理

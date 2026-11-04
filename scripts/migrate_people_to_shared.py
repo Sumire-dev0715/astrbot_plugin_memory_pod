@@ -9,7 +9,7 @@ forgotten/ 下已遗忘的）和使用统计原样复制过去，写入时间与
 默认只预演（dry-run），不写任何文件；加 --apply 才真正复制。
 
     python scripts/migrate_people_to_shared.py \
-        --data-dir /path/to/plugin_data/astrbot_plugin_memory_beyond \
+        --data-dir /path/to/plugin_data/astrbot_plugin_memory_pod \
         --from Bot-A --from Bot-B
 
 同一个 user-<数字ID>.md 在多个来源都有、或共享目录里已经有同名文件时，
@@ -255,7 +255,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--data-dir",
         required=True,
-        help="插件数据目录（包含 memories/），例如 plugin_data/astrbot_plugin_memory_beyond",
+        help="插件数据目录（包含 memories/），例如 plugin_data/astrbot_plugin_memory_pod",
     )
     parser.add_argument(
         "--from",

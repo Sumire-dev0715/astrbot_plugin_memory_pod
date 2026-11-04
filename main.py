@@ -53,8 +53,8 @@ from .core import (
 from .core.turns import split_leading_system, split_turns
 from .web_api import MemoryDashboard
 
-PLUGIN_NAME = "astrbot_plugin_memory_beyond"
-LOG_PREFIX = "[memory_beyond] "
+PLUGIN_NAME = "astrbot_plugin_memory_pod"
+LOG_PREFIX = "[memory_pod] "
 
 # 摘要提供商回退链中，当前对话提供商作为兜底时的尝试次数
 # （作为首选时按配置的 summary_retry_count）。
@@ -2961,7 +2961,7 @@ class MemoryBeyondPlugin(Star):
                     "请调大 max_context_tokens，或减少启用的插件工具"
                 )
         lines = [
-            "Memory Beyond 状态",
+            "鲸群记忆 状态",
             f"记忆：{'启用' if self._bool('enable_memory', True) else '停用'}"
             f"（{global_part} / {people_part} / 会话 {len(session_files)} 个文件）",
             f"压缩：{'启用' if self._bool('enable_compression', True) else '停用'}",

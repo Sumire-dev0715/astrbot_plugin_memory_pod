@@ -1,4 +1,24 @@
-# Memory Beyond 增强记忆
+# 鲸群记忆（astrbot_plugin_memory_pod）
+
+> 基于 [AlanBacker/astrbot_plugin_memory_beyond](https://github.com/AlanBacker/astrbot_plugin_memory_beyond) v1.4.1（commit d217033）修改，原作者 AlanBacker，原项目采用 MIT 许可证。
+
+## 与上游的区别
+
+- **自动历史与回收站**：覆盖、修改、删除前自动保存旧版；删除进回收站，可恢复，也可彻底删除（含历史）。
+- **journal 日志**：新增第五种记忆类型；日志不占单独索引行，折叠成“最近 2 篇 + 1 行汇总”，不参与自动召回和查重。
+- **共享人物空间**：配置 `shared_people_bots` 后，多个机器人共用同一份人物记忆，并按 `edit` / `append` / `read` 控制写权限。
+- **编辑与检索**：`memory_edit` 支持追加和按小节替换；`memory_search` 支持“或”模式、相关度排序和命中片段；写入时提示悬空链接和过长文件。
+- **召回优化**：私聊人物档案固定在开头块；召回分档（少量全文 + 其余指针）；长文件头尾截断；索引紧凑注入、按使用情况选择保留行。
+
+> **从 Memory Beyond 升级**：插件标识改为 `astrbot_plugin_memory_pod`，AstrBot 会使用新的配置和插件数据目录。停掉插件后，把旧数据复制到新目录，再重新填写插件配置：
+>
+> ```bash
+> mkdir -p data/plugin_data/astrbot_plugin_memory_pod
+> cp -a data/plugin_data/astrbot_plugin_memory_beyond/. data/plugin_data/astrbot_plugin_memory_pod/
+> cp -a data/config/astrbot_plugin_memory_beyond_config.json data/config/astrbot_plugin_memory_pod_config.json
+> ```
+>
+> 不要同时安装上游 `astrbot_plugin_memory_beyond` 和本插件，避免两个插件分别读写不同目录造成混淆。
 
 ## ⚠️ 使用前必读：先完成这几步设置
 
@@ -174,7 +194,7 @@ AstrBot 的内置压缩没有"关闭"开关（「历史超限或上下文接近�
 ### 记忆
 
 ```
-data/plugin_data/astrbot_plugin_memory_beyond/
+data/plugin_data/astrbot_plugin_memory_pod/
 ├── memories/
 │   ├── global/                    # 机器人自我：偏好、行为准则（所有会话共享，默认关闭）
 │   │   ├── MEMORY.md              # 索引：一条记忆一行，只放指针（插件自动维护）
