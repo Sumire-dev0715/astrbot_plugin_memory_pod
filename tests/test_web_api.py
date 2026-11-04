@@ -1029,7 +1029,11 @@ def test_file_purge_removes_history_trash_and_forgotten(plugin, dash):
     report = store.index_report()
     assert report.missing == [] and report.dangling == []
     assert plugin.invalidated[-1] == KEY
-    assert plugin._pending.load(KEY).records == []
+    # 待整理对话本身保留（里面可能还有别的、与 a.md 无关的对话），但记下
+    # 屏蔽：这批旧对话下次整理时不能把 a.md 写回来
+    state = plugin._pending.load(KEY)
+    assert [record.seq for record in state.records] == [1]
+    assert "session/a.md" in state.blocked_specs()
 
     assert "没有找到" in err(call(dash, "file/purge", body=q))
     assert "索引" in err(call(dash, "file/purge", body={**q, "file": "MEMORY.md"}))
@@ -1353,3 +1357,162 @@ def test_archive_routes_are_gone(dash):
     paths = {path for path, _, _, _ in dash._routes()}
     assert "archives" not in paths and "archive" not in paths
     assert "session/state" in paths
+
+
+# ---------------------------------------------------------------- 审查回归（待整理与迁移）
+
+
+def test_file_purge_marks_pending_for_people_scope(plugin, dash):
+    other_umo = "qq_new:GroupMessage:1"
+    other_key = pkg_memstore.safe_key(other_umo)
+    plugin._pending.record_user(
+        KEY, UMO, "人物对话", False, "1", 1_800_000_000.0, platform="aiocqhttp"
+    )
+    plugin._pending.record_user(
+        other_key, other_umo, "另一个平台", False, "1", 1_800_000_000.0,
+        platform="qq_new",
+    )
+    people = plugin._store.people_scope("aiocqhttp")
+    asyncio.run(people.write("user-1.md", memory("user-1", "人物")))
+
+    result = call(
+        dash,
+        "file/purge",
+        body={"scope": "people", "key": "aiocqhttp", "file": "user-1.md"},
+    )
+    assert result["status"] == "ok"
+    # 同一人物目录下的会话被屏蔽；其他平台的会话不受影响
+    assert "people/user-1.md" in plugin._pending.load(KEY).blocked_specs()
+    assert plugin._pending.load(other_key).blocked_specs() == set()
+
+
+def test_file_purge_marks_pending_for_global(plugin, dash):
+    other_umo = "qq_new:GroupMessage:1"
+    other_key = pkg_memstore.safe_key(other_umo)
+    plugin._pending.record_user(
+        KEY, UMO, "会话一", False, "1", 1_800_000_000.0, platform="aiocqhttp"
+    )
+    plugin._pending.record_user(
+        other_key, other_umo, "会话二", False, "1", 1_800_000_000.0,
+        platform="qq_new",
+    )
+    global_store = plugin._store.global_scope()
+    asyncio.run(global_store.write("rules.md", memory("rules", "准则")))
+
+    result = call(
+        dash, "file/purge", body={"scope": "global", "file": "rules.md"}
+    )
+    assert result["status"] == "ok"
+    # global 对所有会话可见：有记录的会话都要屏蔽
+    assert "global/rules.md" in plugin._pending.load(KEY).blocked_specs()
+    assert "global/rules.md" in plugin._pending.load(other_key).blocked_specs()
+
+
+def test_import_apply_stops_but_keeps_target_pending(plugin, dash, tmp_path):
+    source = FakePlugin(tmp_path / "source")
+    asyncio.run(
+        source._store.session_scope(UMO).write("a.md", memory("a", "甲"))
+    )
+    bundle = asyncio.run(
+        web_api.MemoryDashboard(source).transfer.export(None)
+    )
+
+    plugin._pending.record_user(
+        KEY, UMO, "目标自己的待整理对话", False, "1", 1_800_000_000.0,
+        platform="aiocqhttp",
+    )
+    stopped = []
+
+    async def stop(key):
+        stopped.append(key)
+
+    plugin.stop_pending_write_key = stop
+    preview = ok(call(dash, "import/preview", body={"bundle": bundle}))
+    call(
+        dash,
+        "import/apply",
+        body={
+            "token": preview["token"],
+            "selection": [{"scope": "session", "key": KEY}],
+        },
+    )
+    # 写之前先停掉在途整理，但目标自己的待整理对话保留
+    assert stopped == [KEY]
+    assert plugin._pending.load(KEY).count == 1
+    assert plugin._store.session_scope(UMO).exists("a.md")
+
+
+def test_migrate_scope_copy_keeps_target_pending(plugin, dash):
+    store = session_store(plugin)
+    asyncio.run(store.write("a.md", memory("a", "甲")))
+    new_umo = "aiocqhttp:GroupMessage:300400"
+    new_key = pkg_memstore.safe_key(new_umo)
+    plugin._pending.record_user(
+        new_key, new_umo, "目标自己的对话", False, "1", 1_800_000_000.0,
+        platform="aiocqhttp",
+    )
+    result = call(
+        dash,
+        "migrate/scope",
+        body={
+            "from": {"scope": "session", "key": KEY},
+            "to": {"umo": new_umo},
+            "files": ["a.md"],
+            "mode": "copy",
+        },
+    )
+    assert result["status"] == "ok"
+    # copy 只复制记忆，目标会话自己的待整理对话不能被清掉
+    assert plugin._pending.load(new_key).count == 1
+    assert [record.user for record in plugin._pending.load(new_key).records] == [
+        "目标自己的对话"
+    ]
+
+
+def test_migrate_platform_moves_pending_only_session(plugin, dash):
+    plugin._pending.record_user(
+        KEY, UMO, "只有待整理记录", False, "1", 1_800_000_000.0,
+        platform="aiocqhttp",
+    )
+    new_key = pkg_memstore.safe_key("qq_new:GroupMessage:100200")
+    result = call(
+        dash, "migrate/platform", body={"from": "aiocqhttp", "to": "qq_new"}
+    )
+    assert result["status"] == "ok"
+    # 没有记忆文件、只有待整理记录的会话也要跟着改名
+    assert plugin._pending.load(new_key).count == 1
+    assert plugin._pending.load(KEY).count == 0
+    assert plugin._pending.load(new_key).records[0].user == "只有待整理记录"
+
+
+def test_migrate_platform_copy_duplicates_pending(plugin, dash):
+    plugin._pending.record_user(
+        KEY, UMO, "只有待整理记录", False, "1", 1_800_000_000.0,
+        platform="aiocqhttp",
+    )
+    new_key = pkg_memstore.safe_key("qq_new:GroupMessage:100200")
+    call(
+        dash,
+        "migrate/platform",
+        body={"from": "aiocqhttp", "to": "qq_new", "mode": "copy"},
+    )
+    assert plugin._pending.load(KEY).count == 1
+    assert plugin._pending.load(new_key).count == 1
+
+
+def test_session_purge_waits_for_background_gate(plugin, dash):
+    async def scenario():
+        plugin._background_gate = asyncio.Semaphore(1)
+        session_store(plugin)
+        await plugin._background_gate.acquire()
+        handlers = {path: handler for path, _, handler, _ in dash._routes()}
+        REQUEST.query = {}
+        REQUEST.body = {"key": KEY}
+        task = asyncio.create_task(dash._wrap(handlers["session/purge"])())
+        await asyncio.sleep(0.01)
+        assert not task.done()  # 等后台整理退出
+        plugin._background_gate.release()
+        return await task
+
+    result = asyncio.run(scenario())
+    assert result["status"] == "ok"

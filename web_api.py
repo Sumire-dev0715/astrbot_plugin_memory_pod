@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import secrets
 import time
+from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from astrbot.api import logger
@@ -67,6 +68,12 @@ MAX_QUERY = 200
 # 导出、导入的暂存：先生成再下载、先预演再执行，期间内容放在内存里
 STAGE_TTL = 30 * 60
 MAX_STAGED = 4
+
+
+@asynccontextmanager
+async def _null_async():
+    """没有后台锁的替身（测试里直接构造的最小插件对象）。"""
+    yield
 
 
 class ApiError(Exception):
@@ -427,6 +434,13 @@ class MemoryDashboard:
 
     def _changed(self, key: str | None) -> None:
         self.plugin.invalidate_for_key(key)
+
+    def _background_lock(self):
+        """与后台整理/定期整理共用同一把锁：清除动作期间不让它们落盘。"""
+        gate = getattr(self.plugin, "_background_gate", None)
+        if gate is None:
+            return _null_async()
+        return gate
 
     def _scope_label(self, scope: str, key: str | None) -> str:
         record = self.plugin._registry.get(key or "") if scope == SCOPE_SESSION else None
@@ -905,17 +919,50 @@ class MemoryDashboard:
             raise ApiError(report.message)
         return _ok({"entry": entry_name}, report.message)
 
+    def _pending_keys_for_file(
+        self, scope: str, key: str | None
+    ) -> list[str]:
+        """哪些会话的待整理旧对话可能把刚彻底删除的文件写回来。
+
+        session 只涉及本会话；people 是同一人物目录下的所有会话（共享空间
+        的目录名是 _shared，和会话键无关）；global 对所有会话可见，任何
+        有记录且整批是管理员的会话都可能写回。
+        """
+        book = getattr(self.plugin, "_pending", None)
+        if book is None:
+            return []
+        if scope == SCOPE_SESSION:
+            return [key] if key else []
+        result = []
+        for pending_key, state in book.items():
+            if not state.records:
+                continue
+            if scope == SCOPE_GLOBAL:
+                result.append(pending_key)
+                continue
+            platform = state.platform or registry.parse_umo(state.umo)[0]
+            if self.plugin._store.people_key(platform) == key:
+                result.append(pending_key)
+        return result
+
+    async def _stop_pending_keys(self, keys: list[str]) -> None:
+        for pending_key in keys:
+            await self.plugin.stop_pending_write_key(pending_key)
+
     async def file_purge(self) -> dict:
         """彻底删除在册/已遗忘文件及其全部历史、回收站条目（要求遗忘时用）。"""
         body = await _body()
         scope, key, store = self._scope_from_body(body)
         name = self._file_name(body.get("file"))
         sid = tidy.scope_id(scope, key)
-        if scope == SCOPE_SESSION and key:
-            await self.plugin.stop_pending_write_key(key)
-        report = await store.delete_file_completely(
-            name, actor=history.ACTOR_WEBUI
-        )
+        # 在途整理先叫停；整理与删除在同一把后台锁下做，删除之后不会再有
+        # 旧上下文把它写回来
+        pending_keys = self._pending_keys_for_file(scope, key)
+        await self._stop_pending_keys(pending_keys)
+        async with self._background_lock():
+            report = await store.delete_file_completely(
+                name, actor=history.ACTOR_WEBUI
+            )
         if not report.ok:
             # 正文可能只残留在 tidy/*.runs.json 的 before 里（整理合并后
             # 回收站又按保留期清掉了）。这时 memstore 报"没有找到"，但撤销
@@ -925,7 +972,7 @@ class MemoryDashboard:
                     self.plugin._tidy.remove_file, sid, name
                 )
                 if removed:
-                    self.plugin._pending.clear(key)
+                    self._mark_purged(pending_keys, scope, name)
                     self._changed(key)
                     return _ok(
                         {"file": name},
@@ -935,10 +982,18 @@ class MemoryDashboard:
         # 整理记录与待确认方案里也留着改动前原文；彻底删除要一并清掉，
         # 否则撤销整理会把刚删掉的正文写回来
         await asyncio.to_thread(self.plugin._tidy.remove_file, sid, name)
-        # 待整理对话里也可能还有同一条事实，留着会被后台整理重新写回
-        self.plugin._pending.clear(key)
+        # 待整理对话里也可能还有同一条事实：给这些旧对话记下屏蔽，下一次
+        # 整理跳过对这个文件的操作，既不写回，也不丢掉其他无关的对话
+        self._mark_purged(pending_keys, scope, name)
         self._changed(key)
         return _ok({"file": name}, report.message)
+
+    def _mark_purged(
+        self, pending_keys: list[str], scope: str, name: str
+    ) -> None:
+        now = time.time()
+        for pending_key in pending_keys:
+            self.plugin._pending.mark_purged(pending_key, scope, name, now)
 
     async def index_save(self) -> dict:
         body = await _body()
@@ -995,15 +1050,20 @@ class MemoryDashboard:
         # 正在跑的整理先停掉，避免它在清除之后又写回记忆
         await plugin.stop_pending_write(key)
         store = plugin._store.session_scope_by_key(key)
-        removed = (
-            await store.purge(actor=history.ACTOR_WEBUI) if store is not None else 0
-        )
-        plugin.invalidate_for_key(key)
-        # 记忆都没了，待确认的方案、整理记录与待整理对话也跟着作废
-        await asyncio.to_thread(
-            plugin._tidy.remove, tidy.scope_id(SCOPE_SESSION, key)
-        )
-        plugin._pending.clear(key)
+        # 定期自动整理也在同一把后台锁下运行；等它退出后再删，删除之后
+        # 队列里迟到的整理看到的是空作用域，不会重新建出文件
+        async with self._background_lock():
+            removed = (
+                await store.purge(actor=history.ACTOR_WEBUI)
+                if store is not None
+                else 0
+            )
+            plugin.invalidate_for_key(key)
+            # 记忆都没了，待确认的方案、整理记录与待整理对话也跟着作废
+            await asyncio.to_thread(
+                plugin._tidy.remove, tidy.scope_id(SCOPE_SESSION, key)
+            )
+            plugin._pending.clear(key)
         if _text(body.get("target")).strip().lower() != "all":
             return _ok({"removed": removed}, f"已删除 {removed} 个记忆文件")
 
@@ -1220,8 +1280,8 @@ class MemoryDashboard:
             # 运行时，invalidate_for_key 会按 people/ 前缀作废所有相关快照。
             self._changed(ref.key)
 
-    async def _drop_pending(self, ref: transfer.ScopeRef) -> None:
-        """记忆被搬动后，那里待确认的整理方案就对不上了。"""
+    async def _drop_tidy_pending(self, ref: transfer.ScopeRef) -> None:
+        """记忆被搬动/覆盖后，那里待确认的整理方案就对不上了。"""
 
         def change(meta: tidy.TidyMeta) -> None:
             meta.pending = None
@@ -1230,7 +1290,14 @@ class MemoryDashboard:
         meta = await asyncio.to_thread(self.plugin._tidy.meta, sid)
         if meta.pending:
             await asyncio.to_thread(self.plugin._tidy.update_meta, sid, change)
-        # 会话被搬走/改名后，旧会话的待整理对话不能再写回旧作用域
+
+    async def _stop_pending(self, ref: transfer.ScopeRef) -> None:
+        """搬动/导入前先停掉在途整理，避免它在结果之后又落一遍盘。"""
+        if ref.scope == SCOPE_SESSION and ref.key:
+            await self.plugin.stop_pending_write_key(ref.key)
+
+    async def _clear_pending(self, ref: transfer.ScopeRef) -> None:
+        """会话被搬走：旧会话的待整理对话不能再写回旧作用域。"""
         if ref.scope == SCOPE_SESSION and ref.key:
             await self.plugin.stop_pending_write_key(ref.key)
             self.plugin._pending.clear(ref.key)
@@ -1349,10 +1416,14 @@ class MemoryDashboard:
             scopes = [item for item in scopes if item.ref.id in ids]
         if not scopes:
             raise ApiError("没有选中要导入的地方")
+        # 先停掉目标会话的在途整理，再写记忆：导入结果不会被一段更早开始
+        # 的整理覆盖。导入不碰目标自己的待整理对话（那是另一段内容）。
+        for item in scopes:
+            await self._stop_pending(item.ref)
         reports = await self.transfer.import_bundle(scopes, policy)
         for item in scopes:
             self._changed_ref(item.ref)
-            await self._drop_pending(item.ref)
+            await self._drop_tidy_pending(item.ref)
         written = sum(
             r["counts"]["added"] + r["counts"]["replaced"] for r in reports
         )
@@ -1394,6 +1465,10 @@ class MemoryDashboard:
         )
         dry_run = bool(body.get("dryRun"))
         mode = _text(body.get("mode") or transfer.MODE_COPY).strip().lower()
+        if not dry_run:
+            # 目标会话的在途整理先停掉，免得它在搬动结果之后又写一遍；
+            # 目标自己的待整理对话保留，copy 模式尤其不能连带丢掉
+            await self._stop_pending(dst)
         report = await self.transfer.transfer(
             src,
             dst,
@@ -1409,10 +1484,12 @@ class MemoryDashboard:
         if dry_run:
             return _ok(report)
         self._changed_ref(dst)
-        await self._drop_pending(dst)
+        await self._drop_tidy_pending(dst)
         if report.get("moved"):
+            # 搬走的会话不再存在于原处，旧的待整理对话没有可写回的作用域
             self._changed_ref(src)
-            await self._drop_pending(src)
+            await self._clear_pending(src)
+            await self._drop_tidy_pending(src)
         counts = report["counts"]
         message = f"已写入 {counts['added'] + counts['replaced']} 条"
         if report.get("moved"):
@@ -1421,15 +1498,31 @@ class MemoryDashboard:
             message += "\n" + "\n".join(report["warnings"])
         return _ok(report, message)
 
+    def _platform_pending_keys(self, platform: str) -> list[str]:
+        """待整理记录的 umo/platform 属于某个平台 ID 的会话键。"""
+        keys = []
+        for key, state in self.plugin._pending.items():
+            owner = state.platform or registry.parse_umo(state.umo)[0]
+            if owner == platform:
+                keys.append(key)
+        return keys
+
     async def migrate_platform(self) -> dict:
         """平台 ID 变了之后，把旧 ID 下所有会话的记忆搬到新 ID 下。"""
         body = await _body()
         dry_run = bool(body.get("dryRun"))
         mode = _text(body.get("mode") or transfer.MODE_MOVE).strip().lower()
         include_people = bool(body.get("includePeople", True))
+        src_platform = _text(body.get("from"))
+        dst_platform = _text(body.get("to"))
+        if not dry_run:
+            # 旧平台的在途整理先停掉；改名后它们不能再用旧 UMO 落盘
+            await self._stop_pending_keys(
+                self._platform_pending_keys(src_platform)
+            )
         result = await self.transfer.remap_platform(
-            _text(body.get("from")),
-            _text(body.get("to")),
+            src_platform,
+            dst_platform,
             mode=mode,
             policy=transfer.check_policy(body.get("policy")),
             include_people=include_people,
@@ -1437,16 +1530,21 @@ class MemoryDashboard:
         )
         if (
             include_people
-            and self.plugin._store.people_key(_text(body.get("to"))) == sharing.SHARED_KEY
+            and self.plugin._store.people_key(dst_platform) == sharing.SHARED_KEY
         ):
             result.setdefault("warnings", []).append(SHARED_PEOPLE_WARNING)
         if dry_run:
             return _ok(result)
+        # 只有待整理记录、没有记忆文件的会话不在 result["items"] 里，
+        # 必须单独把它们的旧 UMO 换到新平台，否则会照旧写进旧平台目录
+        self.plugin._pending.remap_platform(
+            src_platform, dst_platform, move=mode == transfer.MODE_MOVE
+        )
         for item in result["items"]:
             for side in ("from", "to"):
                 ref = transfer.ScopeRef(item[side]["scope"], item[side]["key"])
                 self._changed_ref(ref)
-                await self._drop_pending(ref)
+                await self._drop_tidy_pending(ref)
         totals = result["totals"]
         message = (
             f"迁移完成：{len(result['items'])} 处，写入 "
