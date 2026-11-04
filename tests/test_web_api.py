@@ -51,7 +51,6 @@ def _load_web_api():
 
 
 web_api = _load_web_api()
-pkg_archive = importlib.import_module(f"{PACKAGE}.core.archive")
 pkg_compress = importlib.import_module(f"{PACKAGE}.core.compress")
 pkg_memstore = importlib.import_module(f"{PACKAGE}.core.memstore")
 pkg_registry = importlib.import_module(f"{PACKAGE}.core.registry")
@@ -85,7 +84,6 @@ class FakePlugin:
         self.context = FakeContext()
         self._store = pkg_memstore.MemoryStore(base / "memories")
         self._registry = pkg_registry.SessionRegistry(base / "sessions.json")
-        self._archive = pkg_archive.ArchiveStore(base / "archive")
         self._tidy = pkg_tidy.TidyBook(base / "tidy")
         self._seen = pkg_sharing.SeenVersions(base / "state" / "shared_seen.json")
         self._sessions: dict = {}
@@ -93,7 +91,15 @@ class FakePlugin:
         self.config = {
             "enable_memory": True,
             "enable_global_memory": False,
-            "enable_people_memory": False,
+        }
+        self.compression = {
+            "enabled": True,
+            "window": 128000,
+            "windowNote": "测试窗口",
+            "turnLimit": -1,
+            "keepRecentTurns": 3,
+            "turnLimitWarning": False,
+            "userIdentifier": False,
         }
         self.invalidated: list = []
         self.prompts: list = []
@@ -102,8 +108,8 @@ class FakePlugin:
     def _global_on(self):
         return self.config["enable_global_memory"]
 
-    def _people_on(self):
-        return self.config["enable_people_memory"]
+    async def compression_status(self, umo=None):
+        return dict(self.compression)
 
     def _forgetting_on(self):
         return self.config.get("enable_forgetting", False)
@@ -240,7 +246,6 @@ def test_scope_detail_and_file(plugin, dash):
     assert data["index"]["lines"] == 1 and data["index"]["missing"] == []
     assert data["index"]["maxLines"] == pkg_memstore.INDEX_MAX_LINES
     assert data["session"]["key"] == KEY
-    assert data["archiveCount"] == 0
 
     detail = ok(call(dash, "file", {"scope": "session", "key": KEY, "file": "user-1"}))
     assert detail["file"] == "user-1.md"
@@ -553,7 +558,6 @@ def test_session_purge_memories_then_all(plugin, dash):
     store = session_store(plugin)
     asyncio.run(store.write("a.md", memory("a", "d")))
     plugin._registry.touch(KEY, UMO, "开黑群")
-    plugin._archive.save(KEY, umo=UMO, cid="c", messages=[{"role": "user", "content": "hi"}], summary="s", keep=3)
     path = plugin.state_path_for_key(KEY)
     asyncio.run(plugin.save_state_file(path, pkg_compress.SessionState(cid="c")))
     plugin._sessions[UMO] = FakeRuntime(pkg_compress.SessionState())
@@ -564,20 +568,8 @@ def test_session_purge_memories_then_all(plugin, dash):
 
     ok(call(dash, "session/purge", body={"key": KEY, "target": "all"}))
     assert plugin._registry.get(KEY) is None
-    assert plugin._archive.count(KEY) == 0
     assert not path.exists()
     assert UMO not in plugin._sessions
-
-
-def test_archives(plugin, dash):
-    archive_id = plugin._archive.save(
-        KEY, umo=UMO, cid="c", messages=[{"role": "user", "content": "hi"}], summary="s", keep=3
-    )
-    listed = ok(call(dash, "archives", {"key": KEY}))["archives"]
-    assert [a["id"] for a in listed] == [archive_id]
-    detail = ok(call(dash, "archive", {"key": KEY, "id": archive_id}))
-    assert detail["messages"] == [{"role": "user", "text": "hi"}]
-    assert "归档不存在" in err(call(dash, "archive", {"key": KEY, "id": "../x"}))
 
 
 # ---------------------------------------------------------------- 整理
@@ -615,7 +607,6 @@ def test_consolidate_preview_and_apply(plugin, dash):
 
 def test_manual_consolidate_people_scope_not_gated(plugin, dash):
     """管理页手动整理共享人物空间不受定期整理的 edit 门控限制。"""
-    plugin.config["enable_people_memory"] = True
     plugin._store.set_shared_people(
         pkg_sharing.Membership(
             {
@@ -736,16 +727,15 @@ def test_file_detail_and_listing_expose_stamps(plugin, dash):
 
 
 def test_people_scope_routes(plugin, dash):
-    assert ok(call(dash, "overview"))["people"] == {"enabled": False, "platforms": []}
+    assert ok(call(dash, "overview"))["people"] == {"platforms": []}
     people = plugin._store.people_scope("aiocqhttp")
     asyncio.run(people.write("user-1.md", memory("user-1", "阿杰")))
-    plugin.config["enable_people_memory"] = True
+    # 人物记忆恒开：不需要任何开关，写过的目录立刻出现在页面
     data = ok(call(dash, "overview"))
-    assert data["people"]["enabled"] is True
     assert data["people"]["platforms"][0]["key"] == "aiocqhttp"
     assert data["people"]["platforms"][0]["fileCount"] == 1
     detail = ok(call(dash, "scope", {"scope": "people", "key": "aiocqhttp"}))
-    assert detail["enabled"] is True and detail["people"]["platform"] == "aiocqhttp"
+    assert detail["people"]["platform"] == "aiocqhttp"
     assert [f["file"] for f in detail["files"]] == ["user-1.md"]
     assert "不合法" in err(call(dash, "scope", {"scope": "people", "key": "../x"}))
     assert "people" in err(call(dash, "scope", {"scope": "nope", "key": ""}))
@@ -759,16 +749,12 @@ def test_people_scope_routes(plugin, dash):
     )
     ok(call(dash, "file/save", body={**base, "file": "user-2.md"}))
     assert set(people.list_files()) == {"user-1.md", "user-2.md"}
-    plugin.config["enable_people_memory"] = False
-    # 关闭后文件仍在、页面仍可看，只是标成未启用
-    assert ok(call(dash, "scope", {"scope": "people", "key": "aiocqhttp"}))["enabled"] is False
     assert ok(call(dash, "overview"))["people"]["platforms"][0]["fileCount"] == 2
 
 
 def test_shared_people_overview_and_detail(plugin, dash):
     membership = pkg_sharing.parse_config(["Bot-A=edit", "Bot-B=append"])
     plugin._store.set_shared_people(membership)
-    plugin.config["enable_people_memory"] = True
 
     # 还没有文件时，共享目录也要出现在人物分组里，成员与权限一并带上
     data = ok(call(dash, "overview"))
@@ -1247,8 +1233,7 @@ def test_migrate_scope_to_new_session(plugin, dash):
     assert plugin._store.session_scope(new_umo).list_files() == ["a.md"]
     assert plugin._registry.get(new_key).umo == new_umo
     assert {KEY, new_key} <= set(plugin.invalidated)
-    # 搬进还没有人物记忆的平台
-    plugin.config["enable_people_memory"] = True
+    # 搬进还没有人物记忆的平台（人物记忆恒开）
     asyncio.run(store.write("user-9.md", memory("user-9", "小九")))
     people = {"scope": "people", "platform": "qq_new"}
     ok(call(dash, "migrate/scope", body={"from": {"scope": "session", "key": KEY}, "to": people, "files": ["user-9.md"]}))
@@ -1329,3 +1314,26 @@ def test_file_purge_clears_tidy_only_residual(plugin, dash):
     assert result["status"] == "ok"
     assert "整理记录" in result["message"]
     assert plugin._tidy.runs(sid) == []
+
+
+# ---------------------------------------------------------------- 3.7 压缩跟随与归档删除
+
+
+def test_overview_reports_compression_follow_status(plugin, dash):
+    plugin.compression = {
+        "enabled": False,
+        "window": 64000,
+        "windowNote": "跟随 AstrBot 的上下文窗口兜底值",
+        "turnLimit": 5,
+        "keepRecentTurns": 3,
+        "turnLimitWarning": True,
+        "userIdentifier": True,
+    }
+    data = ok(call(dash, "overview"))
+    assert data["compression"] == plugin.compression
+
+
+def test_archive_routes_are_gone(dash):
+    paths = {path for path, _, _, _ in dash._routes()}
+    assert "archives" not in paths and "archive" not in paths
+    assert "session/state" in paths

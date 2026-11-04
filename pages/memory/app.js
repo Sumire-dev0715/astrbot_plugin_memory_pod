@@ -45,7 +45,6 @@
     permission_append: "仅追加",
     permission_read: "只读",
     peopleNone: "还没有人物记忆：机器人记下某个人之后会按平台出现在这里",
-    peopleOffNotice: "人物记忆未启用：机器人当前不会读取或写入这里的内容。如需使用，请在插件配置中开启「启用人物记忆」。",
     sessionsLabel: "会话 · {n}",
     noSessions: "没有符合条件的会话",
     noBridge: "请在 AstrBot 管理面板的「插件页面」中打开此页面。",
@@ -68,11 +67,13 @@
     consolidate: "整理记忆",
     purge: "清除数据",
     memoryOffNotice: "长期记忆已在插件配置中关闭：机器人不会读写记忆，这里只是保留在磁盘上的内容。",
+    compressionOffNotice: "上下文压缩已停用：本插件不压缩，交给 AstrBot 自带的压缩。",
+    turnLimitNotice: "AstrBot 的轮数上限为 {limit}，不大于本插件保留轮数 + 2（{keep}）：插件来不及抢先压缩，旧轮次会由 AstrBot 直接截断。可在 AstrBot 调大轮数上限，或调小「保留原文的最近轮数」。",
+    userIdentifierNotice: "AstrBot 的「用户识别」开着：本插件也会标注发送者，模型会看到两次。可以关掉 AstrBot 的「用户识别」，由本插件接管。",
     globalOffNotice: "全局记忆未启用：机器人当前不会读取或写入这里的内容。如需使用，请在插件配置中开启「启用全局记忆」。",
     tabMemories: "记忆",
     tabIndex: "索引",
     tabCompression: "上下文压缩",
-    tabArchives: "归档",
     searchPlaceholder: "全文搜索记忆",
     newMemory: "新建记忆",
     typeAll: "全部",
@@ -177,11 +178,6 @@
     liveHint: "插件内存中的当前状态",
     diskTag: "磁盘记录",
     diskHint: "插件启动后这个会话还没有新消息，显示的是上次保存的状态",
-    archivesTitle: "压缩归档",
-    archivesHint: "每次压缩前被摘要代替的原文",
-    noArchivesTitle: "还没有归档",
-    noArchivesHint: "上下文压缩时，被摘要代替的原文会存在这里，方便核对摘要有没有漏掉什么。",
-    archiveMeta: "{count} 条消息 · 摘要 {chars} 字",
     tabForgotten: "已遗忘",
     forgottenTitle: "已遗忘的记忆",
     forgottenHint: "长期没被召回或读取的记忆会移到这里：不进索引、不参与召回，文件保留。这个人再出现、或机器人主动读它时会自动恢复。",
@@ -237,18 +233,10 @@
     purgeFileTitle: "彻底删除文件",
     purgeFileMessage: "确定彻底删除 {file} 吗？当前作用域里的在册文件、已遗忘副本、全部历史版本和回收站条目都会删除，无法恢复；其他作用域（包括迁移后保留的旧平台人物目录）里的同名文件不受影响。",
     purgeFileConfirm: "彻底删除",
-    backToArchives: "返回归档列表",
-    archiveSummary: "这次压缩生成的摘要",
-    archiveMessages: "被摘要的原文（{n} 条）",
-    role_user: "用户",
-    role_assistant: "机器人",
-    role_tool: "工具结果",
-    toolCalls: "调用工具：{names}",
-    emptyMessage: "（没有文本内容）",
     remarkTitle: "会话备注",
     remarkHint: "备注只在管理页显示，方便认出这个会话。留空则显示群名或昵称。",
     purgeTitle: "清除会话数据",
-    purgeMessage: "「只删记忆」把该会话的记忆目录移入 memories/.trash-scopes 归档（在回收站保留期内可人工取回）；「删除全部」还会立即删除压缩状态、归档和会话登记。平台上的聊天记录不受影响。",
+    purgeMessage: "「只删记忆」把该会话的记忆目录移入 memories/.trash-scopes 归档（在回收站保留期内可人工取回）；「删除全部」还会立即删除压缩状态和会话登记。平台上的聊天记录不受影响。",
     purgeMemories: "只删记忆",
     purgeAll: "删除全部",
     consolidateTitle: "整理记忆",
@@ -340,7 +328,7 @@
     tabExport: "导出备份",
     tabImport: "导入备份",
     tabPlatform: "平台改名",
-    exportHint: "把记忆原文连同写入时间、使用次数存成一个文件。压缩状态和归档不在备份里。",
+    exportHint: "把记忆原文连同写入时间、使用次数存成一个文件。压缩状态不在备份里。",
     exportScopes: "要导出的地方",
     includeForgotten: "包含已遗忘的记忆",
     exportButton: "导出",
@@ -364,7 +352,7 @@
     cntNone: "没有要写入的",
     forgottenIncluded: "含已遗忘 {n}",
     issuesCount: "{n} 条不会写入",
-    platformHint: "在 AstrBot 里删掉重建了机器人、或改了它的 ID 之后，会话标识的第一段会变，原来的记忆就对不上了。这里把旧 ID 下所有会话的记忆、备注和归档一起搬到新 ID 下。",
+    platformHint: "在 AstrBot 里删掉重建了机器人、或改了它的 ID 之后，会话标识的第一段会变，原来的记忆就对不上了。这里把旧 ID 下所有会话的记忆和备注一起搬到新 ID 下。",
     platformFrom: "旧平台 ID",
     platformTo: "新平台 ID",
     platformToHint: "可以从当前启用的机器人里选",
@@ -849,9 +837,6 @@
     indexDraft: null,
     compression: null,
     compressionLoading: false,
-    archives: null,
-    archivesLoading: false,
-    archiveView: null,
     history: null,
     trash: null,
     trashLoading: false,
@@ -892,9 +877,6 @@
     state.indexDraft = null;
     state.compression = null;
     state.compressionLoading = false;
-    state.archives = null;
-    state.archivesLoading = false;
-    state.archiveView = null;
     state.history = null;
     invalidateTrash();
   }
@@ -1020,8 +1002,6 @@
       return;
     }
     state.compression = null;
-    state.archives = null;
-    state.archiveView = null;
     state.history = null;
     invalidateTrash();
     state.searchResults = null;
@@ -1202,49 +1182,47 @@
         h("span", { class: "count" }, g.fileCount)
       )
     );
-    const people = state.overview.people || { enabled: false, platforms: [] };
-    if (people.enabled || people.platforms.length) {
-      list.append(h("div", { class: "list-label" }, t("peopleLabel")));
-      if (!people.platforms.length) {
-        list.append(h("div", { class: "empty", style: "padding:12px" }, h("span", null, t("peopleNone"))));
-      }
-      people.platforms.forEach(function (p) {
-        const active = isSelected({ scope: "people", key: p.key });
-        const shared = p.key === SHARED_KEY;
-        const name = peopleScopeTitle(p.platform, p.key);
-        let sub;
-        if (shared && p.members && p.members.length) {
-          sub = peopleMemberSummary(p.members);
-        } else if (shared) {
-          sub = p.active ? t("peopleSharedSub") : t("peopleSharedOff");
-        } else if (p.unused) {
-          sub = t("peopleUnused");
-        } else {
-          sub = people.enabled ? t("peopleSub") : t("disabled");
-        }
-        list.append(
-          h(
-            "button",
-            {
-              class: "session-item" + (active ? " active" : ""),
-              title: shared ? t("peopleSharedTitle") : p.platform,
-              onclick: function () {
-                selectScope({ scope: "people", key: p.key });
-              },
-            },
-            h("div", { class: "avatar people" }, icon("user")),
-            h(
-              "div",
-              { class: "session-text" },
-              h("div", { class: "session-name" }, name),
-              h("div", { class: "session-sub" }, sub)
-            ),
-            pendingDot(p.tidyPending),
-            h("span", { class: "count" }, p.fileCount)
-          )
-        );
-      });
+    const people = state.overview.people || { platforms: [] };
+    list.append(h("div", { class: "list-label" }, t("peopleLabel")));
+    if (!people.platforms.length) {
+      list.append(h("div", { class: "empty", style: "padding:12px" }, h("span", null, t("peopleNone"))));
     }
+    people.platforms.forEach(function (p) {
+      const active = isSelected({ scope: "people", key: p.key });
+      const shared = p.key === SHARED_KEY;
+      const name = peopleScopeTitle(p.platform, p.key);
+      let sub;
+      if (shared && p.members && p.members.length) {
+        sub = peopleMemberSummary(p.members);
+      } else if (shared) {
+        sub = p.active ? t("peopleSharedSub") : t("peopleSharedOff");
+      } else if (p.unused) {
+        sub = t("peopleUnused");
+      } else {
+        sub = t("peopleSub");
+      }
+      list.append(
+        h(
+          "button",
+          {
+            class: "session-item" + (active ? " active" : ""),
+            title: shared ? t("peopleSharedTitle") : p.platform,
+            onclick: function () {
+              selectScope({ scope: "people", key: p.key });
+            },
+          },
+          h("div", { class: "avatar people" }, icon("user")),
+          h(
+            "div",
+            { class: "session-text" },
+            h("div", { class: "session-name" }, name),
+            h("div", { class: "session-sub" }, sub)
+          ),
+          pendingDot(p.tidyPending),
+          h("span", { class: "count" }, p.fileCount)
+        )
+      );
+    });
     const sessions = filteredSessions();
     list.append(h("div", { class: "list-label" }, t("sessionsLabel", { n: sessions.length })));
     if (!sessions.length) {
@@ -1328,6 +1306,24 @@
       if (!ov.memoryEnabled) {
         box.append(notice("warn", t("memoryOffNotice")));
       }
+      const cs = ov.compression || {};
+      if (cs.enabled === false) {
+        box.append(notice("info", t("compressionOffNotice")));
+      }
+      if (cs.turnLimitWarning) {
+        box.append(
+          notice(
+            "warn",
+            t("turnLimitNotice", {
+              limit: cs.turnLimit,
+              keep: (cs.keepRecentTurns || 0) + 2,
+            })
+          )
+        );
+      }
+      if (cs.userIdentifier) {
+        box.append(notice("info", t("userIdentifierNotice")));
+      }
       append(box, [renderTidyCard(ov), renderPendingPanel(ov)]);
       box.append(
         h(
@@ -1374,7 +1370,9 @@
       if (peopleUnused) {
         meta.push(h("span", { class: "tag warn" }, t("peopleUnusedShort")));
       }
-      meta.push(h("span", { class: "tag " + (d.enabled ? "ok" : "warn") }, d.enabled ? t("enabled") : t("disabled")));
+      if (isGlobal) {
+        meta.push(h("span", { class: "tag " + (d.enabled ? "ok" : "warn") }, d.enabled ? t("enabled") : t("disabled")));
+      }
       if (peopleShared && people.members && people.members.length) {
         meta.push(h("span", null, peopleMemberSummary(people.members)));
       }
@@ -1451,9 +1449,6 @@
     if (isGlobal && !d.enabled) {
       notices.push(notice("warn", t("globalOffNotice")));
     }
-    if (isPeople && !d.enabled) {
-      notices.push(notice("warn", t("peopleOffNotice")));
-    }
     if (peopleShared) {
       notices.push(
         notice(
@@ -1483,7 +1478,6 @@
     const tabs = [["memories", "tabMemories", d.files.length], ["index", "tabIndex", null]];
     if (isSession) {
       tabs.push(["compression", "tabCompression", null]);
-      tabs.push(["archives", "tabArchives", d.archiveCount || 0]);
     }
     const forgotten = d.forgotten || [];
     if (d.forgettingEnabled || forgotten.length) {
@@ -1534,8 +1528,6 @@
       body.append(renderIndexTab());
     } else if (state.tab === "compression") {
       body.append(renderCompressionTab());
-    } else if (state.tab === "archives") {
-      body.append(renderArchiveTab());
     } else if (state.tab === "forgotten") {
       body.append(renderForgottenTab());
     } else if (state.tab === "trash") {
@@ -2889,152 +2881,6 @@
         toast(err.message, "error");
       }
     });
-  }
-
-  // ------------------------------------------------------------ 归档标签页
-
-  async function loadArchives() {
-    if (state.archivesLoading) {
-      return;
-    }
-    const sel = state.selected;
-    state.archivesLoading = true;
-    let result;
-    try {
-      const res = await apiGet("archives", { key: sel.key });
-      result = { items: res.archives || [] };
-    } catch (err) {
-      result = { error: err.message };
-    }
-    if (!isSelected(sel)) {
-      return;
-    }
-    state.archivesLoading = false;
-    state.archives = result;
-    if (state.tab === "archives") {
-      renderTab();
-    }
-  }
-
-  async function openArchive(id) {
-    const sel = state.selected;
-    state.archiveView = { loading: true };
-    renderTab();
-    let view;
-    try {
-      view = await apiGet("archive", { key: sel.key, id: id });
-    } catch (err) {
-      toast(err.message, "error");
-      view = null;
-    }
-    if (!isSelected(sel)) {
-      return;
-    }
-    state.archiveView = view;
-    if (state.tab === "archives") {
-      renderTab();
-    }
-  }
-
-  function renderArchiveTab() {
-    if (state.archiveView) {
-      return renderArchiveView();
-    }
-    const a = state.archives;
-    if (!a) {
-      loadArchives();
-      return spinnerBlock();
-    }
-    if (a.error) {
-      return errorBlock(a.error, function () {
-        state.archives = null;
-        renderTab();
-      });
-    }
-    const panel = h(
-      "section",
-      { class: "panel" },
-      h("div", { class: "panel-head" }, h("h3", null, t("archivesTitle")), h("span", { style: "color:var(--text-3);font-size:12.5px" }, t("archivesHint")))
-    );
-    if (!a.items.length) {
-      panel.append(emptyState("archive", t("noArchivesTitle"), t("noArchivesHint")));
-      return panel;
-    }
-    a.items.forEach(function (item) {
-      panel.append(
-        h(
-          "button",
-          {
-            class: "archive-item",
-            onclick: function () {
-              openArchive(item.id);
-            },
-          },
-          h("div", { class: "avatar" }, icon("archive")),
-          h(
-            "div",
-            { class: "grow" },
-            h("div", { class: "session-name" }, fmtTime(item.createdAt)),
-            h("div", { class: "session-sub" }, t("archiveMeta", { count: item.count, chars: fmtNum(item.summaryChars) }))
-          ),
-          h("span", { class: "file-age" }, relTime(item.createdAt))
-        )
-      );
-    });
-    return panel;
-  }
-
-  function messageBubble(m) {
-    const role = m.role === "user" ? "user" : m.role === "assistant" ? "assistant" : "tool";
-    const tools = m.tools && m.tools.length ? h("div", { class: "msg-role", style: "margin:6px 0 0" }, t("toolCalls", { names: m.tools.join(", ") })) : null;
-    return h(
-      "div",
-      { class: "msg " + role },
-      h("div", { class: "msg-role" }, t("role_" + role)),
-      m.text || (tools ? null : t("emptyMessage")),
-      tools
-    );
-  }
-
-  function renderArchiveView() {
-    const a = state.archiveView;
-    if (a.loading) {
-      return spinnerBlock();
-    }
-    const messages = a.messages || [];
-    return h(
-      "div",
-      { class: "stack" },
-      h(
-        "div",
-        { class: "actions", style: "align-items:center" },
-        h(
-          "button",
-          {
-            class: "btn small",
-            onclick: function () {
-              state.archiveView = null;
-              renderTab();
-            },
-          },
-          icon("back"),
-          t("backToArchives")
-        ),
-        h("strong", null, fmtTime(a.created_at))
-      ),
-      h(
-        "section",
-        { class: "panel" },
-        h("div", { class: "panel-head" }, h("h3", null, t("archiveSummary"))),
-        h("div", { class: "panel-body" }, h("pre", { class: "pre" }, a.summary || "—"))
-      ),
-      h(
-        "section",
-        { class: "panel" },
-        h("div", { class: "panel-head" }, h("h3", null, t("archiveMessages", { n: messages.length }))),
-        h("div", { class: "panel-body messages" }, messages.map(messageBubble))
-      )
-    );
   }
 
   // ------------------------------------------------------------ 会话操作

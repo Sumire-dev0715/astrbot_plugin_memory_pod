@@ -8,7 +8,6 @@ import threading
 import pytest
 
 from core import history, recall, tidy
-from core.archive import ArchiveStore
 from core.consolidate import Operation
 from core.memstore import (
     CONFLICT_OVERWRITE,
@@ -406,8 +405,7 @@ def test_tidy_apply_and_undo_are_recoverable(store):
 def test_transfer_move_keeps_source_in_scope_trash(tmp_path):
     store = MemoryStore(tmp_path / "memories")
     registry = SessionRegistry(tmp_path / "sessions.json")
-    archive = ArchiveStore(tmp_path / "archive")
-    mover = MemoryTransfer(store, registry, archive)
+    mover = MemoryTransfer(store, registry)
     src = store.session_scope(UMO)
     dst_umo = "qq_new:GroupMessage:100200"
     dst_key = safe_key(dst_umo)

@@ -32,3 +32,21 @@ def test_trash_purge_uses_file_purge_with_confirmation():
     assert 't("trashPurgeMessage"' in body
     assert 'apiPost("file/purge"' in body
     assert "loadDetail()" in body and "loadOverview(true)" in body
+
+
+def test_home_shows_compression_follow_notices():
+    """3.7.1：管理页首页提示轮数上限冲突、AstrBot 用户识别与压缩关闭。"""
+    source = _source()
+    welcome = source.split("function renderWelcome()", 1)[1].split(
+        "function renderDetail()", 1
+    )[0]
+    assert 't("compressionOffNotice")' in welcome
+    assert 't("turnLimitNotice"' in welcome
+    assert 't("userIdentifierNotice")' in welcome
+
+
+def test_archive_tab_is_gone():
+    source = _source()
+    assert 't("tabArchives")' not in source
+    assert "renderArchiveTab" not in source
+    assert "openArchive" not in source

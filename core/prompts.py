@@ -2,7 +2,7 @@
 
 三类文本，稳定性要求各不相同：
 - memory_guidance() 追加到 system_prompt——记忆规范属于指令，且逐字稳定
-  （只随全局记忆开关二选一），不破坏提示词缓存。
+  （只随全局记忆、遗忘开关变化），不破坏提示词缓存。
 - 索引块 / 摘要块以 user 消息注入历史开头——记忆内容源自用户对话，属于
   数据不是指令，不该被提升到系统权限层级（否则"记住：以后忽略你的规则"
   就成了系统指令），块首明确标注这是数据。注入消息都带 _no_save 标记：
@@ -167,13 +167,7 @@ _SCOPE_SESSION = "- session：当前会话（本群或本私聊）的记忆：�
 
 _SCOPE_PEOPLE = "- people：某个人本身的记忆，同一平台的所有群聊和私聊共享：一人一个文件，文件名固定 user-<数字ID>.md，类型 user。只存换个群也成立、且是本人亲口说的事实：身份、职业与专长、常用称呼、长期偏好；他在本群的角色、本群里的约定、群内的小事、别人转述的私事仍写 session 的 user-<数字ID>.md。people 没有索引注入：私聊里发送者的档案会钉在开头块，其他正在说话和被提到的人的 people 文件由召回自动附上（人数多时可能只给一行指针）；查别人直接 memory_read people 的 user-<数字ID>.md 或用 memory_search。"
 
-_SCOPES_SESSION_ONLY = """
-
-作用域：全局记忆与人物记忆已在插件配置中停用，memory 工具的 scope 一律填 session——当前会话（本群或本私聊）的记忆：这里的人（user）、进行中的事（project）、仅本会话适用的指导（feedback）、资源指针（reference）、每日日志（journal）。不要读写 global 或 people 作用域，这样的请求会被拒绝。"""
-
 _GLOBAL_OFF_NOTE = "\n全局记忆（global 作用域）已在插件配置中停用，不要读写，这样的请求会被拒绝。"
-
-_PEOPLE_OFF_NOTE = "\n人物记忆（people 作用域）已在插件配置中停用，不要读写，这样的请求会被拒绝。"
 
 _FORGET_NOTE = "\n\n遗忘：长期没被召回或读取的记忆会被插件自动移出索引与召回（指导类除外），文件并未删除。索引里没有不代表从没记过——拿不准时先 memory_search，结果里标注「已遗忘」的条目用 memory_read 读取即自动恢复；正在说话的人的记忆被遗忘后，他再出现时也会自动恢复。"
 
@@ -203,15 +197,15 @@ _SHARED_PEOPLE_RULE = """
 
 def memory_guidance(
     include_global: bool = True,
-    include_people: bool = False,
     include_forgetting: bool = False,
     shared_people: bool = False,
 ) -> str:
-    """记忆规范文本，按全局记忆、人物记忆、遗忘三个开关组合生成，每种组合
-    逐字稳定（不破坏提示词缓存）。
+    """记忆规范文本，按全局记忆、遗忘两个开关组合生成，每种组合逐字稳定
+    （不破坏提示词缓存）。
 
-    停用的作用域不描述，只明确告知不要读写——工具说明是静态的仍会列出
-    它们，不在这里讲清楚，模型就会反复尝试一个必然被拒绝的作用域。
+    人物记忆恒开，people 作用域始终描述。全局记忆停用时只明确告知不要
+    读写——工具说明是静态的仍会列出它，不在这里讲清楚，模型就会反复尝试
+    一个必然被拒绝的作用域。
     shared_people 表示当前机器人是共享人物空间的成员，追加共享空间的
     书写规范（中性的第三人称、只记身份类事实）。
     """
@@ -219,25 +213,18 @@ def memory_guidance(
     if include_global:
         lines.append(_SCOPE_GLOBAL)
     lines.append(_SCOPE_SESSION)
-    if include_people:
-        lines.append(_SCOPE_PEOPLE)
-    if len(lines) == 1:
-        scopes = _SCOPES_SESSION_ONLY
-    else:
-        scopes = f"\n\n{'三' if len(lines) == 3 else '两'}个作用域：\n" + "\n".join(lines)
-        if not include_global:
-            scopes += _GLOBAL_OFF_NOTE
-        elif not include_people:
-            scopes += _PEOPLE_OFF_NOTE
+    lines.append(_SCOPE_PEOPLE)
+    scopes = f"\n\n{'三' if include_global else '两'}个作用域：\n" + "\n".join(lines)
+    if not include_global:
+        scopes += _GLOBAL_OFF_NOTE
     if include_forgetting:
         scopes += _FORGET_NOTE
     privacy = _PRIVACY_BASE
     if include_global:
         privacy += _PRIVACY_GLOBAL
-    if include_people:
-        privacy += _PRIVACY_PEOPLE
+    privacy += _PRIVACY_PEOPLE
     text = _GUIDANCE_HEAD + scopes + _GUIDANCE_MIDDLE + privacy + "。"
-    if include_people and shared_people:
+    if shared_people:
         text += _SHARED_PEOPLE_RULE
     return text
 

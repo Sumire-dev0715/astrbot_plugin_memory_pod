@@ -6,10 +6,12 @@
     main.py     —— 平台适配层（本文件）：钩子、LLM 工具、指令、provider 调用
     web_api.py  —— WebUI 记忆管理页的后端接口（页面在 pages/memory）
     core/       —— 纯逻辑：记忆库、索引、召回、token 估算、轮次切分、
-                   压缩状态机、会话登记、压缩归档、记忆整理、工具循环保护
+                   压缩状态机、会话登记、记忆整理、工具循环保护
 
 兼容性立场：只依赖 @filter.on_llm_request() / @filter.on_llm_response() /
-@filter.llm_tool() 等公开插件接口，不 import AstrBot 内部实现、不 monkey-patch。
+@filter.llm_tool() 等公开插件接口、不 monkey-patch。跟随 AstrBot 取上下文
+窗口与轮数上限时要读 AstrBot 内部配置和模型表，相关 import 全部包在 try
+里：旧版本取不到就跳过那一级，插件照常加载。
 压缩采用抢先策略：在钩子里把 req.contexts 压到低于内置压缩器 0.82 的阈值，
 这一轮开头内置压缩器无事可做，同时留在下游当安全网。但模型一次回复里可以连续
 调用很多轮工具，结果一轮轮涨进上下文，开头的判断管不到，所以另在每个工具返回
@@ -35,7 +37,6 @@ from astrbot.api.provider import LLMResponse, ProviderRequest
 from astrbot.api.star import Context, Star, StarTools
 
 from .core import (
-    archive,
     compress,
     history,
     injection,
@@ -67,11 +68,15 @@ MIN_TAIL_BUDGET = 1000
 # 全局记忆关闭时对 scope=global 工具调用的固定回执；工具说明是静态的
 # 仍会列出 global，回执要把模型引导回 session。
 GLOBAL_MEMORY_OFF = "全局记忆已在插件配置中停用；请改用 session 作用域。"
-PEOPLE_MEMORY_OFF = "人物记忆已在插件配置中停用；关于人的信息请写 session 作用域。"
 PEOPLE_FILE_RULE = "people 作用域一人一个文件，文件名必须是 user-<数字ID>.md。"
 SCOPE_ARG_ERROR = "scope 参数必须是 global、session 或 people。"
 # 会话运行时缓存上限（LRU 淘汰，仅内存快照，磁盘状态不受影响）。
 MAX_RUNTIME_SESSIONS = 256
+# 跟随 AstrBot 取上下文窗口时，超过这个值的窗口视为按旧 README 调大过的
+# 兜底值（不可信），改用插件按模型名探测。
+UNTRUSTED_WINDOW_LIMIT = 10_000_000
+# AstrBot 设了轮数上限时，上下文轮数达到「上限 - 2」就抢先压缩。
+ASTRBOT_TURN_HEADROOM = 2
 # 模型挑选召回记忆时的单次超时：挑选在回复之前完成，等太久不如退回关键词
 RECALL_SELECT_TIMEOUT = 15
 # 遗忘扫描：每个作用域目录至多每隔这么久扫一次（秒）；默认多久没用到算遗忘（天）
@@ -204,7 +209,6 @@ class MemoryBeyondPlugin(Star):
         self._history_cleanup_at = 0.0
         self._state_dir = data_dir / "state"
         self._registry = registry.SessionRegistry(data_dir / "sessions.json")
-        self._archive = archive.ArchiveStore(data_dir / "archive")
         self._sessions: OrderedDict[str, RuntimeSession] = OrderedDict()
         self._tasks: set[asyncio.Task] = set()
         self._warned_threshold = False
@@ -535,11 +539,6 @@ class MemoryBeyondPlugin(Star):
     def _session_scope(self, event: AstrMessageEvent) -> memstore.ScopeStore:
         return self._store.session_scope(str(event.unified_msg_origin))
 
-    def _people_on(self) -> bool:
-        """人物记忆开关，默认关闭。开启后每个平台一份人物目录、一人一个文件，
-        该平台的所有会话共享；关闭时各会话各记各的，已有文件原样保留。"""
-        return self._bool("enable_people_memory", False)
-
     def _forgetting_on(self) -> bool:
         """记忆遗忘开关，默认关闭。开启后长期没被召回或读取的记忆移出索引与
         召回（文件保留在 forgotten/ 下），再被用到时自动恢复；关闭时什么都不动，
@@ -649,7 +648,6 @@ class MemoryBeyondPlugin(Star):
         shared = bool(umo) and self._sharing.is_member(self._platform_of(umo))
         return prompts.memory_guidance(
             self._global_on(),
-            self._people_on(),
             self._forgetting_on(),
             shared_people=shared,
         )
@@ -743,11 +741,9 @@ class MemoryBeyondPlugin(Star):
     def _can_extract_people(self, umo: str) -> bool:
         """后台 / 压缩联动提取能否写 people。
 
-        只有 edit 级成员能写共享人物空间；append / read 级成员的提取拿不到
-        people 目标，和 people 关闭时一样只写 session。非成员维持上游行为。
+        人物记忆恒开；共享人物空间里只有 edit 级成员能写，append / read 级
+        成员的提取拿不到 people 目标，只写 session。非成员不受限制。
         """
-        if not self._people_on():
-            return False
         permission = self._people_permission(self._platform_of(umo))
         return permission is None or permission == sharing.PERMISSION_EDIT
 
@@ -797,8 +793,6 @@ class MemoryBeyondPlugin(Star):
         scope = (scope or "").strip().lower()
         if scope == "global" and not self._global_on():
             return None, scope, GLOBAL_MEMORY_OFF
-        if scope == "people" and not self._people_on():
-            return None, scope, PEOPLE_MEMORY_OFF
         if scope == "people":
             store, refusal = self._people_store_for_event(event)
             if store is None:
@@ -898,8 +892,7 @@ class MemoryBeyondPlugin(Star):
         query = str(req.prompt or "")
 
         # ---- 发送者标注：注入数字 ID，让记人不依赖可变可冒用的昵称 ----
-        if self._bool("annotate_sender", True):
-            self._annotate_sender(event, req)
+        self._label_sender(event, req)
 
         n_system = split_leading_system(contexts)
         memory_on = self._bool("enable_memory", True)
@@ -938,9 +931,12 @@ class MemoryBeyondPlugin(Star):
         recall_cost = estimator.messages([recall_msg]) if recall_msg else 0
 
         # ---- 缓存已冷时清理旧工具结果：整段前缀反正要重新计费 ----
+        # 压缩关闭时插件完全不碰上下文，这项也一起停用
+        compress_on = self._bool("enable_compression", True)
         idle_minutes = self._int("tool_result_idle_minutes", 60)
         cache_cold = (
-            idle_minutes > 0
+            compress_on
+            and idle_minutes > 0
             and state.last_request_at > 0
             and now - state.last_request_at >= idle_minutes * 60
         )
@@ -957,33 +953,33 @@ class MemoryBeyondPlugin(Star):
                 cleared_total = cleared
             return tail
 
-        # ---- 抢先压缩 ----
+        # ---- 抢先压缩：token 阈值，或 AstrBot 的轮数上限 ----
         window, window_note = await self._resolve_window(event)
-        compress_on = self._bool("enable_compression", True)
         if compress_on and window <= 0 and not rt.warned_window:
             rt.warned_window = True
             logger.warning(LOG_PREFIX + f"会话 {umo} 压缩已停用：{window_note}")
 
         tail = current_tail()
         clipped = False
-        if compress_on and window > 0:
+        if compress_on:
+            turn_limit = self._astrbot_turn_limit(umo)
             threshold_tokens = int(window * self._threshold())
             fixed = overhead + tools_cost + index_cost + recall_cost
 
             def total_now() -> int:
                 return fixed + estimator.text(state.summary) + estimator.messages(tail)
 
-            total = total_now()
-            if total > threshold_tokens:
+            total = total_now() if window > 0 else 0
+            if self._compression_triggered(tail, total, window, turn_limit):
                 await self._compress(event, rt, umo, contexts, total)
                 tail = current_tail()
-                total = total_now()
+                total = total_now() if window > 0 else 0
 
             # 兜底裁剪只在压缩尝试之后仍超阈值时接管（摘要失败、冷却期、
             # 单轮过大）。它的目标水位低于触发阈值，若每轮无条件执行，
             # 会把总量永远摁在触发线之下，滚动摘要一次也轮不到。
             # 水位线不动；被裁内容会随平台回存历史而丢失，属有损最后手段。
-            if total > threshold_tokens:
+            if window > 0 and total > threshold_tokens:
                 budget = (
                     int(window * self._target_ratio())
                     - fixed
@@ -1005,7 +1001,11 @@ class MemoryBeyondPlugin(Star):
                     logger.warning(message)
             # 上面只管这条消息开头；工具循环里结果还会一轮轮涨进上下文，
             # 交给循环守卫在每个工具返回后盯着（预算与上面的压缩同一套）
-            if self._bool("loop_guard", True) and LOOP_HOOKS_READY:
+            if (
+                window > 0
+                and self._bool("loop_guard", True)
+                and LOOP_HOOKS_READY
+            ):
                 self._arm_loop_guard(
                     event,
                     loopguard.LoopGuard.for_window(
@@ -1074,7 +1074,7 @@ class MemoryBeyondPlugin(Star):
         except Exception:  # noqa: BLE001
             return ""
 
-    def _annotate_sender(
+    def _label_sender(
         self, event: AstrMessageEvent, req: ProviderRequest
     ) -> None:
         """在用户消息开头注入 [发送者：…] 标注。
@@ -1173,9 +1173,10 @@ class MemoryBeyondPlugin(Star):
         return rt.index_block
 
     def _pin_profile_key(self, event: AstrMessageEvent) -> tuple:
-        """私聊人物档案的快照签名；不满足开启条件时为空元组（不钉档案）。"""
-        if not self._bool("pin_private_profile", True) or not self._people_on():
-            return ()
+        """私聊人物档案的快照签名；不是私聊时为空元组（不钉档案）。
+
+        人物记忆恒开：私聊里发送者的档案固定进开头块，不再每轮召回。
+        """
         umo = str(getattr(event, "unified_msg_origin", "") or "")
         _, kind, _ = registry.parse_umo(umo)
         if kind != registry.KIND_PRIVATE:
@@ -1305,12 +1306,11 @@ class MemoryBeyondPlugin(Star):
             ]
             if self._global_on():
                 scopes.append(("global", self._global_scope()))
-            if self._people_on():
-                # 共享目录按事件 platform_id 选；身份不明时宁可这一轮不召回
-                # people，也不把 _shared 的内容发给非成员。
-                people_store, _ = self._people_store_for_event(event)
-                if people_store is not None:
-                    scopes.append(("people", people_store))
+            # 共享目录按事件 platform_id 选；身份不明时宁可这一轮不召回
+            # people，也不把 _shared 的内容发给非成员。
+            people_store, _ = self._people_store_for_event(event)
+            if people_store is not None:
+                scopes.append(("people", people_store))
             stores: dict[str, memstore.ScopeStore] = dict(scopes)
             query = prompts.strip_sender_tag(query)
             sender_id, _ = self._sender_identity(event)
@@ -1456,14 +1456,13 @@ class MemoryBeyondPlugin(Star):
         ]
         if self._global_on():
             targets.append((None, self._global_scope()))
-        if self._people_on():
-            # 目录与权限都按事件的 platform_id 取，UMO 前缀只用于会话；
-            # 两者不一致时宁可这一轮不扫描 people，也不越权处理共享文件
-            people_store, _ = self._people_store_for_event(event)
-            if people_store is not None and self._can_maintain_people(
-                self._event_actor(event), people_store
-            ):
-                targets.append(("", people_store))
+        # 目录与权限都按事件的 platform_id 取，UMO 前缀只用于会话；
+        # 两者不一致时宁可这一轮不扫描 people，也不越权处理共享文件
+        people_store, _ = self._people_store_for_event(event)
+        if people_store is not None and self._can_maintain_people(
+            self._event_actor(event), people_store
+        ):
+            targets.append(("", people_store))
         due = [
             (key, store)
             for key, store in targets
@@ -1515,15 +1514,14 @@ class MemoryBeyondPlugin(Star):
         ]
         if self._global_on():
             targets.append(("global", None, None))
-        if self._people_on():
-            # 与遗忘扫描、后台提取一致：目录与权限都按事件的 platform_id 取；
-            # 共享人物空间只有 edit 级成员的会话能触发定期自动整理，read /
-            # append 成员不会间接改写共享文件。管理页手动整理不受此限制。
-            people_store, _ = self._people_store_for_event(event)
-            if people_store is not None and self._can_maintain_people(
-                self._event_actor(event), people_store
-            ):
-                targets.append(("people", people_store.root.name, ""))
+        # 与遗忘扫描、后台提取一致：目录与权限都按事件的 platform_id 取；
+        # 共享人物空间只有 edit 级成员的会话能触发定期自动整理，read /
+        # append 成员不会间接改写共享文件。管理页手动整理不受此限制。
+        people_store, _ = self._people_store_for_event(event)
+        if people_store is not None and self._can_maintain_people(
+            self._event_actor(event), people_store
+        ):
+            targets.append(("people", people_store.root.name, ""))
         due = []
         for scope, key, cache_key in targets:
             sid = tidy.scope_id(scope, key)
@@ -1983,8 +1981,6 @@ class MemoryBeyondPlugin(Star):
                 f"（{max_chars}）：摘要模型没守住字数上限，每轮都要多带这些内容；"
                 "可考虑换摘要模型或调大上限"
             )
-        await self._archive_compressed(umo, state, plan.to_summarize)
-
         if extract and drafts:
             await self._store_drafts(
                 umo,
@@ -1997,27 +1993,6 @@ class MemoryBeyondPlugin(Star):
         # 压缩后从磁盘重新注入记忆索引：清空快照，下次请求重新加载。
         # 索引不是靠"被摘要保留下来"，而是每次从源头重新加载。
         rt.clear_index()
-
-    async def _archive_compressed(
-        self, umo: str, state: compress.SessionState, messages: list[dict]
-    ) -> None:
-        """把刚被摘要覆盖、即将从平台历史卸下的原文另存一份。"""
-        keep = self._int("archive_keep", 20)
-        if keep <= 0:
-            return
-        try:
-            await asyncio.to_thread(
-                lambda: self._archive.save(
-                    memstore.safe_key(umo),
-                    umo=umo,
-                    cid=state.cid,
-                    messages=messages,
-                    summary=state.summary,
-                    keep=keep,
-                )
-            )
-        except OSError as exc:
-            logger.warning(LOG_PREFIX + f"会话 {umo} 压缩归档写盘失败：{exc}")
 
     # ============================================================ 摘要调用链
 
@@ -2133,24 +2108,165 @@ class MemoryBeyondPlugin(Star):
         except Exception:  # noqa: BLE001
             return ""
 
+    # ======================================================== AstrBot 配置
+
+    def _astrbot_config(self, umo: str | None = None) -> dict:
+        """读取 AstrBot 的全局/会话配置；取不到时返回空字典。
+
+        跟随 AstrBot 的窗口与轮数上限都从这里取。AstrBot 的配置结构随版本
+        变化，任何异常都按"没这一项"处理，不影响其他功能。
+        """
+        try:
+            getter = getattr(self.context, "get_config", None)
+            if not callable(getter):
+                return {}
+            conf = getter(umo=umo) if umo else getter()
+            return conf if isinstance(conf, dict) else {}
+        except Exception:  # noqa: BLE001
+            return {}
+
+    @staticmethod
+    def _dict_at(conf: object, *keys: str) -> dict:
+        """沿键路径取嵌套字典；中间不是字典时返回空字典。"""
+        node = conf
+        for key in keys:
+            if not isinstance(node, dict):
+                return {}
+            node = node.get(key)
+        return node if isinstance(node, dict) else {}
+
+    def _astrbot_compression_config(self, umo: str | None = None) -> dict:
+        """AstrBot 的 `agent_runner.config.compression` 段（4.29.4 的配置路径）。"""
+        return self._dict_at(
+            self._astrbot_config(umo), "agent_runner", "config", "compression"
+        )
+
+    def _astrbot_turn_limit(self, umo: str | None = None) -> int:
+        """AstrBot 的上下文轮数上限；-1 表示未设置。"""
+        try:
+            return int(self._astrbot_compression_config(umo).get("max_turns", -1))
+        except (TypeError, ValueError):
+            return -1
+
+    def _user_identification_on(self, umo: str | None = None) -> bool:
+        """AstrBot 的「用户识别」开关：开启时它自己也会在提示词前带用户 ID。"""
+        settings = self._dict_at(self._astrbot_config(umo), "provider_settings")
+        return bool(settings.get("identifier", False))
+
     # ========================================================== 窗口探测
 
     async def _resolve_window(self, event: AstrMessageEvent) -> tuple[int, str]:
+        umo = str(getattr(event, "unified_msg_origin", "") or "") or None
+        return await self._resolve_window_for(umo)
+
+    async def _resolve_window_for(self, umo: str | None) -> tuple[int, str]:
+        """确定上下文窗口：手动配置 > 跟随 AstrBot > 按模型名探测。
+
+        跟随 AstrBot 时与它取窗口的顺序一致：提供商配置里的窗口 → 内置
+        模型表 `LLM_METADATAS` → AstrBot 的兜底值。取到的值超过
+        `UNTRUSTED_WINDOW_LIMIT` 时视为按旧 README 调大过的兜底值，不可信，
+        改用插件原有的模型名探测；仍然失败才停用压缩并给出提示。
+        """
         configured = self._int("max_context_tokens", 0)
         if configured > 0:
             return configured, "手动配置"
-        provider = await self._current_provider(
-            str(getattr(event, "unified_msg_origin", "") or "") or None
+        provider = await self._current_provider(umo)
+        window, note = self._astrbot_window(provider, umo)
+        if window > UNTRUSTED_WINDOW_LIMIT:
+            note = (
+                f"{note}的 {window} tokens 超过 {UNTRUSTED_WINDOW_LIMIT}，"
+                "视为按旧 README 调大过的兜底值，不可信"
+            )
+            window = 0
+        if window > 0:
+            return window, note
+        auto = self._model_window(provider)
+        if auto > 0:
+            suffix = f"；{note}" if note else ""
+            return auto, f"按模型 {self._provider_model_name(provider)} 自动探测{suffix}"
+        model = self._provider_model_name(provider)
+        reason = note or f"模型名：{model or '未知'}"
+        return 0, (
+            f"自动探测模型窗口失败（{reason}），"
+            "请在插件配置中手动指定 max_context_tokens"
         )
+
+    def _astrbot_window(self, provider, umo: str | None) -> tuple[int, str]:
+        """按 AstrBot 的顺序取窗口；取不到返回 (0, 原因或空串)。"""
+        # 1. 提供商配置里的窗口（AstrBot 在请求发出前已填好）
+        config = getattr(provider, "provider_config", None)
+        if isinstance(config, dict):
+            try:
+                value = int(config.get("max_context_tokens", 0) or 0)
+            except (TypeError, ValueError):
+                value = 0
+            if value > 0:
+                return value, "跟随 AstrBot 的提供商配置"
+        # 2. AstrBot 自带的模型表
         model = self._provider_model_name(provider)
         if model:
-            lowered = model.lower()
-            for needle, window in MODEL_WINDOWS:
-                if needle in lowered:
-                    return window, f"按模型 {model} 自动探测"
-        return 0, (
-            f"自动探测模型窗口失败（模型名：{model or '未知'}），"
-            "请在插件配置中手动指定 max_context_tokens"
+            try:
+                from astrbot.core.utils.llm_metadata import LLM_METADATAS
+
+                info = LLM_METADATAS.get(model) or {}
+                value = int(info["limit"]["context"])
+            except Exception:  # noqa: BLE001 - 旧版没有内部模块或表结构不同
+                value = 0
+            if value > 0:
+                return value, f"跟随 AstrBot 的内置模型表（{model}）"
+        # 3. AstrBot 的上下文窗口兜底值
+        try:
+            value = int(
+                self._astrbot_compression_config(umo).get("fallback_max_tokens", 0)
+                or 0
+            )
+        except (TypeError, ValueError):
+            value = 0
+        if value > 0:
+            return value, "跟随 AstrBot 的上下文窗口兜底值"
+        return 0, ""
+
+    @staticmethod
+    def _model_window(provider) -> int:
+        model = MemoryBeyondPlugin._provider_model_name(provider)
+        lowered = model.lower()
+        for needle, window in MODEL_WINDOWS:
+            if needle in lowered:
+                return window
+        return 0
+
+    async def compression_status(self, umo: str | None = None) -> dict:
+        """管理页首页与 /mb_status 共用的压缩跟随状态。"""
+        window, note = await self._resolve_window_for(umo)
+        limit = self._astrbot_turn_limit(umo)
+        keep = self._int("keep_recent_turns", 3)
+        return {
+            "enabled": self._bool("enable_compression", True),
+            "window": window,
+            "windowNote": note,
+            "turnLimit": limit,
+            "keepRecentTurns": keep,
+            "turnLimitWarning": bool(
+                limit > 0 and limit <= keep + ASTRBOT_TURN_HEADROOM
+            ),
+            "userIdentifier": self._user_identification_on(umo),
+        }
+
+    def _compression_triggered(
+        self, tail: list[dict], total: int, window: int, turn_limit: int
+    ) -> bool:
+        """本轮是否触发压缩：token 超过阈值，或达到 AstrBot 轮数上限 - 2。"""
+        if window > 0 and total > int(window * self._threshold()):
+            return True
+        return self._turn_limit_reached(tail, turn_limit)
+
+    @staticmethod
+    def _turn_limit_reached(tail: list[dict], turn_limit: int) -> bool:
+        """AstrBot 会在请求前按轮数截断，插件要提前 2 轮抢先压缩。"""
+        if turn_limit <= 0:
+            return False
+        return len(split_turns(tail)) >= max(
+            1, turn_limit - ASTRBOT_TURN_HEADROOM
         )
 
     @staticmethod
@@ -2626,10 +2742,9 @@ class MemoryBeyondPlugin(Star):
         if self._global_on():
             stores.append(self._global_scope())
         stores.append(self._session_scope(event))
-        if self._people_on():
-            people_store, _ = self._people_store_for_event(event)
-            if people_store is not None:
-                stores.append(people_store)
+        people_store, _ = self._people_store_for_event(event)
+        if people_store is not None:
+            stores.append(people_store)
         return stores
 
     async def _write_insights(
@@ -2707,18 +2822,15 @@ class MemoryBeyondPlugin(Star):
             return "mode 只能是 all 或 any。"
         scope = (scope or "all").strip().lower()
         global_on = self._global_on()
-        people_on = self._people_on()
         if scope == "global" and not global_on:
             return GLOBAL_MEMORY_OFF
-        if scope == "people" and not people_on:
-            return PEOPLE_MEMORY_OFF
         stores: list[tuple[str, memstore.ScopeStore]] = []
         # 停用的作用域在 scope=all 时静默略过
         if scope in ("global", "all") and global_on:
             stores.append(("global", self._global_scope()))
         if scope in ("session", "all"):
             stores.append(("session", self._session_scope(event)))
-        if scope in ("people", "all") and people_on:
+        if scope in ("people", "all"):
             people_store, people_refusal = self._people_store_for_event(event)
             if people_store is not None:
                 stores.append(("people", people_store))
@@ -2890,18 +3002,16 @@ class MemoryBeyondPlugin(Star):
         self._refresh_sharing()
         rt = await self._runtime(umo)
         state = rt.state
-        window, window_note = await self._resolve_window(event)
+        compression = await self.compression_status(umo)
+        window = compression["window"]
+        window_note = compression["windowNote"]
         global_on = self._global_on()
         global_part = (
             f"全局 {len(self._global_scope().list_files())} 个文件"
             if global_on
             else "全局 停用"
         )
-        people_part = (
-            f"人物 {len(self._people_scope(umo).list_files())} 个文件"
-            if self._people_on()
-            else "人物 停用"
-        )
+        people_part = f"人物 {len(self._people_scope(umo).list_files())} 个文件"
         session_store = self._session_scope(event)
         session_files = session_store.list_files()
         try:
@@ -2960,12 +3070,20 @@ class MemoryBeyondPlugin(Star):
                     "摘要腾不出空间，只能反复有损裁剪历史——"
                     "请调大 max_context_tokens，或减少启用的插件工具"
                 )
+        limit = compression["turnLimit"]
+        limit_line = (
+            f"AstrBot 轮数上限：{limit}（达到 "
+            f"{max(1, limit - ASTRBOT_TURN_HEADROOM)} 轮也触发压缩）"
+            if limit > 0
+            else "AstrBot 轮数上限：未设置"
+        )
         lines = [
             "鲸群记忆 状态",
             f"记忆：{'启用' if self._bool('enable_memory', True) else '停用'}"
             f"（{global_part} / {people_part} / 会话 {len(session_files)} 个文件）",
-            f"压缩：{'启用' if self._bool('enable_compression', True) else '停用'}",
+            f"压缩：{'启用' if compression['enabled'] else '停用（交给 AstrBot 自带的压缩）'}",
             f"上下文窗口：{window if window > 0 else '未知'}（{window_note}）",
+            limit_line,
             f"触发阈值：{self._threshold():g}，压缩目标：{self._target_ratio():g}",
             f"工具循环中途保护：{self._loop_guard_label(rt)}",
             f"水位线：{state.watermark}，摘要：{len(state.summary)} 字",
@@ -2987,6 +3105,20 @@ class MemoryBeyondPlugin(Star):
             f"定期整理：{self._tidy_label(umo)}",
             "记忆管理页：AstrBot WebUI 侧边栏「插件页面」",
         ]
+        if compression["turnLimitWarning"]:
+            lines.insert(
+                -1,
+                "⚠️ AstrBot 的轮数上限不大于本插件保留轮数 + 2"
+                f"（{compression['keepRecentTurns'] + ASTRBOT_TURN_HEADROOM}）："
+                "插件来不及抢先压缩，旧轮次会由 AstrBot 直接截断；"
+                "请在 AstrBot 调大轮数上限或调小「保留原文的最近轮数」",
+            )
+        if compression["userIdentifier"]:
+            lines.insert(
+                -1,
+                "提示：AstrBot 的「用户识别」开着，发送者会被标注两次；"
+                "可以关掉 AstrBot 的「用户识别」，由本插件接管",
+            )
         yield event.plain_result("\n".join(lines))
 
     def _sharing_label(self, umo: str) -> str:

@@ -4,12 +4,11 @@
 ScopeStore.import_files），老记忆搬完不会看起来像刚写的。同名冲突按策略
 处理（留较新的 / 留现有的 / 用搬来的覆盖），每一步都能先预演再执行。
 
-压缩状态和平台上的某段对话绑定，换个会话就没有意义，不在迁移范围内；
-平台改名时压缩归档随会话一起搬，备份文件里不含归档。
+压缩状态和平台上的某段对话绑定，换个会话就没有意义，不在迁移范围内。
 
 平台改名的场景：AstrBot 里删掉重建了机器人适配器、或改了它的 ID，会话
 标识（UMO）的第一段随之变化，记忆目录就对不上了。迁移按旧 UMO 换上新
-平台 ID 算出新目录，把记忆、登记信息、归档一并搬过去。
+平台 ID 算出新目录，把记忆与登记信息一并搬过去。
 """
 
 from __future__ import annotations
@@ -19,7 +18,6 @@ import time
 from dataclasses import dataclass, field
 
 from . import history
-from .archive import ArchiveStore
 from .memstore import (
     CONFLICT_NEWER,
     CONFLICT_POLICIES,
@@ -254,12 +252,9 @@ def _float(value: object) -> float:
 class MemoryTransfer:
     """迁移的执行者：同步的磁盘活放进线程，记忆文件的落盘经各作用域的锁。"""
 
-    def __init__(
-        self, store: MemoryStore, registry: SessionRegistry, archive: ArchiveStore
-    ):
+    def __init__(self, store: MemoryStore, registry: SessionRegistry):
         self.store = store
         self.registry = registry
-        self.archive = archive
 
     def scope_store(self, ref: ScopeRef) -> ScopeStore:
         if ref.scope == SCOPE_GLOBAL:
@@ -495,7 +490,7 @@ class MemoryTransfer:
         include_people: bool = True,
         dry_run: bool = False,
     ) -> dict:
-        """把旧平台 ID 下所有会话的记忆、登记与归档搬到新平台 ID 下。
+        """把旧平台 ID 下所有会话的记忆与登记搬到新平台 ID 下。
 
         每个会话按旧 UMO 换上新平台 ID 算出新目录；移动模式下源会话的
         记忆全部落到目标后，源目录、登记记录一并清掉。
@@ -513,8 +508,7 @@ class MemoryTransfer:
             src = ScopeRef(SCOPE_SESSION, key)
             src_store = self.scope_store(src)
             has_files = await asyncio.to_thread(_has_memories, src_store)
-            archives = await asyncio.to_thread(self.archive.count, key)
-            if not has_files and not archives:
+            if not has_files:
                 continue
             if not umo:
                 skipped.append(
@@ -523,14 +517,9 @@ class MemoryTransfer:
                 continue
             new_umo = dst_platform + ":" + umo.split(":", 1)[1]
             dst = ScopeRef(SCOPE_SESSION, safe_key(new_umo))
-            if has_files:
-                report = await self.transfer(
-                    src, dst, dst_umo=new_umo, mode=mode, policy=policy, dry_run=dry_run
-                )
-            else:
-                report = self._report(src, dst, [])
-                report["moved"] = 0
-            report["archives"] = archives
+            report = await self.transfer(
+                src, dst, dst_umo=new_umo, mode=mode, policy=policy, dry_run=dry_run
+            )
             report["to"]["umo"] = new_umo
             if not dry_run:
                 await self._carry_session(key, dst.key, new_umo, record, mode, src_store)
@@ -566,7 +555,7 @@ class MemoryTransfer:
         mode: str,
         src_store: ScopeStore,
     ) -> None:
-        """登记信息与归档跟着会话走；移动且源已搬空时清掉源会话。"""
+        """登记信息跟着会话走；移动且源已搬空时清掉源会话。"""
         await asyncio.to_thread(
             self.registry.adopt,
             dst_key,
@@ -577,7 +566,6 @@ class MemoryTransfer:
             last_active=record.last_active if record else 0.0,
         )
         move = mode == MODE_MOVE
-        await asyncio.to_thread(self.archive.transfer, src_key, dst_key, move)
         if move and await self._drop_if_empty(src_store):
             await asyncio.to_thread(self.registry.remove, src_key)
 

@@ -1,7 +1,7 @@
 """WebUI 记忆管理页的后端接口。
 
 页面（pages/memory）经 AstrBot 的插件页面桥接调用这里注册的接口，
-管理员可以查看并编辑每个会话的记忆、整理记忆、查看压缩状态与归档，
+管理员可以查看并编辑每个会话的记忆、整理记忆、查看压缩状态，
 设置定期整理并确认它给出的方案、撤销最近的整理，以及导出导入备份、
 在会话之间或平台改名后迁移记忆。
 
@@ -240,9 +240,7 @@ class MemoryDashboard:
 
     def __init__(self, plugin: "MemoryBeyondPlugin"):
         self.plugin = plugin
-        self.transfer = transfer.MemoryTransfer(
-            plugin._store, plugin._registry, plugin._archive
-        )
+        self.transfer = transfer.MemoryTransfer(plugin._store, plugin._registry)
         # 令牌 -> (过期时间, 内容)：生成好的备份、上传待导入的备份
         self._staged: dict[str, tuple[float, Any]] = {}
 
@@ -255,8 +253,6 @@ class MemoryDashboard:
             ("file", "GET", self.file_detail, "记忆管理：读取记忆文件"),
             ("search", "GET", self.search, "记忆管理：全文搜索"),
             ("session/state", "GET", self.session_state, "记忆管理：压缩状态"),
-            ("archives", "GET", self.archives, "记忆管理：归档列表"),
-            ("archive", "GET", self.archive_detail, "记忆管理：归档内容"),
             ("forgotten/file", "GET", self.forgotten_file, "记忆管理：读取已遗忘的文件"),
             ("file/save", "POST", self.file_save, "记忆管理：保存记忆文件"),
             ("file/delete", "POST", self.file_delete, "记忆管理：删除记忆文件"),
@@ -464,7 +460,6 @@ class MemoryDashboard:
                 item.update(
                     fileCount=count,
                     updatedAt=latest,
-                    archiveCount=plugin._archive.count(key),
                     hasState=plugin.state_path_for_key(key).is_file(),
                     tidyPending=pending(SCOPE_SESSION, key),
                 )
@@ -500,10 +495,7 @@ class MemoryDashboard:
 
         global_info, sessions, platforms, settings = await asyncio.to_thread(collect)
         global_info["enabled"] = plugin._global_on()
-        people_info: dict = {
-            "enabled": plugin._people_on(),
-            "platforms": platforms,
-        }
+        people_info: dict = {"platforms": platforms}
         if membership.active:
             people_info["shared"] = {
                 "key": sharing.SHARED_KEY,
@@ -515,6 +507,7 @@ class MemoryDashboard:
                 "memoryEnabled": plugin._bool("enable_memory", True),
                 "global": global_info,
                 "people": people_info,
+                "compression": await plugin.compression_status(None),
                 "sessions": sessions,
                 "autoTidy": self._autotidy_settings(settings),
             }
@@ -572,14 +565,10 @@ class MemoryDashboard:
         data["forgetAfterDays"] = self.plugin._forget_after_days()
         if scope == SCOPE_SESSION:
             data["session"] = _record_dict(key, self.plugin._registry.get(key))
-            data["archiveCount"] = await asyncio.to_thread(
-                self.plugin._archive.count, key
-            )
         elif scope == SCOPE_PEOPLE:
             data["people"] = _people_info(
                 key, self.plugin._store.shared_people()
             )
-            data["enabled"] = self.plugin._people_on()
         else:
             data["enabled"] = self.plugin._global_on()
         return _ok(data)
@@ -635,19 +624,6 @@ class MemoryDashboard:
         data = _state_dict(state)
         data["live"] = live
         data["now"] = time.time()
-        return _ok(data)
-
-    async def archives(self) -> dict:
-        key = self._session_key(_query("key"))
-        items = await asyncio.to_thread(self.plugin._archive.list, key)
-        return _ok({"archives": items})
-
-    async def archive_detail(self) -> dict:
-        key = self._session_key(_query("key"))
-        archive_id = _query("id").strip()
-        data = await asyncio.to_thread(self.plugin._archive.load, key, archive_id)
-        if data is None:
-            raise ApiError("归档不存在或已被清理")
         return _ok(data)
 
     # ------------------------------------------------------------ 记忆编辑
@@ -969,7 +945,7 @@ class MemoryDashboard:
         """清除会话数据。
 
         target=memories（默认）：只删该会话的记忆目录；
-        target=all：连同压缩状态、归档、登记记录一并删除。
+        target=all：连同压缩状态、登记记录一并删除。
         """
         body = await _body()
         key = self._session_key(body.get("key"))
@@ -991,7 +967,6 @@ class MemoryDashboard:
             plugin._sessions.pop(found[0], None)
 
         def wipe() -> None:
-            plugin._archive.purge(key)
             path = plugin.state_path_for_key(key)
             if path.is_file():
                 path.unlink()
@@ -1000,7 +975,7 @@ class MemoryDashboard:
         await asyncio.to_thread(wipe)
         return _ok(
             {"removed": removed},
-            "已删除该会话的记忆、压缩状态与归档；会话再次发言时会重新登记",
+            "已删除该会话的记忆与压缩状态；会话再次发言时会重新登记",
         )
 
     # ------------------------------------------------------------ 记忆整理

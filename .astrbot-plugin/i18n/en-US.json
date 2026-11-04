@@ -13,14 +13,6 @@
       "description": "Enable global memory (the bot's own memory, shared by all chats)",
       "hint": "Global memory holds the bot's own rules and preferences, and anything written there affects every group and private chat. Off by default: the bot only reads and writes the current chat's memory, so no chat can change how it behaves in other chats. Think before turning it on: a conversation in any chat could lead the bot to write global memory and change its behaviour everywhere. When turned off, existing global memory files stay on disk; the bot just stops reading and writing them."
     },
-    "enable_people_memory": {
-      "description": "Enable people memory (who a person is, shared by every chat on the same platform)",
-      "hint": "When on, the bot keeps one cross-chat memory file per person (people/<platform>/user-<ID>.md) holding only what that person said about themselves and what stays true in any chat: identity, job and skills, how they like to be addressed, long-term preferences. Their role and doings in a particular group stay in that chat's memory. The upside: the bot recognises the same person in another group or in private chat. The cost: what they said about themselves in group A may be used by the bot in group B. Off by default: every chat keeps its own notes. When turned off, existing people files stay on disk; the bot just stops reading and writing them."
-    },
-    "annotate_sender": {
-      "description": "Label each user message with the sender",
-      "hint": "Adds a [sender: …] label at the start of each user message: group card | QQ name | QQ number in QQ groups, QQ name | QQ number in QQ private chats, and name | ID on other platforms. The model uses the stable numeric ID, which cannot be faked, to tell people apart, since names change and can be copied. Fake labels typed into a message are rewritten so they have no effect. Without this the bot cannot reliably tell people apart in group chats. Keep AstrBot's own user identification turned off; this plugin handles it."
-    },
     "recall_mode": {
       "description": "How relevant memories are recalled",
       "hint": "Before each reply, the plugin picks a few memories related to the new message and attaches their full text just before it, so the model can use them without looking them up. \"Keyword match\" needs no extra model call and costs nothing. \"Model picks\" asks the summary model to choose from the memory list: more accurate, but one extra call per turn and slightly slower replies; if it fails it falls back to keyword match. Memories about the sender and about anyone @-mentioned or replied to always come first.",
@@ -34,21 +26,17 @@
       "description": "Max memories recalled per turn",
       "hint": "The most memory files attached per turn. Default 5. Each file is capped at 3,000 characters and all of them together at 9,000; anything longer is cut. 0 turns recall off."
     },
-    "pin_private_profile": {
-      "description": "Pin the sender's profile into the opening block in private chats",
-      "hint": "Only applies in private chats when people memory is on. The sender's user-<ID>.md from the session and people scopes is placed in the opening block together with the memory index, built at the start of the conversation and refreshed with the index (after compression, switching conversations, reset, or WebUI edits). It is no longer recalled every turn and does not use a recall slot. If the profile is changed after the snapshot, that turn's recall block attaches the latest full text and says to trust it. Default on; when off, profiles are recalled every turn as before."
+    "enable_compression": {
+      "description": "Enable context compression",
+      "hint": "When the context grows past the threshold, or reaches AstrBot's turn limit minus 2, older turns are summarized automatically. The platform's chat history is always kept in full; compression only changes what is sent to the model. When off, this plugin does not compress at all and leaves it to AstrBot's built-in compression."
+    },
+    "max_context_tokens": {
+      "description": "Model context window (tokens)",
+      "hint": "With 0 the plugin follows AstrBot: it takes the window in AstrBot's order (provider setting → built-in model table → AstrBot's fallback window). A value above 10,000,000 is treated as an untrustworthy fallback and the plugin guesses from the model name instead; if that also fails, compression is turned off and a note is written to the log. Enter a positive number to override."
     },
     "recall_full_files": {
       "description": "Recalled files attached in full per turn",
       "hint": "Each turn, the most relevant few non-identity recalled files are attached in full; the rest are collapsed into a single pointer line to read with memory_read when needed. Identity files (the sender, people mentioned with @, and so on) are always attached in full, do not use these slots, and still count against the per-file 3,000-character and 9,000-character total budgets. Set it to at least \"Max memories recalled per turn\" to attach every recalled file in full, matching the old behavior. Default 2."
-    },
-    "enable_compression": {
-      "description": "Enable context compression",
-      "hint": "When the context grows past the threshold, older turns are summarized automatically. The platform's chat history is always kept in full; compression only changes what is sent to the model."
-    },
-    "max_context_tokens": {
-      "description": "Model context window (tokens)",
-      "hint": "Strongly recommended: enter the context window of the model you use (for example 128000). With 0 the plugin guesses from the model name; if it cannot, compression is turned off and a note is written to the log."
     },
     "compress_threshold": {
       "description": "Compression threshold (share of the window)",
@@ -130,16 +118,12 @@
     "loop_guard": {
       "description": "Keep long tool loops from overflowing the context",
       "hint": "When the model calls many tools in a single reply (searching, reading files, and so on), the results pile up in the context one by one, and compressing at the start of the message cannot stop it from outgrowing the window midway. When on, after each tool returns the plugin estimates how large the next request will be, and if it is about to cross the compression threshold, older tool results are replaced with a short placeholder so the reply can finish. The two most recent rounds are left alone where possible, and tool calls stay paired with their results. The placeholder is saved into the bot's own conversation history (your messages in the chat app are not affected), and the provider's prompt cache is invalidated once at that step. It only applies when context compression is on and the window size is known. Default on."
-    },
-    "archive_keep": {
-      "description": "Compression archives kept per chat",
-      "hint": "Before each summary, the messages about to be replaced are saved so you can check them under \"Archives\" on the memory page and see whether the summary missed anything. Only this many recent archives are kept per chat. Default 20; 0 turns archiving off."
     }
   },
   "pages": {
     "memory": {
       "title": "Memory",
-      "description": "View and edit each chat's memories, compression state and archives; set up periodic tidying; back up and move memories",
+      "description": "View and edit each chat's memories and compression state; set up periodic tidying; back up and move memories",
       "subtitle": "See and edit what the bot remembers",
       "refresh": "Refresh",
       "filterPlaceholder": "Search by name, ID or note",
@@ -169,7 +153,6 @@
       "permission_append": "append only",
       "permission_read": "read only",
       "peopleNone": "No people memory yet: once the bot notes someone, their platform shows up here",
-      "peopleOffNotice": "People memory is not enabled: the bot will not read or write anything here. To use it, turn on \"Enable people memory\" in the plugin settings.",
       "fileCount": "{n} memories",
       "sessionsLabel": "Chats · {n}",
       "noSessions": "No matching chats",
@@ -196,7 +179,6 @@
       "tabMemories": "Memories",
       "tabIndex": "Index",
       "tabCompression": "Context compression",
-      "tabArchives": "Archives",
       "searchPlaceholder": "Search memory text",
       "newMemory": "New memory",
       "typeAll": "All",
@@ -299,11 +281,6 @@
       "liveHint": "The plugin's current in-memory state",
       "diskTag": "Saved",
       "diskHint": "No new messages in this chat since the plugin started, so this is the last saved state",
-      "archivesTitle": "Compression archives",
-      "archivesHint": "The original messages each compression replaced with a summary",
-      "noArchivesTitle": "No archives yet",
-      "noArchivesHint": "When context is compressed, the messages replaced by the summary are kept here so you can check that nothing important was lost.",
-      "archiveMeta": "{count} messages · summary {chars} chars",
       "tabForgotten": "Forgotten",
       "forgottenTitle": "Forgotten memories",
       "forgottenHint": "Memories that have not been recalled or read for a long time are moved here: out of the index and recall, files kept. They come back automatically when that person shows up again or the bot reads them itself.",
@@ -359,18 +336,10 @@
       "purgeFileTitle": "Delete file permanently",
       "purgeFileMessage": "Permanently delete {file}? The active file, forgotten copy, all versions, and trash entries in this scope will be removed and cannot be recovered. Same-named files in other scopes (including the old platform people folders kept after migration) are not affected.",
       "purgeFileConfirm": "Delete permanently",
-      "backToArchives": "Back to archives",
-      "archiveSummary": "Summary from this compression",
-      "archiveMessages": "Messages that were summarized ({n})",
-      "role_user": "User",
-      "role_assistant": "Bot",
-      "role_tool": "Tool result",
-      "toolCalls": "Called tools: {names}",
-      "emptyMessage": "(no text)",
       "remarkTitle": "Chat note",
       "remarkHint": "The note is only shown on this page, to help you recognise the chat. Leave it empty to show the group or user name.",
       "purgeTitle": "Clear chat data",
-      "purgeMessage": "\"Memories only\" moves this chat's memory folder into the memories/.trash-scopes archive (recoverable by hand during the trash retention period). \"Everything\" also deletes the compression state, archives and the chat's registration right away. Chat history on the platform is not affected.",
+      "purgeMessage": "\"Memories only\" moves this chat's memory folder into the memories/.trash-scopes archive (recoverable by hand during the trash retention period). \"Everything\" also deletes the compression state and the chat's registration right away. Chat history on the platform is not affected.",
       "purgeMemories": "Memories only",
       "purgeAll": "Everything",
       "consolidateTitle": "Tidy up memories",
@@ -462,7 +431,7 @@
       "tabExport": "Export backup",
       "tabImport": "Import backup",
       "tabPlatform": "Platform renamed",
-      "exportHint": "Saves the memories, with their write times and use counts, into one file. Compression state and archives are not included.",
+      "exportHint": "Saves the memories, with their write times and use counts, into one file. Compression state is not included.",
       "exportScopes": "What to export",
       "includeForgotten": "Include forgotten memories",
       "exportButton": "Export",
@@ -486,7 +455,7 @@
       "cntNone": "Nothing to write",
       "forgottenIncluded": "{n} forgotten",
       "issuesCount": "{n} will not be written",
-      "platformHint": "After you delete and recreate a bot in AstrBot, or change its ID, the first part of every chat ID changes and the old memories no longer match. This moves the memories, remarks and archives of every chat under the old ID over to the new ID.",
+      "platformHint": "After you delete and recreate a bot in AstrBot, or change its ID, the first part of every chat ID changes and the old memories no longer match. This moves the memories and remarks of every chat under the old ID over to the new ID.",
       "platformFrom": "Old platform ID",
       "platformTo": "New platform ID",
       "platformToHint": "Pick from the bots currently enabled",
@@ -512,7 +481,10 @@
       "targetUmoHint": "platformID:GroupMessage:groupID or platformID:FriendMessage:userID",
       "targetPlatform": "Platform ID",
       "filesLabel": "Memories to move",
-      "selectedFiles": "{n} / {total} selected"
+      "selectedFiles": "{n} / {total} selected",
+      "compressionOffNotice": "Context compression is off: this plugin does not compress and leaves it to AstrBot's built-in compression.",
+      "turnLimitNotice": "AstrBot's turn limit is {limit}, not greater than this plugin's kept turns + 2 ({keep}): the plugin cannot compress before AstrBot truncates, so old turns will be dropped by AstrBot. Raise the turn limit in AstrBot or lower \"Recent turns kept in full\".",
+      "userIdentifierNotice": "AstrBot's user identification is on: this plugin also labels the sender, so the model will see the label twice. You can turn off AstrBot's user identification and let this plugin handle it."
     }
   }
 }

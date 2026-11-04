@@ -150,6 +150,7 @@ pkg_injection = importlib.import_module(f"{PACKAGE}.core.injection")
 pkg_memstore = importlib.import_module(f"{PACKAGE}.core.memstore")
 pkg_prompts = importlib.import_module(f"{PACKAGE}.core.prompts")
 pkg_recall = importlib.import_module(f"{PACKAGE}.core.recall")
+pkg_registry = importlib.import_module(f"{PACKAGE}.core.registry")
 pkg_sharing = importlib.import_module(f"{PACKAGE}.core.sharing")
 
 
@@ -238,19 +239,19 @@ def make_plugin(tmp_path, members):
     plugin.config = {
         "enable_memory": True,
         "enable_global_memory": False,
-        "enable_people_memory": True,
         "shared_people_bots": members,
         "recall_mode": "keyword",
         "recall_max_files": 5,
         "auto_extract_interval": 0,
         "extract_memories": True,
-        "archive_keep": 0,
         "keep_recent_turns": 1,
         "summary_max_chars": 500,
     }
     plugin.data_dir = tmp_path
     plugin._store = pkg_memstore.MemoryStore(tmp_path / "memories")
     plugin._sessions = OrderedDict()
+    plugin._registry = pkg_registry.SessionRegistry(tmp_path / "sessions.json")
+    plugin._history_cleanup_at = time.time()
     plugin._sharing = pkg_sharing.Membership()
     plugin._sharing_warned = set()
     plugin._seen = pkg_sharing.SeenVersions(tmp_path / "state" / "shared_seen.json")
@@ -800,20 +801,6 @@ def test_group_chat_never_pins_profile(tmp_path):
     assert pkg_injection.PROFILE_HEADING not in message["content"]
 
 
-def test_pin_private_profile_off_keeps_old_recall(tmp_path):
-    plugin = make_plugin(tmp_path, ["Bot-A=edit"])
-    plugin.config["pin_private_profile"] = False
-    event = FakeEvent("Bot-A", sender_id="123")
-    people = plugin._store.people_scope("Bot-A")
-    run(people.write("user-123.md", person_file(body="跨群身份事实"), actor="system"))
-
-    rt = main.RuntimeSession(state=pkg_compress.SessionState())
-    assert run(plugin._index_block(rt, event)) is None
-    message = run(plugin._recall_message(event, event.unified_msg_origin, "你好", rt))
-    assert message is not None
-    assert "跨群身份事实" in message["content"]
-
-
 def test_pin_snapshot_is_stable_and_updated_profile_wins(tmp_path):
     plugin = make_plugin(tmp_path, ["Bot-A=edit"])
     event = FakeEvent("Bot-A", sender_id="123")
@@ -847,7 +834,6 @@ def test_pin_snapshot_is_stable_and_updated_profile_wins(tmp_path):
 def test_index_snapshot_does_not_follow_usage_changes(tmp_path, monkeypatch):
     """超限丢行只在生成快照时读一次使用统计，缓存期间不跟每轮召回漂移。"""
     plugin = make_plugin(tmp_path, [])
-    plugin.config["pin_private_profile"] = False
     long_desc = "描" * 100
     note = pkg_index_view._drop_note(1)
     budget = sum(
@@ -900,12 +886,14 @@ def test_updated_profile_does_not_use_recall_full_quota(tmp_path):
     assert "可能也相关，需要细节时用 memory_read 读取：" in content
 
 
-def test_pin_off_and_full_quota_at_limit_matches_keyword_selection(tmp_path):
-    """关掉 pin、recall_full_files 不小于 recall_max_files：选中与顺序同改造前。"""
+def test_full_quota_at_limit_matches_keyword_selection(tmp_path):
+    """recall_full_files 不小于 recall_max_files：选中与顺序同不分档时一致。
+
+    用群聊事件避开私聊开头块钉住的人物档案（那只在私聊生效）。
+    """
     plugin = make_plugin(tmp_path, ["Bot-A=edit"])
-    plugin.config["pin_private_profile"] = False
     plugin.config["recall_full_files"] = 5
-    event = FakeEvent("Bot-A", sender_id="123")
+    event = FakeEvent("Bot-A", sender_id="123", umo="Bot-A:GroupMessage:555")
     umo = event.unified_msg_origin
     session = plugin._store.session_scope(umo)
     people = plugin._store.people_scope("Bot-A")
@@ -1181,7 +1169,7 @@ def test_empty_config_behaves_like_upstream(tmp_path):
 
     guidance = plugin._guidance(event.unified_msg_origin)
     assert guidance == pkg_prompts.memory_guidance(
-        False, True, False, shared_people=False
+        False, False, shared_people=False
     )
     assert "共享人物空间" not in guidance
 
@@ -1207,7 +1195,7 @@ def _status_text(plugin, event):
     plugin._runtime = lambda umo: _async_value(
         types.SimpleNamespace(state=pkg_compress.SessionState())
     )
-    plugin._resolve_window = lambda event: _async_value((128000, "测试窗口"))
+    plugin._resolve_window_for = lambda umo: _async_value((128000, "测试窗口"))
     plugin._estimate_live = lambda event, rt: _async_value((0, {}))
     plugin._loop_guard_label = lambda rt: "关闭"
     plugin._recall_label = lambda: "关闭"
@@ -1406,7 +1394,7 @@ def test_dangling_link_hint_only_checks_visible_scopes(tmp_path):
     assert "[[user-1]]" not in result
 
 
-def test_dangling_link_hint_sees_enabled_global_but_not_disabled_people(tmp_path):
+def test_dangling_link_hint_sees_enabled_global_and_people(tmp_path):
     plugin = make_plugin(tmp_path, [])
     plugin.config["enable_global_memory"] = True
     event = FakeEvent("Bot-A")
@@ -1420,19 +1408,19 @@ def test_dangling_link_hint_sees_enabled_global_but_not_disabled_people(tmp_path
     )
     assert "[[g]]" not in linked
 
-    # people 关闭时，磁盘上即使有文件也不在可见范围里
-    plugin.config["enable_people_memory"] = False
+    # 人物记忆恒开：people 目录里的文件在可见范围里，链接不算悬空
     run(
         plugin._store.people_scope("Bot-A").write(
             "user-1.md", person_file("user-1", "身份：甲")
         )
     )
-    hidden = run(
+    visible = run(
         plugin.memory_write(
             event, "session", "t.md", person_file("t", "见 [[user-1]]")
         )
     )
-    assert "[[user-1]]" in hidden and "找不到" in hidden
+    assert "[[user-1]]" not in visible
+    assert "找不到" not in visible
 
 
 def test_dangling_link_hint_does_not_see_other_session_of_same_bot(tmp_path):
@@ -1880,3 +1868,46 @@ def test_tools_cannot_read_history_trash_or_forgotten_paths(tmp_path):
         assert "文件名不合法" in edited
     # 搜索只扫作用域根目录的 .md，不碰隐藏目录
     assert run(plugin.memory_search(event, "历史版本正文")) == "没有找到匹配「历史版本正文」的记忆。"
+
+
+# ---------------------------------------------------------------- 3.7.2 人物记忆恒开
+
+
+def test_people_paths_work_without_any_switch(tmp_path):
+    """配置里没有人物记忆开关：工具、开头块、召回、后台提取都照常可用。"""
+    plugin = make_plugin(tmp_path, [])
+    event = FakeEvent("Bot-A", sender_id="123")
+
+    # 工具：写、读、搜
+    assert "已写入" in run(
+        plugin.memory_write(event, "people", "user-123.md", person_file())
+    )
+    assert "工程师" in run(plugin.memory_read(event, "people", "user-123.md"))
+    found = run(plugin.memory_search(event, "工程师"))
+    assert "[people] user-123.md" in found
+
+    # 规范里始终描述 people 作用域，不再有"已停用"的拒绝说明
+    guidance = plugin._guidance(event.unified_msg_origin)
+    assert "- people：" in guidance
+    assert "人物记忆（people 作用域）已在插件配置中停用" not in guidance
+
+    # 开头块：私聊发送者档案固定注入
+    rt = main.RuntimeSession(state=pkg_compress.SessionState())
+    opening = run(plugin._index_block(rt, event))
+    assert opening is not None and pkg_injection.PROFILE_HEADING in opening
+    assert "工程师" in opening
+
+    # 召回：群聊里人物文件作为身份必选进入召回块
+    group = FakeEvent("Bot-A", sender_id="123", umo="Bot-A:GroupMessage:9")
+    message = run(
+        plugin._recall_message(
+            group,
+            group.unified_msg_origin,
+            "你好",
+            main.RuntimeSession(state=pkg_compress.SessionState()),
+        )
+    )
+    assert message is not None and "工程师" in message["content"]
+
+    # 后台提取：非共享成员始终可以写 people
+    assert plugin._can_extract_people(group.unified_msg_origin)

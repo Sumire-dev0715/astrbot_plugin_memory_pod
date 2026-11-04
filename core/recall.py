@@ -26,8 +26,7 @@
 始终带全文、不占名额，但仍受整块字数预算约束。
 
 挑选、读正文、按预算截断与渲染集中在 assemble_recall：main.py 的每轮
-召回与 scripts/measure_recall.py 的离线测量调用同一个函数，两边对成本
-的判断一致。
+召回调用它，选文件与成本判断只在这里维护一份。
 """
 
 from __future__ import annotations
@@ -539,8 +538,7 @@ async def assemble_recall(
     （快照之后被改过的人物档案），同样不占名额、优先进入预算。
 
     读不到正文的文件直接略过；used 供调用方记使用统计，本函数不写盘。
-    main.py 的每轮召回与 scripts/measure_recall.py 的离线测量共用它，
-    保证两边对"选中哪些文件、带多少字"的判断完全一致。
+    选中哪些文件、带多少字都在这里判断，调用方不必重复实现。
     """
     chosen = choose_candidates(candidates, query, forced_files, limit, model_choice)
     items: list[Recalled] = []

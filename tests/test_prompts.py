@@ -42,25 +42,27 @@ def test_index_block_global_disabled():
 
 def test_memory_guidance_scope_variants():
     full = prompts.memory_guidance(True)
-    assert "两个作用域" in full and "- global：" in full
+    assert "三个作用域" in full and "- global：" in full and "- people：" in full
     assert "global 绝不存放关于具体用户或群的信息" in full
-    assert "人物记忆（people 作用域）已在插件配置中停用" in full
-    session_only = prompts.memory_guidance(False)
-    assert "两个作用域" not in session_only
-    assert "scope 一律填 session" in session_only
-    assert "global 绝不存放" not in session_only
-    assert "不要读写 global 或 people 作用域" in session_only
+    assert "已在插件配置中停用" not in full
+    global_off = prompts.memory_guidance(False)
+    assert "两个作用域" in global_off and "- people：" in global_off
+    assert "- global：" not in global_off
+    assert "scope 一律填 session" not in global_off
+    assert "global 绝不存放" not in global_off
+    assert "全局记忆（global 作用域）已在插件配置中停用" in global_off
+    assert "这样的请求会被拒绝" in global_off
     # 作用域段之外的规范两个版本逐字一致
-    assert session_only[:600] == full[:600]
-    assert "记人规范（必须遵守）" in session_only
+    assert global_off[:600] == full[:600]
+    assert "记人规范（必须遵守）" in global_off
 
 
-def test_memory_guidance_people_variants():
-    both = prompts.memory_guidance(True, True)
+def test_memory_guidance_people_always_present():
+    both = prompts.memory_guidance(True)
     assert "三个作用域" in both and "- global：" in both and "- people：" in both
     assert "已在插件配置中停用" not in both
     assert both.endswith("也不替别人代写。")
-    people_only = prompts.memory_guidance(False, True)
+    people_only = prompts.memory_guidance(False)
     assert "两个作用域" in people_only and "- people：" in people_only
     assert "- global：" not in people_only
     assert "全局记忆（global 作用域）已在插件配置中停用" in people_only
@@ -70,7 +72,7 @@ def test_memory_guidance_people_variants():
 
 
 def test_memory_guidance_mentions_new_edit_and_search_modes():
-    text = prompts.memory_guidance(True, True)
+    text = prompts.memory_guidance(True)
     assert "mode=section" in text
     assert "mode=any" in text
     assert "[[链接]]" in text and "长" in text
@@ -427,16 +429,16 @@ def test_parse_memories_reads_source_ids():
 
 
 def test_memory_guidance_mentions_auto_history():
-    text = prompts.memory_guidance(True, True, True)
+    text = prompts.memory_guidance(True, True)
     assert "覆盖或删除前插件会自动" in text
     assert "不需要为了保险另存 backup" in text
 
 
 def test_memory_guidance_forgetting_note():
-    plain = prompts.memory_guidance(True, True)
-    with_forget = prompts.memory_guidance(True, True, True)
+    plain = prompts.memory_guidance(True)
+    with_forget = prompts.memory_guidance(True, True)
     assert "遗忘：" not in plain and "遗忘：" in with_forget
     assert with_forget.replace(prompts._FORGET_NOTE, "", 1) == plain
-    assert prompts.memory_guidance(False, False, True).replace(
+    assert prompts.memory_guidance(False, True).replace(
         prompts._FORGET_NOTE, "", 1
-    ) == prompts.memory_guidance(False, False)
+    ) == prompts.memory_guidance(False)

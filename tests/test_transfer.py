@@ -5,7 +5,6 @@ import os
 import pytest
 
 from core import transfer
-from core.archive import ArchiveStore
 from core.memstore import (
     CONFLICT_NEWER,
     CONFLICT_OVERWRITE,
@@ -44,8 +43,7 @@ def memory(name, description, body="正文", updated="2024-01-02 03:04"):
 def env(tmp_path):
     store = MemoryStore(tmp_path / "memories")
     registry = SessionRegistry(tmp_path / "sessions.json")
-    archive = ArchiveStore(tmp_path / "archive")
-    return store, registry, archive, transfer.MemoryTransfer(store, registry, archive)
+    return store, registry, transfer.MemoryTransfer(store, registry)
 
 
 def write_raw(scope, name, content, mtime=OLD):
@@ -135,7 +133,7 @@ def test_import_adopts_bundle_index_only_when_missing(tmp_path):
 
 
 def test_export_import_roundtrip(env, tmp_path):
-    store, registry, archive, mover = env
+    store, registry, mover = env
     session = store.session_scope(UMO)
     write_raw(session, "a.md", memory("a", "甲"))
     session.note_used(["a.md"], now=OLD + 1)
@@ -149,7 +147,7 @@ def test_export_import_roundtrip(env, tmp_path):
 
     store2 = MemoryStore(tmp_path / "other")
     registry2 = SessionRegistry(tmp_path / "other.json")
-    mover2 = transfer.MemoryTransfer(store2, registry2, ArchiveStore(tmp_path / "a2"))
+    mover2 = transfer.MemoryTransfer(store2, registry2)
     scopes = transfer.parse_bundle(json.loads(text))
     summary = mover2.bundle_summary(scopes)
     by_id = {item["scope"]: item for item in summary}
@@ -198,7 +196,7 @@ def test_parse_bundle_skips_bad_scopes():
 
 
 def test_people_scope_only_takes_person_files(env):
-    store, _, _, mover = env
+    store, _, mover = env
     scopes = [
         transfer.BundleScope(
             ref=transfer.ScopeRef("people", "aiocqhttp"),
@@ -218,7 +216,7 @@ def test_people_scope_only_takes_person_files(env):
 
 
 def test_transfer_copy_and_move(env):
-    store, registry, _, mover = env
+    store, registry, mover = env
     src = store.session_scope(UMO)
     write_raw(src, "a.md", memory("a", "甲", updated="2024-01-01 00:00"))
     write_raw(src, "b.md", memory("b", "乙"))
@@ -243,7 +241,7 @@ def test_transfer_copy_and_move(env):
 
 
 def test_transfer_selected_files(env):
-    store, _, _, mover = env
+    store, _, mover = env
     src = store.session_scope(UMO)
     write_raw(src, "a.md", memory("a", "甲"))
     write_raw(src, "b.md", memory("b", "乙"))
@@ -266,13 +264,12 @@ def test_umo_from_key_roundtrip():
     assert umo_from_key("whatever") == ""
 
 
-def test_remap_platform_moves_sessions_people_and_archives(env):
-    store, registry, archive, mover = env
+def test_remap_platform_moves_sessions_and_people(env):
+    store, registry, mover = env
     src = store.session_scope(UMO)
     write_raw(src, "a.md", memory("a", "甲"))
     registry.touch(KEY, UMO, "开黑群", now=OLD)
     registry.flush()
-    archive.save(KEY, umo=UMO, cid="c", messages=[{"role": "user", "content": "你好"}], summary="s", keep=3)
     # 认得出平台、却拼不回完整会话标识的目录（转换时丢了字符）：报告为跳过
     odd_key = "aiocqhttp_GroupMessage_a_b-0000abcd"
     write_raw(store.session_scope_by_key(odd_key), "x.md", memory("x", "怪"))
@@ -291,7 +288,6 @@ def test_remap_platform_moves_sessions_people_and_archives(env):
     assert store.session_scope_by_key(odd_key).list_files() == ["x.md"]
     assert store.session_scope_by_key("weird").list_files() == ["y.md"]
     assert store.session_scope_by_key(NEW_KEY).list_files() == ["a.md"]
-    assert archive.count(NEW_KEY) == 1 and archive.count(KEY) == 0
     assert registry.get(KEY) is None
     moved = registry.get(NEW_KEY)
     assert moved.umo == NEW_UMO and moved.name == "开黑群" and moved.first_seen == OLD
@@ -303,4 +299,25 @@ def test_remap_platform_moves_sessions_people_and_archives(env):
 @pytest.mark.parametrize("src, dst, message", [("a", "a", "相同"), ("a:b", "c", "冒号"), ("", "c", "不能为空")])
 def test_remap_platform_validates(env, src, dst, message):
     with pytest.raises(transfer.TransferError, match=message):
-        run(env[3].remap_platform(src, dst))
+        run(env[2].remap_platform(src, dst))
+
+
+# ---------------------------------------------------------------- 3.7.2 人物记忆恒开
+
+def test_export_import_includes_people_scope(tmp_path):
+    """人物记忆不再有开关，导出导入默认覆盖人物作用域。"""
+    store = MemoryStore(tmp_path / "mem1")
+    registry = SessionRegistry(tmp_path / "s1.json")
+    mover = transfer.MemoryTransfer(store, registry)
+    write_raw(store.people_scope("aiocqhttp"), "user-1.md", memory("user-1", "阿杰"))
+
+    bundle = run(mover.export(now=OLD))
+    scopes = {(s["scope"], s["key"]) for s in bundle["scopes"]}
+    assert ("people", "aiocqhttp") in scopes
+
+    store2 = MemoryStore(tmp_path / "mem2")
+    registry2 = SessionRegistry(tmp_path / "s2.json")
+    mover2 = transfer.MemoryTransfer(store2, registry2)
+    reports = run(mover2.import_bundle(transfer.parse_bundle(bundle)))
+    assert reports and reports[0]["counts"][IMPORT_ADDED] == 1
+    assert store2.people_scope("aiocqhttp").list_files() == ["user-1.md"]
