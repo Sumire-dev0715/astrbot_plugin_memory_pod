@@ -50,3 +50,14 @@ def test_archive_tab_is_gone():
     assert 't("tabArchives")' not in source
     assert "renderArchiveTab" not in source
     assert "openArchive" not in source
+
+
+def test_consolidate_all_includes_people_without_enabled_flag():
+    """overview 不再返回 people.enabled；整理全部仍要收进已有人物记忆。"""
+    source = _source()
+    body = source.split("function consolidateTargets()", 1)[1].split(
+        "function sameScope(", 1
+    )[0]
+    assert "people.enabled" not in body
+    assert "people.platforms" in body
+    assert "p.fileCount > 0" in body

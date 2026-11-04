@@ -202,6 +202,40 @@ def test_no_turn_limit_keeps_short_context_untouched(tmp_path):
     assert calls == []
 
 
+def test_compression_disabled_ignores_persisted_summary_and_watermark(tmp_path):
+    """关闭压缩后不能继续注入旧摘要、也不能按旧水位线丢弃原文。"""
+    plugin, calls = make_request_plugin(
+        tmp_path, astrbot_conf(max_turns=-1), window=1_000_000
+    )
+    plugin.config["enable_compression"] = False
+    contexts = _contexts(6)
+    state = pkg_compress.SessionState(cid="conv-1")
+    plan = pkg_compress.plan_compression(contexts, 0, keep_recent_turns=2)
+    assert plan is not None
+    pkg_compress.apply_summary(state, contexts, plan, "旧摘要")
+    assert state.watermark > 0 and state.summary == "旧摘要"
+
+    event = FakeEvent("Bot-A")
+    plugin._sessions[event.unified_msg_origin] = main.RuntimeSession(state=state)
+    req = _request(contexts)
+    run(plugin._process_request(event, req))
+    assert calls == []
+    assert req.contexts == contexts
+    assert all(
+        "<memory_beyond_summary>" not in str(message.get("content", ""))
+        for message in req.contexts
+    )
+
+
+def test_unknown_window_disables_turn_limit_compression(tmp_path):
+    """窗口未知时日志说“压缩已停用”，轮数触发也不能再生效。"""
+    plugin, calls = make_request_plugin(tmp_path, astrbot_conf(max_turns=4), window=0)
+    event = FakeEvent("Bot-A")
+    run(plugin._process_request(event, _request(_contexts(2))))
+    assert calls == []
+    assert plugin._sessions[event.unified_msg_origin].warned_window is True
+
+
 def test_turn_limit_counts_message_pairs_like_astrbot(tmp_path):
     """AstrBot 按非 system 消息条数对半计轮；工具调用多出来的消息也算。"""
     plugin, _ = make_request_plugin(tmp_path, astrbot_conf(max_turns=4))

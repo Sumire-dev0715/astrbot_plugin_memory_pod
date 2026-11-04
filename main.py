@@ -944,7 +944,10 @@ class MemoryBeyondPlugin(Star):
 
         def current_tail() -> list[dict]:
             nonlocal cleared_total
-            mark = max(state.watermark, n_system) if state.watermark else n_system
+            # 压缩关闭时不看水位线：已持久化的摘要与水位线不能继续裁剪请求
+            mark = n_system
+            if compress_on and state.watermark:
+                mark = max(state.watermark, n_system)
             tail = contexts[mark:]
             if cache_cold:
                 tail, cleared = compress.clear_old_tool_results(
@@ -1032,9 +1035,11 @@ class MemoryBeyondPlugin(Star):
             )
 
         # ---- 拼装发送视图：system 消息 + 索引块 + 摘要块 + 原文尾部 + 召回块 ----
+        # 压缩关闭时不注入已持久化的摘要：那是本插件上一次压缩的产物，继续
+        # 注入等于仍在用摘要替换原文。
         summary_msg = (
             prompts.build_summary_message(state.summary, state.compressed_at)
-            if state.summary
+            if compress_on and state.summary
             else None
         )
         view = list(contexts[:n_system])
@@ -1348,7 +1353,7 @@ class MemoryBeyondPlugin(Star):
                     umo, [c for c in candidates if c.scope != "people"], query, limit
                 )
             platform_id = self._event_actor(event)
-            # 挑选、读文件、分档、截断与渲染统一在 core.recall 里，测量脚本共用
+            # 挑选、读文件、分档、截断与渲染统一在 core.recall 里
             plan = await recall.assemble_recall(
                 stores,
                 candidates,
@@ -1751,8 +1756,8 @@ class MemoryBeyondPlugin(Star):
         people 的人物文件进该平台的人物作用域。绝不进全局。
 
         调用方只在有写权限时传入 people（共享空间里仅 edit 级成员），
-        否则传 None，标为 people 的草稿会退回 session——和 people 关闭时
-        一样，提取拿不到 people 目标。
+        否则传 None，标为 people 的草稿会退回 session——没有可写的人物
+        作用域时只能记在会话里。
 
         已存在的文件只有在抽取时附过全文（模型据此合并）才允许改写，
         其余同名条目跳过——看不到原文就覆盖会丢内容。
@@ -2268,8 +2273,14 @@ class MemoryBeyondPlugin(Star):
         turn_limit: int,
         extra_messages: int = 0,
     ) -> bool:
-        """本轮是否触发压缩：token 超过阈值，或达到 AstrBot 轮数上限 - 2。"""
-        if window > 0 and total > int(window * self._threshold()):
+        """本轮是否触发压缩：token 超过阈值，或达到 AstrBot 轮数上限 - 2。
+
+        窗口未知时压缩已经停用（日志会提示），轮数触发也不再生效——否则
+        提示与实际行为矛盾。
+        """
+        if window <= 0:
+            return False
+        if total > int(window * self._threshold()):
             return True
         return self._turn_limit_reached(tail, turn_limit, extra_messages)
 
@@ -2967,9 +2978,14 @@ class MemoryBeyondPlugin(Star):
         if not contexts:
             return 0, {}
         memory_on = self._bool("enable_memory", True)
+        compress_on = self._bool("enable_compression", True)
         estimator = tokens.TokenEstimator(state.ratio)
         n_system = split_leading_system(contexts)
-        if compress.state_matches(state, str(cid), contexts) and state.watermark:
+        if (
+            compress_on
+            and compress.state_matches(state, str(cid), contexts)
+            and state.watermark
+        ):
             mark = max(state.watermark, n_system)
         else:
             mark = n_system
@@ -3004,7 +3020,7 @@ class MemoryBeyondPlugin(Star):
                 estimator.messages(
                     [prompts.build_summary_message(state.summary, state.compressed_at)]
                 )
-                if state.summary
+                if compress_on and state.summary
                 else 0
             ),
             "recall": 0,

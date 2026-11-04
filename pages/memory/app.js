@@ -3112,19 +3112,17 @@
     if (ov.global.enabled && ov.global.fileCount > 0) {
       targets.push({ scope: "global", key: "", label: t("globalTitle"), sub: t("globalSub") });
     }
-    const people = ov.people || { enabled: false, platforms: [] };
-    if (people.enabled) {
-      people.platforms
-        .filter(function (p) { return p.fileCount > 0; })
-        .forEach(function (p) {
-          targets.push({
-            scope: "people",
-            key: p.key,
-            label: peopleScopeTitle(p.platform, p.key),
-            sub: p.key === SHARED_KEY ? t("peopleSharedSub") : t("peopleSub"),
-          });
+    const people = ov.people || { platforms: [] };
+    people.platforms
+      .filter(function (p) { return p.fileCount > 0; })
+      .forEach(function (p) {
+        targets.push({
+          scope: "people",
+          key: p.key,
+          label: peopleScopeTitle(p.platform, p.key),
+          sub: p.key === SHARED_KEY ? t("peopleSharedSub") : t("peopleSub"),
         });
-    }
+      });
     ov.sessions
       .filter(function (s) { return s.fileCount > 0; })
       .sort(function (a, b) {

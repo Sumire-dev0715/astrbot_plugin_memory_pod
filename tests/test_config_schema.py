@@ -65,3 +65,10 @@ def test_window_and_compression_hints_follow_astrbot():
     assert "强烈建议手动填写" not in window_hint
     compression_hint = schema["enable_compression"]["hint"]
     assert "交给 AstrBot 自带" in compression_hint
+
+
+def test_metadata_help_no_longer_asks_to_change_astrbot():
+    """3.7.1：插件说明不再要求用户调整 AstrBot 的内置设置。"""
+    text = (ROOT / "metadata.yaml").read_text("utf-8")
+    assert "按 README 调整 AstrBot" not in text
+    assert "窗口默认跟随 AstrBot" in text
