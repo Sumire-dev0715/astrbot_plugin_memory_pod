@@ -77,6 +77,8 @@ class Operation:
     old: str = ""
     new: str = ""
     reason: str = ""
+    # append 级成员只能新建：交给 store.write 的原子守卫
+    forbid_overwrite: bool = False
 
 
 @dataclass
@@ -86,6 +88,8 @@ class Context:
     prompt: str = ""
     # "scope/file" -> sha1；模型看过的每个文件都记一份
     snapshots: dict[str, str] = field(default_factory=dict)
+    # 实际写进提示词的待整理轮次；整理成功后只删这些
+    record_seqs: set[int] = field(default_factory=set)
 
 
 @dataclass
@@ -106,10 +110,17 @@ class ApplyResult:
 # ---------------------------------------------------------------- 输入
 
 
-def render_rounds(records: list[Round], now: float | None = None) -> str:
-    """把待整理记录渲染成模型看的对话流水，总字数有上限。"""
+def render_rounds(
+    records: list[Round], now: float | None = None
+) -> tuple[str, set[int]]:
+    """把待整理记录渲染成模型看的对话流水，总字数有上限。
+
+    返回 (转写, 实际放进转写的轮次 seq)。没放进去的记录不能被当作已处理
+    删除，留到下一次整理；第一条即使超长也截断后放进转写，避免永远卡住。
+    """
     now = time.time() if now is None else now
     lines: list[str] = []
+    rendered: set[int] = set()
     used = 0
     for index, record in enumerate(records, 1):
         when = prompts.format_time(record.at or now)
@@ -124,10 +135,16 @@ def render_rounds(records: list[Round], now: float | None = None) -> str:
             block.append(f"memory_note{sender}：{note.content}")
         text = "\n".join(block)
         if used + len(text) > MAX_TRANSCRIPT_CHARS:
+            if not lines:
+                text = text[:MAX_TRANSCRIPT_CHARS]
+                used = len(text)
+                lines.append(text)
+                rendered.add(record.seq)
             break
         used += len(text)
         lines.append(text)
-    return "\n\n".join(lines)
+        rendered.add(record.seq)
+    return "\n\n".join(lines), rendered
 
 
 async def _full_files(
@@ -251,7 +268,7 @@ async def build_context(
     global_on: bool,
 ) -> Context:
     """拼出一次后台整理的提示词与快照。"""
-    transcript = render_rounds(records, now)
+    transcript, record_seqs = render_rounds(records, now)
     speakers = prompts.sender_ids_in(transcript)
     snapshots: dict[str, str] = {}
     full, listed = await _full_files(stores, transcript, speakers, snapshots)
@@ -288,10 +305,10 @@ async def build_context(
             permission_note = "无法确认你在共享人物空间里的身份：这次不要写 people。"
 
     admin_note = (
-        "最近一轮的发送者是管理员，可以按要求写 global。"
+        "本批对话的所有发送者都是管理员，可以按要求写 global。"
         if admin and global_on
         else (
-            "最近一轮的发送者不是管理员：不要写 global。"
+            "不是所有轮次都来自管理员：不要写 global。"
             if global_on
             else "全局记忆未启用：不要写 global。"
         )
@@ -327,7 +344,7 @@ async def build_context(
 frontmatter 由插件生成，不要写。一次最多 {MAX_OPERATIONS} 条；没有值得记的就输出空数组 []。
 
 然后在 <journal></journal> 标签里写这段对话的流水（几行，可以带 [[链接]]）；没什么可记的就留空。日志写到哪个文件由插件决定，文件名不要写。"""
-    return Context(prompt=prompt, snapshots=snapshots)
+    return Context(prompt=prompt, snapshots=snapshots, record_seqs=record_seqs)
 
 
 # ---------------------------------------------------------------- 解析与校验
@@ -376,7 +393,8 @@ def parse_response(text: str) -> tuple[list | None, str]:
                 journal_text = "\n".join(str(item) for item in raw_journal).strip()
         data = data.get("operations")
     if data is None:
-        return None, journal_text
+        # 只给了日志、没给操作块（或操作块为空文本）：没有操作是合法的
+        return ([], journal_text) if journal_text else (None, "")
     if not isinstance(data, list):
         return None, journal_text
     return data, journal_text
@@ -396,6 +414,7 @@ def validate_operations(
     admin: bool,
     global_on: bool,
     sender: str,
+    senders: set[str] | None = None,
     journal_files: set[str] | None = None,
 ) -> tuple[list[Operation], list[str]]:
     """逐条校验模型给的操作；返回 (合格的操作, 被跳过的说明)。"""
@@ -451,12 +470,17 @@ def validate_operations(
         if scope == SCOPE_GLOBAL and (not global_on or not admin):
             skipped.append(f"{file}：只有管理员能写 global")
             continue
-        # 删除或更正别人的记忆：只在本人或管理员要求时执行
+        # 删除或更正别人的记忆：只在本人或管理员要求时执行。
+        # 批次里任一轮是本人或管理员都算；admin 由调用方按“整批都是管理员”
+        # 计算，避免末尾一轮的身份代表整批。
         person = _person_id(file)
+        requesters = senders if senders is not None else {sender}
+        # 批次里只出现本人（或整批都是管理员）才允许删改；混入第三方
+        # 轮次时保守拒绝，避免末尾一轮的身份代表别人的要求
         if (
             person
             and op in (OP_DELETE, OP_SECTION, OP_REPLACE)
-            and sender != person
+            and requesters != {person}
             and not admin
         ):
             skipped.append(f"{file}：不是本人或管理员，不能删除或更正")
@@ -491,6 +515,11 @@ def validate_operations(
                     type=mem_type,
                     description=description,
                     content=content,
+                    forbid_overwrite=(
+                        scope == SCOPE_PEOPLE
+                        and people_shared
+                        and permission == sharing.PERMISSION_APPEND
+                    ),
                 )
             )
         elif op == OP_APPEND:
@@ -600,7 +629,13 @@ async def apply_operations(
                 op.content,
                 source=source,
             )
-            report = await store.write(op.file, content, actor=actor, source=source)
+            report = await store.write(
+                op.file,
+                content,
+                actor=actor,
+                source=source,
+                forbid_overwrite=op.forbid_overwrite,
+            )
         elif op.op == OP_APPEND:
             report = await store.edit(
                 op.file,

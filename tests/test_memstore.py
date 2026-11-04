@@ -203,17 +203,25 @@ def test_delete_missing_file(tmp_path):
 # ---------------------------------------------------------------- 局部编辑
 
 
-def test_edit_replaces_once_and_syncs_index(tmp_path):
+def test_version_check_parameter_is_gone():
+    """覆盖前“看过版本”检查随 memory_write 一起删除，不再留悬空调用。"""
+    import inspect
+
+    assert "expected_sha1" not in inspect.signature(ScopeStore.write).parameters
+    assert "expected_sha1" not in inspect.signature(ScopeStore.edit).parameters
+
+
+def test_edit_replaces_once_and_keeps_frontmatter(tmp_path):
     store = ScopeStore(tmp_path)
     run(store.write("a.md", memory_md("a", "旧钩子", "喜欢周六开黑。")))
-    report = run(store.edit("a.md", "旧钩子", "新钩子"))
+    report = run(store.edit("a.md", "喜欢周六开黑", "喜欢周日开黑"))
     assert report.ok and "替换 1 处" in report.message
-    assert "description: 新钩子" in run(store.read("a.md"))
-    assert run(store.read(INDEX_FILENAME)) == "- [a](a.md) — 新钩子\n"
-    # 正文局部改动，frontmatter 与其余正文原样
-    assert run(store.edit("a.md", "周六", "周日")).ok
     doc = memstore.parse_memory(run(store.read("a.md")))
-    assert doc.description == "新钩子" and doc.body == "喜欢周日开黑。"
+    assert doc.description == "旧钩子" and doc.body == "喜欢周日开黑。"
+    # frontmatter 由插件生成：精确替换不能改 description/type
+    report = run(store.edit("a.md", "description: 旧钩子", "description: 新钩子"))
+    assert not report.ok and "正文" in report.message
+    assert "description: 旧钩子" in run(store.read("a.md"))
 
 
 def test_edit_requires_unique_match_unless_replace_all(tmp_path):
@@ -237,8 +245,8 @@ def test_edit_rejects_bad_input(tmp_path):
     assert "文件不存在" in run(store.edit("nope.md", "a", "b")).message
     assert not run(store.edit("../a.md", "a", "b")).ok
     assert not run(store.edit(INDEX_FILENAME, "a", "b")).ok
-    # 改完文件就空了：拒绝写入
-    report = run(store.edit("a.md", whole, ""))
+    # 改完正文就空了：拒绝写入
+    report = run(store.edit("a.md", "正文", ""))
     assert not report.ok and "不会写入" in report.message
     assert run(store.read("a.md")) == whole
 

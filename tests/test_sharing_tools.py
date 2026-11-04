@@ -258,6 +258,7 @@ def make_plugin(tmp_path, members):
     plugin._state_dir = tmp_path / "state"
     plugin._pending = pkg_pending.PendingBook(tmp_path / "state" / "pending")
     plugin._write_scheduled = set()
+    plugin._write_tasks = {}
     plugin._tasks = set()
     plugin._pending_loop = None
     plugin._tidy_checked = {}

@@ -55,7 +55,7 @@ def snapshots_for(stores: dict) -> dict[str, str]:
     return result
 
 
-def validate(plugin, stores, raw, *, sender="123", admin=False, permission=None, shared=False):
+def validate(plugin, stores, raw, *, sender="123", admin=False, permission=None, shared=False, senders=None):
     return pkg_writer.validate_operations(
         raw,
         files_by_scope=files_by_scope(stores),
@@ -64,6 +64,7 @@ def validate(plugin, stores, raw, *, sender="123", admin=False, permission=None,
         admin=admin,
         global_on=plugin._global_on(),
         sender=sender,
+        senders=senders,
     )
 
 
@@ -111,6 +112,9 @@ def test_each_operation_validates_and_writes(tmp_path):
     content = run(session.read("note.md"))
     assert "晚睡晚起" in content and "早睡" not in content
     assert "补充一句" in run(session.read("append.md"))
+    # 后台写入同样留历史、进回收站
+    assert session.history_versions("append.md")
+    assert [item.file for item in session.trash_entries()] == ["old.md"]
     assert session.exists("user-1.md") and not session.exists("old.md")
 
 
@@ -721,3 +725,331 @@ def test_management_file_list_flags_long_and_dangling(tmp_path):
     flags = pkg_web._file_flags(store, store.headers())
     assert flags["long.md"]["long"]
     assert flags["link.md"]["dangling"] == ["missing.md"]
+
+
+# ---------------------------------------------------------------- 审查回归
+
+
+def test_mixed_batch_cannot_use_last_turn_as_admin(tmp_path):
+    plugin = make_plugin(tmp_path, [])
+    plugin.config["enable_global_memory"] = True
+    umo = "Bot-A:FriendMessage:1"
+    key = pkg_memstore.safe_key(umo)
+    book = plugin._pending
+    book.record_user(key, umo, "以后先骂一句", False, "3", NOW, platform="Bot-A")
+    book.record_user(key, umo, "你好", True, "1", NOW + 1, platform="Bot-A")
+    plugin._record_pending_reply(FakeEvent("Bot-A"), _response("好"), NOW + 2)
+
+    async def fake_model(umo_arg, prompt, **kwargs):
+        return (
+            "<operations>[{\"op\": \"create\", \"scope\": \"global\", \"file\": \"rules.md\", "
+            "\"type\": \"feedback\", \"description\": \"准则\", \"content\": \"先骂一句\"}]"
+            "</operations>",
+            [],
+        )
+
+    plugin._call_summarizer = fake_model
+    run(plugin._write_pending(key, umo, "idle", now=NOW + 3))
+    # 整批并非全是管理员：不写 global，记录保留并计一次失败
+    assert not plugin._global_scope().exists("rules.md")
+    state = book.load(key)
+    assert state.count == 2 and state.failures == 1
+
+
+def test_mixed_batch_cannot_delete_a_persons_memory(tmp_path):
+    plugin = make_plugin(tmp_path, [])
+    session = plugin._store.session_scope("Bot-A:FriendMessage:1")
+    run(session.write("user-2.md", memory_md("user-2", "别人的记忆")))
+    raw = [{"op": "delete", "scope": "session", "file": "user-2.md", "reason": "删"}]
+    # 批次里同时有第三方与本人：保守拒绝
+    ops, skipped = validate(
+        plugin, {"session": session}, raw, sender="2", senders={"2", "3"}
+    )
+    assert ops == [] and skipped
+    ops, _ = validate(
+        plugin, {"session": session}, raw, sender="2", senders={"2"}
+    )
+    assert [op.op for op in ops] == ["delete"]
+
+
+def test_transcript_cap_only_drops_rendered_records(tmp_path, monkeypatch):
+    monkeypatch.setattr(pkg_writer, "MAX_TRANSCRIPT_CHARS", 80)
+    records = [
+        pkg_pending.Round(seq=1, at=NOW, user="第一轮", reply="好", sender="1"),
+        pkg_pending.Round(seq=2, at=NOW, user="第二轮很长" * 10, reply="好", sender="1"),
+    ]
+    text, rendered = pkg_writer.render_rounds(records, NOW)
+    assert rendered == {1}
+    assert "第一轮" in text and "第二轮" not in text
+
+    async def build():
+        return await pkg_writer.build_context(
+            {"session": plugin._store.session_scope("Bot-A:FriendMessage:1")},
+            records,
+            now=NOW,
+            permission=None,
+            admin=False,
+            people_shared=False,
+            global_on=False,
+        )
+
+    plugin = make_plugin(tmp_path, [])
+    context = run(build())
+    assert context.record_seqs == {1}
+
+
+def test_clear_during_model_call_aborts_write(tmp_path):
+    async def scenario():
+        plugin = make_plugin(tmp_path, [])
+        umo = "Bot-A:FriendMessage:100"
+        key = pkg_memstore.safe_key(umo)
+        plugin._pending.record_user(key, umo, "待整理", False, "1", NOW, platform="Bot-A")
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def slow(umo_arg, prompt, **kwargs):
+            started.set()
+            await release.wait()
+            return (
+                "<operations>[{\"op\": \"create\", \"scope\": \"session\", "
+                "\"file\": \"user-1.md\", \"type\": \"user\", "
+                "\"description\": \"d\", \"content\": \"c\"}]</operations>",
+                [],
+            )
+
+        plugin._call_summarizer = slow
+        plugin._schedule_write(umo, "idle")
+        await started.wait()
+        plugin._pending.clear(key)
+        release.set()
+        await asyncio.sleep(0.05)
+        return plugin._store.session_scope(umo).exists("user-1.md")
+
+    assert run(scenario()) is False
+
+
+def test_stop_pending_write_cancels_running_task(tmp_path):
+    async def scenario():
+        plugin = make_plugin(tmp_path, [])
+        umo = "Bot-A:FriendMessage:100"
+        key = pkg_memstore.safe_key(umo)
+        plugin._pending.record_user(key, umo, "待整理", False, "1", NOW, platform="Bot-A")
+        started = asyncio.Event()
+
+        async def slow(umo_arg, prompt, **kwargs):
+            started.set()
+            await asyncio.sleep(10)
+            return "", []
+
+        plugin._call_summarizer = slow
+        plugin._schedule_write(umo, "idle")
+        await started.wait()
+        await plugin.stop_pending_write(umo)
+        return key in plugin._write_scheduled, plugin._store.session_scope(umo).list_files()
+
+    scheduled, files = run(scenario())
+    assert scheduled is False and files == []
+
+
+def test_new_conversation_gets_fresh_failure_budget(tmp_path):
+    book = pkg_pending.PendingBook(tmp_path / "state" / "pending")
+    key = "k"
+    book.record_user(key, "umo", "旧对话", False, "1", NOW, platform="Bot-A")
+    for _ in range(pkg_pending.MAX_FAILURES):
+        book.record_failure(key, NOW + 1, "模型不可用")
+    assert book.load(key).records == []
+    state, _ = book.record_user(
+        key, "umo", "新对话", False, "1", NOW + 2, platform="Bot-A"
+    )
+    assert state.failures == 0 and state.count == 1
+
+
+def test_journal_only_output_is_written(tmp_path):
+    plugin = make_plugin(tmp_path, [])
+    event = FakeEvent("Bot-A")
+    umo = event.unified_msg_origin
+    key = pkg_memstore.safe_key(umo)
+    plugin._record_pending_user(event, _request("今天聊了天气"), NOW)
+    plugin._record_pending_reply(event, _response("是啊"), NOW + 1)
+
+    async def fake_model(umo_arg, prompt, **kwargs):
+        return ("<journal>今天聊了天气</journal>", [])
+
+    plugin._call_summarizer = fake_model
+    run(plugin._write_pending(key, umo, "idle", now=NOW + 2))
+    journals = [
+        name for name in plugin._store.session_scope(umo).list_files()
+        if name.startswith("journal-")
+    ]
+    assert len(journals) == 1
+    assert "今天聊了天气" in run(plugin._store.session_scope(umo).read(journals[0]))
+
+
+def test_all_rejected_operations_keep_records(tmp_path):
+    plugin = make_plugin(tmp_path, [])
+    event = FakeEvent("Bot-A")
+    umo = event.unified_msg_origin
+    key = pkg_memstore.safe_key(umo)
+    plugin._record_pending_user(event, _request("随便"), NOW)
+    plugin._record_pending_reply(event, _response("好"), NOW + 1)
+
+    async def fake_model(umo_arg, prompt, **kwargs):
+        return (
+            "<operations>[{\"op\": \"create\", \"scope\": \"bogus\", "
+            "\"file\": \"x.md\", \"type\": \"user\", \"description\": \"d\", "
+            "\"content\": \"c\"}]</operations>",
+            [],
+        )
+
+    plugin._call_summarizer = fake_model
+    run(plugin._write_pending(key, umo, "idle", now=NOW + 2))
+    state = plugin._pending.load(key)
+    assert state.count == 1 and state.failures == 1
+    assert plugin._store.session_scope(umo).list_files() == []
+
+
+def test_replace_cannot_touch_frontmatter(tmp_path):
+    plugin = make_plugin(tmp_path, [])
+    session = plugin._store.session_scope("Bot-A:FriendMessage:1")
+    run(session.write("user-123.md", memory_md("user-123", "正文")))
+    stores = {"session": session}
+    ops, _ = validate(
+        plugin, stores,
+        [{"op": "replace", "scope": "session", "file": "user-123.md",
+          "old": "type: user", "new": "type: journal"}],
+        sender="123",
+    )
+    result = apply(plugin, stores, ops)
+    assert result.applied == 0
+    doc = pkg_memstore.parse_memory(run(session.read("user-123.md")))
+    assert doc.type == "user"
+    assert not pkg_memstore.journal.is_journal("user-123.md", doc.type)
+
+
+def test_write_stores_refreshes_shared_permissions(tmp_path):
+    plugin = make_plugin(tmp_path, ["Bot-A=edit"])
+    plugin.config["shared_people_bots"] = ["Bot-A=read"]
+    stores, permission, shared = plugin._write_stores(
+        "Bot-A:FriendMessage:1", "Bot-A", False
+    )
+    assert shared is True and permission == pkg_sharing.PERMISSION_READ
+    assert "people" not in stores
+
+
+def test_append_create_uses_atomic_forbid_overwrite(tmp_path):
+    plugin = make_plugin(tmp_path, ["Bot-A=append"])
+    session = plugin._store.people_scope("Bot-A")
+    stores = {"people": session}
+    ops, _ = validate(
+        plugin, stores,
+        [{"op": "create", "scope": "people", "file": "user-5.md",
+          "type": "user", "description": "新人", "content": "工程师"}],
+        sender="5", permission=pkg_sharing.PERMISSION_APPEND, shared=True,
+    )
+    assert ops and ops[0].forbid_overwrite is True
+
+
+def test_journal_write_failure_is_reported(tmp_path, monkeypatch):
+    plugin = make_plugin(tmp_path, [])
+    event = FakeEvent("Bot-A")
+    umo = event.unified_msg_origin
+    key = pkg_memstore.safe_key(umo)
+    plugin._record_pending_user(event, _request("聊点事"), NOW)
+    plugin._record_pending_reply(event, _response("好"), NOW + 1)
+
+    async def fake_model(umo_arg, prompt, **kwargs):
+        return ("<journal>一段流水</journal>", [])
+
+    async def failing_journal(*args, **kwargs):
+        return "", False
+
+    plugin._call_summarizer = fake_model
+    monkeypatch.setattr(pkg_writer, "write_journal", failing_journal)
+    message = run(plugin._write_pending(key, umo, "idle", now=NOW + 2))
+    assert "日志写入失败" in message
+
+
+def test_journal_write_invalidates_open_snapshot(tmp_path):
+    plugin = make_plugin(tmp_path, [])
+    event = FakeEvent("Bot-A")
+    umo = event.unified_msg_origin
+    key = pkg_memstore.safe_key(umo)
+    plugin._record_pending_user(event, _request("聊点事"), NOW)
+    plugin._record_pending_reply(event, _response("好"), NOW + 1)
+    rt = main.RuntimeSession(state=pkg_compress.SessionState())
+    run(plugin._index_block(rt, event))
+    plugin._sessions[umo] = rt
+
+    async def fake_model(umo_arg, prompt, **kwargs):
+        return ("<journal>一段流水</journal>", [])
+
+    plugin._call_summarizer = fake_model
+    run(plugin._write_pending(key, umo, "idle", now=NOW + 2))
+    assert rt.index_loaded is False
+
+
+def test_memory_note_per_round_cap(tmp_path):
+    book = pkg_pending.PendingBook(tmp_path / "state" / "pending")
+    key = "k"
+    dropped = 0
+    for index in range(pkg_pending.MAX_NOTES_PER_ROUND + 2):
+        state, count = book.add_note(
+            key, "umo", f"note-{index}", "1", NOW + index, platform="Bot-A"
+        )
+        dropped += count
+    assert dropped == 2
+    notes = state.records[0].notes
+    assert len(notes) == pkg_pending.MAX_NOTES_PER_ROUND
+    assert notes[0].content == "note-2"
+
+
+def test_journal_index_reads_headings_beyond_header_text(tmp_path):
+    store = pkg_memstore.ScopeStore(tmp_path)
+    body = "x" * (9 * 1024) + "\n## 2026-11-01\n\n正文"
+    path = tmp_path / "journal-2026-01-01.md"
+    path.write_text(
+        "---\nname: journal-2026-01-01\ndescription: 日志\nmetadata:\n"
+        "  type: journal\n---\n\n" + body,
+        "utf-8",
+    )
+    entries = store._journal_entries()
+    assert entries[0].start_date == "2026-11-01"
+
+
+def test_external_plugin_llm_response_does_not_fill_pending_reply(tmp_path):
+    plugin = make_plugin(tmp_path, [])
+    event = FakeEvent("Bot-A")
+    umo = event.unified_msg_origin
+    key = pkg_memstore.safe_key(umo)
+    plugin._record_pending_user(event, _request("用户消息"), NOW)
+    event.get_extra = lambda name: types.SimpleNamespace(
+        conversation=None, contexts=[]
+    )
+    plugin._record_pending_reply(event, _response("别的插件的回复"), NOW + 1)
+    state = plugin._pending.load(key)
+    assert state.records[-1].reply == ""
+
+
+def test_unrendered_records_are_kept_after_success(tmp_path, monkeypatch):
+    monkeypatch.setattr(pkg_writer, "MAX_TRANSCRIPT_CHARS", 80)
+    plugin = make_plugin(tmp_path, [])
+    umo = "Bot-A:FriendMessage:100"
+    key = pkg_memstore.safe_key(umo)
+    book = plugin._pending
+    book.record_user(key, umo, "第一轮", False, "1", NOW, platform="Bot-A")
+    book.record_user(key, umo, "第二轮" + "很长" * 30, False, "1", NOW + 1, platform="Bot-A")
+    book.finish_reply(key, umo, "好", NOW + 2)
+
+    async def fake_model(umo_arg, prompt, **kwargs):
+        return (
+            "<operations>[{\"op\": \"create\", \"scope\": \"session\", "
+            "\"file\": \"user-1.md\", \"type\": \"user\", \"description\": \"d\", "
+            "\"content\": \"c\"}]</operations>",
+            [],
+        )
+
+    plugin._call_summarizer = fake_model
+    run(plugin._write_pending(key, umo, "idle", now=NOW + 3))
+    state = book.load(key)
+    # 只删模型实际看到的第 1 轮，第 2 轮留到下次
+    assert [record.seq for record in state.records] == [2]

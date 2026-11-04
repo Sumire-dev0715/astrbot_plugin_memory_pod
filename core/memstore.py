@@ -794,18 +794,12 @@ class ScopeStore:
         content: str,
         source: str = "",
         actor: str = "",
-        expected_sha1: str | None = None,
         forbid_overwrite: bool = False,
     ) -> WriteReport:
         """写入记忆文件并自动同步索引行（钩子取自 frontmatter description）。
 
         source 是本次写入的来源 ID（通常是当前发送者），并入文件的 source 戳；
-        actor 是这次变更的执行者（工具调用记平台 ID），写进审计。
-        expected_sha1 非 None 时做覆盖前版本检查：持锁读到在册旧内容（没有
-        在册时用同名的已遗忘副本）的哈希必须与它一致，否则拒绝写入。检查与
-        写入在同一把锁里，并发的两次覆盖只有先到的那次能通过；空串表示这个
-        机器人没有看过任何版本——新建文件放行，覆盖已有内容一律拒绝，这样
-        两边同时新建同名文件时后到的一方不会悄悄盖掉先写的。
+        actor 是这次变更的执行者（后台整理记平台 ID），写进审计。
         forbid_overwrite 为 true 时只允许新建：持锁确认在册或已遗忘的同名
         文件都不存在，避免 append 级成员在并发下绕过"只能新建"。
         """
@@ -838,14 +832,6 @@ class ScopeStore:
                 )
             if forbid_overwrite and (active is not None or previous is not None):
                 return WriteReport(False, sharing.APPEND_OVERWRITE_REFUSAL)
-            if expected_sha1 is not None:
-                base = active if active is not None else previous
-                # 同名文件已经不存在（被删除/迁移/彻底清除）时没有可丢的内容，
-                # 旧版本记录不该把重新创建锁死；只有确实存在旧内容才比较哈希。
-                if base is not None and history.content_sha1(base) != expected_sha1:
-                    return WriteReport(
-                        False, sharing.version_conflict_message(name)
-                    )
             return await self._commit(
                 name,
                 path,
@@ -898,7 +884,6 @@ class ScopeStore:
         source: str = "",
         actor: str = "",
         mode: str = "replace",
-        expected_sha1: str | None = None,
     ) -> WriteReport:
         """局部修改：默认 replace 把 old 替换成 new；append 追加内容；section 换小节正文。
 
@@ -907,9 +892,7 @@ class ScopeStore:
         section：old 是小节标题行，new 替换这一节的正文（标题行保留），范围到
         下一个同级或更高级标题为止；标题不存在或重复时报错并列出全部标题。
         三种模式都持锁读改写，写入前同样把旧内容存进历史；替换后的全文照样过
-        体积守门并同步索引行，改了 description 索引钩子随之更新。
-        expected_sha1 非 None 时做覆盖前版本检查（共享空间的 section 模式用）：
-        持锁读到在册内容的哈希必须与它一致，否则拒绝写入。
+        体积守门并同步索引行。精确替换只作用于正文，frontmatter 由插件生成。
         """
         mode = (mode or "").strip().lower()
         if mode not in ("replace", "append", "section"):
@@ -954,16 +937,6 @@ class ScopeStore:
                     content = await asyncio.to_thread(path.read_text, "utf-8")
                 except (OSError, UnicodeDecodeError) as exc:
                     return WriteReport(False, f"读取 {name} 失败，未修改：{exc}")
-            if expected_sha1 is not None:
-                # 版本记录来自 memory_read（文本模式已归一为 LF），
-                # section 这里读的是原始换行，比较前按同一口径归一
-                compare = content
-                if mode == "section":
-                    compare = content.replace("\r\n", "\n").replace("\r", "\n")
-                if history.content_sha1(compare) != expected_sha1:
-                    return WriteReport(
-                        False, sharing.version_conflict_message(name)
-                    )
             if mode == "append":
                 updated, error = append_text(content, old, new)
                 if error:
@@ -1000,12 +973,18 @@ class ScopeStore:
                     actor=actor,
                     active_before=content,
                 )
-            count = content.count(old)
+            # 精确替换只作用于正文：frontmatter 由插件生成，模型不能借
+            # replace 改 type、created、source 这些字段
+            frontmatter = _FRONTMATTER_RE.match(content)
+            split_at = frontmatter.end() if frontmatter else 0
+            head, body = content[:split_at], content[split_at:]
+            count = body.count(old)
             if count == 0:
                 return WriteReport(
                     False,
-                    f"在 {name} 里没有找到 old_text。请先用 memory_read 读出当前内容，"
-                    "原样复制要改的片段（空格、换行、标点都要一致）。",
+                    f"在 {name} 的正文里没有找到 old_text。请先用 memory_read 读出"
+                    "当前内容，原样复制要改的片段（空格、换行、标点都要一致）；"
+                    "frontmatter 由插件维护，不能修改。",
                 )
             if count > 1 and not replace_all:
                 return WriteReport(
@@ -1014,12 +993,13 @@ class ScopeStore:
                     "把片段写长一些让它唯一，或设 replace_all=true 全部替换。",
                 )
             replaced = count if replace_all else 1
-            updated = content.replace(old, new, replaced)
-            if not updated.strip():
+            new_body = body.replace(old, new, replaced)
+            if not new_body.strip():
                 return WriteReport(
                     False,
-                    "改完整个文件就空了，不会写入。",
+                    "改完正文就空了，不会写入。",
                 )
+            updated = head + new_body
             return await self._commit(
                 name,
                 path,
@@ -2193,8 +2173,12 @@ class ScopeStore:
         for header in headers:
             if not journal.is_journal(header.file, header.type):
                 continue
+            # header.text 只有开头 8KB；旧日志可能很长，日期小标题在
+            # 8KB 之后时也要算进索引日期范围
+            content = self._read_text_lenient(header.file)
             start, end = journal.entry_span(
-                header.file, header.text, header.updated
+                header.file, content if content is not None else header.text,
+                header.updated,
             )
             entries.append(
                 journal.JournalEntry(

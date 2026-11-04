@@ -484,6 +484,7 @@ def test_background_and_consolidate_prompts_know_journal():
     assert writer.JOURNAL_MAX_CHARS == 3000
     assert "journal" in consolidate.CONSOLIDATE_PROMPT
     assert "不要删除日志文件" in consolidate.CONSOLIDATE_PROMPT
+    assert "新日志用 journal-<日期>.md" in consolidate.CONSOLIDATE_PROMPT
 
 
 def test_management_page_offers_journal_type():

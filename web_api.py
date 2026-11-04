@@ -911,6 +911,8 @@ class MemoryDashboard:
         scope, key, store = self._scope_from_body(body)
         name = self._file_name(body.get("file"))
         sid = tidy.scope_id(scope, key)
+        if scope == SCOPE_SESSION and key:
+            await self.plugin.stop_pending_write_key(key)
         report = await store.delete_file_completely(
             name, actor=history.ACTOR_WEBUI
         )
@@ -923,6 +925,7 @@ class MemoryDashboard:
                     self.plugin._tidy.remove_file, sid, name
                 )
                 if removed:
+                    self.plugin._pending.clear(key)
                     self._changed(key)
                     return _ok(
                         {"file": name},
@@ -932,6 +935,8 @@ class MemoryDashboard:
         # 整理记录与待确认方案里也留着改动前原文；彻底删除要一并清掉，
         # 否则撤销整理会把刚删掉的正文写回来
         await asyncio.to_thread(self.plugin._tidy.remove_file, sid, name)
+        # 待整理对话里也可能还有同一条事实，留着会被后台整理重新写回
+        self.plugin._pending.clear(key)
         self._changed(key)
         return _ok({"file": name}, report.message)
 
@@ -987,6 +992,8 @@ class MemoryDashboard:
         body = await _body()
         key = self._session_key(body.get("key"))
         plugin = self.plugin
+        # 正在跑的整理先停掉，避免它在清除之后又写回记忆
+        await plugin.stop_pending_write(key)
         store = plugin._store.session_scope_by_key(key)
         removed = (
             await store.purge(actor=history.ACTOR_WEBUI) if store is not None else 0
@@ -1223,6 +1230,10 @@ class MemoryDashboard:
         meta = await asyncio.to_thread(self.plugin._tidy.meta, sid)
         if meta.pending:
             await asyncio.to_thread(self.plugin._tidy.update_meta, sid, change)
+        # 会话被搬走/改名后，旧会话的待整理对话不能再写回旧作用域
+        if ref.scope == SCOPE_SESSION and ref.key:
+            await self.plugin.stop_pending_write_key(ref.key)
+            self.plugin._pending.clear(ref.key)
 
     async def migrate_info(self) -> dict:
         """迁移时可选的平台 ID：已有会话与人物记忆用到的，加上当前启用的机器人。"""

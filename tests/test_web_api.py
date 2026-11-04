@@ -106,6 +106,12 @@ class FakePlugin:
         self.prompts: list = []
         self.summarizer_reply = ""
 
+    async def stop_pending_write(self, umo):
+        return None
+
+    async def stop_pending_write_key(self, key):
+        return None
+
     def _global_on(self):
         return self.config["enable_global_memory"]
 
@@ -1008,6 +1014,9 @@ def test_file_purge_removes_history_trash_and_forgotten(plugin, dash):
     ok(call(dash, "file/delete", body={"scope": "session", "key": KEY, "file": "a.md"}))
     assert store.history_versions("a.md") and store.trash_entries()
 
+    plugin._pending.record_user(
+        KEY, UMO, "待整理的对话", False, "1", 1_800_000_000.0, platform="aiocqhttp"
+    )
     q = {"scope": "session", "key": KEY, "file": "a.md"}
     result = call(dash, "file/purge", body=q)
     assert result["status"] == "ok" and "彻底删除" in result["message"]
@@ -1020,6 +1029,7 @@ def test_file_purge_removes_history_trash_and_forgotten(plugin, dash):
     report = store.index_report()
     assert report.missing == [] and report.dangling == []
     assert plugin.invalidated[-1] == KEY
+    assert plugin._pending.load(KEY).records == []
 
     assert "没有找到" in err(call(dash, "file/purge", body=q))
     assert "索引" in err(call(dash, "file/purge", body={**q, "file": "MEMORY.md"}))
@@ -1218,6 +1228,10 @@ def test_migrate_scope_to_new_session(plugin, dash):
     asyncio.run(store.write("b.md", memory("b", "乙")))
     new_umo = "aiocqhttp:GroupMessage:300400"
     new_key = pkg_memstore.safe_key(new_umo)
+    plugin._pending.record_user(
+        KEY, UMO, "旧会话的待整理对话", False, "1", 1_800_000_000.0,
+        platform="aiocqhttp",
+    )
     body = {
         "from": {"scope": "session", "key": KEY},
         "to": {"umo": new_umo},
@@ -1234,6 +1248,7 @@ def test_migrate_scope_to_new_session(plugin, dash):
     assert plugin._store.session_scope(new_umo).list_files() == ["a.md"]
     assert plugin._registry.get(new_key).umo == new_umo
     assert {KEY, new_key} <= set(plugin.invalidated)
+    assert plugin._pending.load(KEY).records == []
     # 搬进还没有人物记忆的平台（人物记忆恒开）
     asyncio.run(store.write("user-9.md", memory("user-9", "小九")))
     people = {"scope": "people", "platform": "qq_new"}

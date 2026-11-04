@@ -46,6 +46,8 @@ MAX_TOTAL_CHARS = 24_000
 # 单条消息与 memory_note 的截断上限（防止一段超长消息挤掉整段历史）
 MAX_MESSAGE_CHARS = 4000
 MAX_NOTE_CHARS = 1000
+# 单轮最多保留几条 memory_note：很多条时丢最旧的，避免一条轮次挤满上限
+MAX_NOTES_PER_ROUND = 5
 # 同一段连续失败多少次后放弃
 MAX_FAILURES = 3
 
@@ -323,6 +325,9 @@ class PendingBook:
         state = self.load(key)
         state.umo = umo or state.umo
         state.platform = platform or state.platform
+        if state.failures >= MAX_FAILURES and not state.records:
+            # 上一段已经放弃；新的对话是新的开始，重新给三次机会
+            state.failures = 0
         text = (text or "")[:MAX_MESSAGE_CHARS]
         last = state.records[-1] if state.records else None
         if last is not None and not last.reply and last.user == text:
@@ -400,12 +405,16 @@ class PendingBook:
             )
             state.next_seq += 1
             state.records.append(round_record)
+        note_dropped = 0
+        while len(round_record.notes) >= MAX_NOTES_PER_ROUND:
+            round_record.notes.pop(0)
+            note_dropped += 1
         round_record.notes.append(note)
         state.note_pending = True
         state.last_round_at = now
         dropped = self._trim(state)
         self.save(key, state)
-        return state, dropped
+        return state, dropped + note_dropped
 
     # ------------------------------------------------------------ 整理结果
 
