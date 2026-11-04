@@ -19,12 +19,28 @@ def test_collect_sizes_has_required_fields():
     assert sizes["tool_total"] == sum(
         item["description"] for item in sizes["tools"].values()
     )
-    assert sizes["chat_total"] == sizes["guidance"] + sizes["tool_total"]
+    assert sizes["tool_schema_total"] == sum(
+        sum(item.values()) for item in sizes["tools"].values()
+    )
+    # chat_total 计模型实际看到的完整工具 schema（名称 + description +
+    # 参数说明），不是只有 description。
+    assert sizes["chat_total"] == (
+        sizes["guidance"] + sizes["tool_schema_total"]
+    )
     assert sizes["index_shell"] > 0
     assert sizes["recall_shell"] > 0
     assert sizes["background_prompt"] > 0
     assert sizes["within_limit"] is True
     assert sizes["chat_total"] <= 1200
+    assert set(sizes["variants"]) == {
+        "global_off_forgetting_off",
+        "global_off_forgetting_on",
+        "global_on_forgetting_off",
+        "global_on_forgetting_on",
+    }
+    # 开启遗忘会多一段规范说明：默认配置通过，但最坏变体如实标出超线。
+    assert sizes["variants"]["global_off_forgetting_on"] > 1200
+    assert sizes["within_limit_all_variants"] is False
 
 
 def test_cli_json_output():

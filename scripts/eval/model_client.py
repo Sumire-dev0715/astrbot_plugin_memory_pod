@@ -63,11 +63,13 @@ class CallBudget:
     def __init__(self, limit: int = MAX_API_CALLS) -> None:
         self.limit = limit
         self.count = 0
+        self.exceeded = False
         self._lock = threading.Lock()
 
     def spend(self) -> None:
         with self._lock:
             if self.count >= self.limit:
+                self.exceeded = True
                 raise BudgetExceeded(
                     f"接口调用超过 {self.limit} 次，已中止本次评测"
                 )

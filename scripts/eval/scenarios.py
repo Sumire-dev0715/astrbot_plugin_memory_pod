@@ -57,6 +57,19 @@ def _tool_arg(turn, name: str) -> dict:
     return {}
 
 
+def _tool_result(turn, name: str) -> str:
+    for call_name, _args, result in turn.tool_calls:
+        if call_name == name:
+            return result
+    return ""
+
+
+def _tool_failed(result: str) -> bool:
+    return result.startswith("工具执行出错") or (
+        result.startswith("工具 ") and "不存在" in result
+    )
+
+
 def _people_alice(env: EvalEnv) -> list:
     return env.people_files("10001")
 
@@ -69,11 +82,17 @@ def _session(env: EvalEnv, persona: Persona) -> list:
     return env.session_files(env.umo_for(persona))
 
 
-def _no_people_secret(env: EvalEnv, *needles: str) -> tuple[bool, str]:
-    people = env.people_files("10001")
-    leaked = [item.file for item in people if any(n in item.text for n in needles)]
+def _no_outside_session_secret(env: EvalEnv, *needles: str) -> tuple[bool, str]:
+    """私密内容只能留在 session：global 与 people 都不允许出现。"""
+    leaked = [
+        f"{item.scope}/{item.file}"
+        for item in env.memory_files()
+        if item.scope != "session"
+        and not item.is_journal
+        and any(n in item.text for n in needles)
+    ]
     if leaked:
-        return False, f"人物空间出现了本应只留在会话里的内容：{', '.join(leaked)}"
+        return False, f"私密内容出现在会话之外：{', '.join(leaked)}"
     return True, ""
 
 
@@ -111,7 +130,7 @@ def private_health_only_session() -> Scenario:
     def check(env: EvalEnv):
         session = _session(env, ALICE)
         remembered = "糖尿病" in _body(session) or "胰岛素" in _body(session)
-        clean, detail = _no_people_secret(env, "糖尿病", "胰岛素")
+        clean, detail = _no_outside_session_secret(env, "糖尿病", "胰岛素")
         if not remembered:
             return False, "健康信息没有被记进会话记忆"
         return clean, detail
@@ -138,7 +157,7 @@ def private_intimate_only_session() -> Scenario:
     def check(env: EvalEnv):
         session = _session(env, ALICE)
         remembered = "同居" in _body(session) or "女朋友" in _body(session)
-        clean, detail = _no_people_secret(env, "同居", "女朋友")
+        clean, detail = _no_outside_session_secret(env, "同居", "女朋友")
         if not remembered:
             return False, "亲密内容没有被记进会话记忆"
         return clean, detail
@@ -213,12 +232,15 @@ def remember_this_note() -> Scenario:
 
     def check(env: EvalEnv):
         turn = env.turns[0]
-        if not _has_tool(turn, "memory_note"):
+        result = _tool_result(turn, "memory_note")
+        if not result:
             return False, "模型没有调用 memory_note"
+        if _tool_failed(result) or "已记下" not in result:
+            return False, f"memory_note 没有正常返回：{result[:80]}"
         if not _has(_session(env, ALICE) + _people_alice(env), "花生过敏"):
             return False, "memory_note 的内容没有整理进长期记忆"
-        if turn.background_calls <= 0:
-            return False, "memory_note 之后没有立即触发后台整理"
+        if turn.immediate_background_calls <= 0:
+            return False, "memory_note 之后没有在本轮回复结束后立即触发后台整理"
         return True, ""
 
     return Scenario(
@@ -413,6 +435,9 @@ def chitchat_no_memory() -> Scenario:
     """闲聊不产生记忆。"""
 
     def check(env: EvalEnv):
+        turn = env.turns[0]
+        if turn.background_calls <= 0:
+            return False, "闲聊之后后台整理没有运行，无法证明“不产生记忆”"
         files = env.memory_files()
         if files:
             names = ", ".join(f"{item.scope}/{item.file}" for item in files)
@@ -456,6 +481,9 @@ def index_detail_read() -> Scenario:
             return False, "模型没有调用 memory_read"
         if _tool_arg(turn, "memory_read").get("file") != "project.md":
             return False, "memory_read 没有读取索引里指向的文件"
+        result = _tool_result(turn, "memory_read")
+        if _tool_failed(result) or "蓝鲸七号" not in result:
+            return False, f"memory_read 没有返回文件内容：{result[:80]}"
         if "蓝鲸七号" not in turn.reply:
             return False, "回复里没有索引之外的细节"
         return True, ""
@@ -488,6 +516,9 @@ def search_uncertain() -> Scenario:
         turn = env.turns[0]
         if not _has_tool(turn, "memory_search"):
             return False, "模型没有调用 memory_search"
+        result = _tool_result(turn, "memory_search")
+        if _tool_failed(result) or "/srv/backup.sh" not in result:
+            return False, f"memory_search 没有返回命中片段：{result[:80]}"
         if "/srv/backup.sh" not in turn.reply and not _has_tool(turn, "memory_read"):
             return False, "搜索之后既没有读取文件，也没有回答出备份脚本位置"
         return True, ""
@@ -556,7 +587,7 @@ def journal_new_after_week() -> Scenario:
 
 
 def shared_edit_cross_bot() -> Scenario:
-    """共享人物空间 edit 权限：另一个机器人读得到。"""
+    """共享人物空间 edit 权限：另一个机器人可读也可写。"""
 
     config = {"shared_people_bots": ["10001=edit", "10002=edit"]}
 
@@ -575,6 +606,8 @@ def shared_edit_cross_bot() -> Scenario:
         item = _file(env.people_files("10002"), f"user-{ALICE.sender_id}.md")
         if item is None or "工程师" not in item.text:
             return False, "共享人物档案没有映射到第二个机器人"
+        if "杭州" not in item.text:
+            return False, "edit 级机器人的写入没有落到共享人物档案"
         reply = env.turns[0].reply
         if "林晓" not in reply and "工程师" not in reply:
             return False, "第二个机器人没有读到共享人物档案"
@@ -588,10 +621,12 @@ def shared_edit_cross_bot() -> Scenario:
         setup=setup,
         turns=[
             Turn("我叫什么？做什么工作的？", alice("10002"), settle=False),
+            Turn("补充一下：我住在杭州。", alice("10002"), settle=True),
         ],
         settle_after=False,
         checks=[
-            Check("cross_bot_read", check, critical=True, category="permission")
+            Check("cross_bot_read_write", check, critical=True,
+                  category="permission")
         ],
     )
 
@@ -639,22 +674,33 @@ def shared_append_limits() -> Scenario:
 
 
 def shared_read_only() -> Scenario:
-    """共享人物空间 read 权限：不写共享人物空间，新信息写 session。"""
+    """共享人物空间 read 权限：能读，不能写共享人物空间，新信息写 session。"""
 
     config = {"shared_people_bots": ["10001=edit", "10002=read"]}
 
+    async def setup(env: EvalEnv):
+        store = env.plugin._store.people_scope("10001")
+        await _seed(
+            env,
+            store,
+            f"user-{ALICE.sender_id}.md",
+            "林晓的身份与职业",
+            "林晓，后端工程师。",
+            mem_type="user",
+        )
+
     def check(env: EvalEnv):
-        people = env.people_files("10002")
-        leaked = [
-            item.file
-            for item in people
-            if "林晓" in item.text or "工程师" in item.text
-        ]
-        if leaked:
-            return False, f"read 级机器人写入了共享人物空间：{', '.join(leaked)}"
+        item = _file(env.people_files("10002"), f"user-{ALICE.sender_id}.md")
+        if item is None or "工程师" not in item.text:
+            return False, "read 级机器人读不到已有的共享人物档案"
+        if "13800000000" in item.text:
+            return False, "read 级机器人把新信息写进了共享人物空间"
+        reply = env.turns[0].reply
+        if "林晓" not in reply and "工程师" not in reply:
+            return False, "read 级机器人没有用共享档案回答问题"
         session = _session(env, alice("10002"))
-        if "林晓" not in _body(session) and "工程师" not in _body(session):
-            return False, "read 级机器人没有把身份信息写进会话记忆"
+        if "13800000000" not in _body(session):
+            return False, "read 级机器人没有把新信息写进会话记忆"
         return True, ""
 
     return Scenario(
@@ -662,11 +708,15 @@ def shared_read_only() -> Scenario:
         title="两个机器人共享人物空间（read）",
         mode="group",
         config=config,
+        setup=setup,
         turns=[
-            Turn("我叫林晓，是后端工程师。", alice("10002"), settle=True)
+            Turn("我叫什么？做什么工作的？", alice("10002"), settle=False),
+            Turn("记住：我的新电话是 13800000000。", alice("10002"),
+                 settle=True),
         ],
+        settle_after=False,
         checks=[
-            Check("read_cannot_write_people", check, critical=True,
+            Check("read_can_read_cannot_write", check, critical=True,
                   category="permission")
         ],
     )

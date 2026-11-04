@@ -28,12 +28,21 @@ from types import SimpleNamespace
 from typing import Any, Awaitable, Callable
 
 from . import astrbot_stub
-from .model_client import MAX_TOOL_STEPS, ModelReply, ToolCall
+from .model_client import MAX_TOOL_STEPS, EvalError, ModelReply, ToolCall
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 IDLE_MINUTES_DEFAULT = 11
 # 假时钟起点：2026-10-01 10:00 UTC，远离真实时间，避免依赖机器时区之外的东西
 CLOCK_START = 1790848800.0
+# AstrBot 4.29.4 在达到工具步数上限后注入的提示词
+# （core/agent/runners/tool_loop_agent_runner.py:126）。
+MAX_STEPS_REACHED_PROMPT = (
+    "[SYSTEM NOTICE: Agent step budget exhausted] "
+    "Remaining steps: 0. Stop using tools; summarize results and unfinished work. "
+    "If unfinished, tell the user they can simply ask you to continue with a fresh "
+    "step budget. Optionally, they can raise the tool-call round limit in "
+    "AstrBot WebUI to allow longer runs."
+)
 
 
 @dataclass
@@ -395,6 +404,7 @@ class EvalEnv:
         self.data_dir = Path(data_dir)
         self.client = client
         self.clock = clock
+        self.model = "eval-model"
         self.plugin = None
         self.plugin_module = None
         self.memstore = None
@@ -567,6 +577,8 @@ class TurnResult:
     sent_prompt: str = ""
     tool_calls: list[tuple[str, dict, str]] = field(default_factory=list)
     prompt_chars: int = 0
+    # 本轮回复后、模拟空闲前就完成的后台调用数（memory_note 立即整理）
+    immediate_background_calls: int = 0
     background_calls: int = 0
     viewed_contexts: list[dict] = field(default_factory=list)
 
@@ -589,6 +601,8 @@ class ScenarioRun:
     prompt_chars: list[int]
     tool_calls_per_reply: list[int]
     background_calls: int
+    # 供测试构造坏状态；CLI 不序列化。
+    env: "EvalEnv | None" = field(default=None, repr=False)
 
 
 # ---------------------------------------------------------------- 一轮对话
@@ -661,7 +675,7 @@ async def run_turn(env: EvalEnv, turn: Turn) -> TurnResult:
         contexts=list(env.history.get(umo, [])),
         system_prompt=_base_system_prompt(env.clock),
         conversation=conversation,
-        model="eval-model",
+        model=env.model,
         func_tool=EvalToolSet(schemas),
     )
     event = EvalEvent(chat, persona)
@@ -725,7 +739,12 @@ async def run_turn(env: EvalEnv, turn: Turn) -> TurnResult:
                 tool_result=result,
             )
     if final is None:
-        # 工具循环达到上限：与 AstrBot 一样拔掉工具，强制要一段最终回复
+        # 工具循环达到上限：与 AstrBot 一样拔掉工具并注入步数耗尽提示，
+        # 强制要一段最终回复（core/astr_agent_run_util.py:139-153）。
+        run_ctx.messages.append(
+            {"role": "user", "content": MAX_STEPS_REACHED_PROMPT}
+        )
+        saved.append({"role": "user", "content": MAX_STEPS_REACHED_PROMPT})
         final = await env.client.complete(run_ctx.messages, None, purpose="chat")
     text = final.content or ""
     run_ctx.messages.append({"role": "assistant", "content": text})
@@ -790,7 +809,7 @@ def build_plugin(env: EvalEnv, client):
     config["summary_retry_count"] = 1
     config["summary_timeout"] = 60
     provider = EvalProvider(
-        client, model="eval-model", window=env.scenario.provider_window
+        client, model=env.model, window=env.scenario.provider_window
     )
     context = EvalContext(provider, env.astrbot_config)
     return plugin_cls(context, config)
@@ -800,14 +819,20 @@ async def run_scenario(
     scenario: Scenario,
     client,
     data_dir: Path,
+    *,
+    model: str = "eval-model",
 ) -> ScenarioRun:
     """在独立数据目录里跑一个场景；返回全部检查项的结果与指标。"""
-    data_dir.mkdir(parents=True, exist_ok=True)
+    root = Path(data_dir)
+    root.mkdir(parents=True, exist_ok=True)
+    # 与真实 AstrBot 一致：插件数据目录是 <数据根>/plugin_data/<插件名>
+    plugin_data = root / "plugin_data" / astrbot_stub.DATA_PLUGIN_NAME
     clock = FakeClock()
-    env = EvalEnv(scenario, data_dir, client, clock)
+    env = EvalEnv(scenario, plugin_data, client, clock)
+    env.model = model
     clock_token = _CLOCK.set(clock)
     scenario_token = _SCENARIO.set(scenario.name)
-    data_token = astrbot_stub.set_data_dir(data_dir)
+    data_token = astrbot_stub.set_data_dir(root)
     plugin = None
     try:
         with patched_time():
@@ -823,6 +848,9 @@ async def run_scenario(
                 result = await run_turn(env, turn)
                 before = client.background_calls
                 await drain_background(env)
+                result.immediate_background_calls = (
+                    client.background_calls - before
+                )
                 if turn.settle:
                     await settle(env, scenario.idle_minutes)
                 result.background_calls = client.background_calls - before
@@ -839,8 +867,11 @@ async def run_scenario(
                     if asyncio.iscoroutine(value):
                         value = await value
                     ok, detail = value
-                except Exception as exc:  # noqa: BLE001 - 检查自身的异常算失败
-                    ok, detail = False, f"检查执行出错：{type(exc).__name__}: {exc}"
+                except Exception as exc:  # noqa: BLE001 - 检查函数自身是脚本代码
+                    raise EvalError(
+                        f"检查 {scenario.name}.{check.name} 执行出错："
+                        f"{type(exc).__name__}: {exc}"
+                    ) from exc
                 outcomes.append(
                     CheckOutcome(
                         name=f"{scenario.name}.{check.name}",
@@ -856,6 +887,7 @@ async def run_scenario(
                 prompt_chars=[turn.prompt_chars for turn in env.turns],
                 tool_calls_per_reply=[len(turn.tool_calls) for turn in env.turns],
                 background_calls=client.background_calls,
+                env=env,
             )
     finally:
         if plugin is not None:

@@ -65,6 +65,7 @@ class Aggregate:
     checks: dict = field(default_factory=dict)
     critical_failed: list = field(default_factory=list)
     pass_rate: float = 0.0
+    noncritical_pass_rate: float = 0.0
     passed: bool = False
     prompt_chars: list = field(default_factory=list)
     tool_calls: list = field(default_factory=list)
@@ -156,23 +157,36 @@ def aggregate(
 
     passed_checks = 0
     critical_failed: list[str] = []
+    noncritical_passed = 0
+    noncritical_total = 0
     for name, item in checks.items():
         item["passed"] = _check_passed(item["passes"], item["runs"])
+        if item["critical"]:
+            if not item["passed"]:
+                critical_failed.append(name)
+        else:
+            noncritical_total += 1
+            if item["passed"]:
+                noncritical_passed += 1
         if item["passed"]:
             passed_checks += 1
-        elif item["critical"]:
-            critical_failed.append(name)
     total = len(checks)
+    # pass_rate 按规格统计全部检查项；passed 的判定另按“其余检查项”
+    # （非关键项）计算通过率，避免关键项抬高分母掩盖非关键项不达标。
     pass_rate = (passed_checks / total) if total else 0.0
+    noncritical_pass_rate = (
+        noncritical_passed / noncritical_total if noncritical_total else 1.0
+    )
     return Aggregate(
         checks=checks,
         critical_failed=sorted(critical_failed),
         pass_rate=round(pass_rate, 4),
+        noncritical_pass_rate=round(noncritical_pass_rate, 4),
         passed=(
             not errors
             and not critical_failed
             and total > 0
-            and pass_rate >= PASS_RATE_FLOOR
+            and noncritical_pass_rate >= PASS_RATE_FLOOR
         ),
         prompt_chars=prompt_chars,
         tool_calls=tool_calls,
@@ -192,7 +206,12 @@ async def _run_one(spec: RunSpec, env: dict, budget: CallBudget,
                 env["MB_EVAL_API_KEY"],
                 budget=budget,
             )
-            run = await run_scenario(spec.scenario, client, data_dir)
+            run = await run_scenario(
+                spec.scenario,
+                client,
+                data_dir,
+                model=env["MB_EVAL_MODEL"],
+            )
             return RunResult(spec=spec, run=run)
         except EvalError as exc:
             return RunResult(spec=spec, error=str(exc))
@@ -210,6 +229,7 @@ def _error_summary(message: str) -> dict:
         "passed": False,
         "critical_failed": [],
         "pass_rate": 0.0,
+        "noncritical_pass_rate": 0.0,
         "checks": {},
         "metrics": {
             "prompt_chars_per_round": [],
@@ -258,10 +278,18 @@ async def _main_async(args) -> int:
             return _finish_timeout()
 
     agg = aggregate(scenarios, max(1, args.runs), results)
+    if budget.exceeded and not any("接口调用超过" in item for item in agg.errors):
+        # 后台整理路径里的调用异常会被插件自己的宽泛 except 吞掉，这里
+        # 以共享预算的标志为准，确保超限一定按脚本问题退出 2。
+        agg.errors.append(
+            f"接口调用超过 {budget.limit} 次，已中止本次评测"
+        )
+        agg.passed = False
     summary = {
         "passed": agg.passed,
         "critical_failed": agg.critical_failed,
         "pass_rate": agg.pass_rate,
+        "noncritical_pass_rate": agg.noncritical_pass_rate,
         "checks": agg.checks,
         "metrics": {
             "prompt_chars_per_round": agg.prompt_chars,

@@ -23,6 +23,8 @@ from pathlib import Path
 
 # 插件在评测进程里的包名；与仓库目录解耦，main.py 里的相对导入照常工作。
 PLUGIN_PACKAGE = "memory_pod_under_eval"
+# 插件数据目录名，与 metadata.yaml / main.PLUGIN_NAME 一致。
+DATA_PLUGIN_NAME = "astrbot_plugin_memory_pod"
 
 # StarTools.get_data_dir 的返回值按场景任务隔离；场景并发时各用各的目录。
 _DATA_DIR: ContextVar[str | None] = ContextVar("mb_eval_data_dir", default=None)
@@ -143,14 +145,18 @@ class Star:
 
 
 class StarTools:
-    """插件数据目录按当前场景任务解析。"""
+    """插件数据目录按当前场景任务解析。
+
+    与 AstrBot 4.29.4 一样返回 ``<数据根>/plugin_data/<插件名>``；场景的
+    临时根目录由 harness 通过 ContextVar 传入。
+    """
 
     @staticmethod
     def get_data_dir(name: str) -> str:
-        path = _DATA_DIR.get()
-        if not path:
-            path = str(Path(tempfile.gettempdir()) / "mb-eval-unset")
-        return path
+        root = _DATA_DIR.get()
+        if not root:
+            root = str(Path(tempfile.gettempdir()) / "mb-eval-unset")
+        return str(Path(root) / "plugin_data" / (name or DATA_PLUGIN_NAME))
 
 
 def _module(name: str) -> types.ModuleType:

@@ -3,11 +3,14 @@
 统计模型每轮实际看到的固定文本：
 
 - 记忆规范（按默认配置的全局记忆、遗忘开关组合生成）；
-- 三个工具说明（AstrBot 取 docstring 第一段作为工具 description）；
+- 三个工具说明：工具名、AstrBot 取的 docstring 第一段 description，以及
+  参数 description（模型实际收到的完整 schema）；
 - 索引块外壳与召回块外壳（块首数据声明、标题与标记，不含具体记忆正文）；
 - 后台整理提示词（空索引、空对话时的模板体积）。
 
-`chat_total` = 记忆规范 + 三个工具说明；验收线 1200 字。
+`chat_total` = 默认配置下的记忆规范 + 三个工具的完整 schema，验收线
+1200 字。全局记忆/遗忘开关的四种组合另列在 variants 里；开启遗忘会追加
+一段规范说明，`within_limit_all_variants` 会如实标出它是否超线。
 
 用法：
     python scripts/prompt_sizes.py --json
@@ -37,7 +40,7 @@ def _load_config_defaults() -> dict:
 
 
 def _tool_docs(plugin_cls) -> dict[str, dict]:
-    """工具名 -> {description, parameters} 字数，口径与 AstrBot 一致。"""
+    """工具名 -> 名称/描述/参数说明字数，口径与 AstrBot 发出去的 schema 一致。"""
     result: dict[str, dict] = {}
     for value in vars(plugin_cls).values():
         name = getattr(value, "__astrbot_llm_tool__", None)
@@ -49,6 +52,7 @@ def _tool_docs(plugin_cls) -> dict[str, dict]:
             for item in schema["parameters"]["properties"].values()
         )
         result[name] = {
+            "name": len(name),
             "description": len(schema["description"]),
             "parameters": params,
         }
@@ -97,6 +101,16 @@ def collect_sizes() -> dict:
     )
     tools = _tool_docs(plugin_cls)
     tool_total = sum(item["description"] for item in tools.values())
+    tool_schema_total = sum(sum(item.values()) for item in tools.values())
+    variants: dict[str, int] = {}
+    for global_on in (False, True):
+        for forgetting_on in (False, True):
+            key = f"global_{'on' if global_on else 'off'}_" \
+                  f"forgetting_{'on' if forgetting_on else 'off'}"
+            variants[key] = (
+                len(prompts.memory_guidance(global_on, forgetting_on))
+                + tool_schema_total
+            )
 
     index_shell = len(injection.build_opening_block(None, "X", [], now=0.0)) - 1
     index_shell_with_global = (
@@ -115,18 +129,22 @@ def collect_sizes() -> dict:
             global_on=False,
         )
     )
+    chat_total = len(guidance) + tool_schema_total
     return {
         "guidance": len(guidance),
         "tools": tools,
         "tool_total": tool_total,
+        "tool_schema_total": tool_schema_total,
         "index_shell": index_shell,
         "index_shell_with_global": index_shell_with_global,
         "recall_shell": recall_shell,
         "background_prompt": len(context.prompt),
         "background_rules": len(writer.WRITE_RULES),
-        "chat_total": len(guidance) + tool_total,
+        "chat_total": chat_total,
+        "variants": variants,
+        "within_limit": chat_total <= CHAT_LIMIT,
+        "within_limit_all_variants": max(variants.values()) <= CHAT_LIMIT,
         "limit": CHAT_LIMIT,
-        "within_limit": len(guidance) + tool_total <= CHAT_LIMIT,
     }
 
 
@@ -144,7 +162,8 @@ def main(argv: list[str] | None = None) -> int:
                 f"工具说明 {name}：{item['description']} 字"
                 f"（参数说明 {item['parameters']} 字）"
             )
-        print(f"工具说明合计：{sizes['tool_total']} 字")
+        print(f"工具说明合计（description）：{sizes['tool_total']} 字")
+        print(f"工具完整 schema 合计：{sizes['tool_schema_total']} 字")
         print(f"索引块外壳：{sizes['index_shell']} 字（含全局段 {sizes['index_shell_with_global']} 字）")
         print(f"召回块外壳：{sizes['recall_shell']} 字")
         print(f"后台整理提示词：{sizes['background_prompt']} 字")
@@ -152,6 +171,14 @@ def main(argv: list[str] | None = None) -> int:
             f"聊天侧合计 chat_total：{sizes['chat_total']} 字"
             f"（上限 {sizes['limit']}，{'通过' if sizes['within_limit'] else '超出'}）"
         )
+        for key, value in sizes["variants"].items():
+            flag = "通过" if value <= sizes["limit"] else "超出"
+            print(f"  变体 {key}：{value} 字（{flag}）")
+        if not sizes["within_limit_all_variants"]:
+            print(
+                "注意：开启遗忘后记忆规范会多一段说明，完整 schema 合计超过 "
+                f"{sizes['limit']} 字；默认配置的 chat_total 不受影响。"
+            )
     return 0 if sizes["within_limit"] else 1
 
 
