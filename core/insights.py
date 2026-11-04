@@ -2,7 +2,7 @@
 
 这一层只做纯文本判断，不碰文件、锁与作用域解析：
 
-- `replace_section` 供 memory_edit 的 section 模式使用，标题行保留，
+- `replace_section` 供后台整理按小节替换正文使用，标题行保留，
   正文范围到下一个同级或更高级标题为止；
 - `build_hit` / `rank_hits` 供 memory_search 使用：非日志在前，再按命中
   词数、updated 倒序；每条最多两行命中片段；
@@ -385,23 +385,6 @@ def dangling_links(links: list[str], available: set[str]) -> list[str]:
     return missing
 
 
-def _display_link(name: str) -> str:
-    """把补全后的文件名还原成 [[x]] 的写法，回执里更好认。"""
-    stem = name[: -len(".md")] if name.endswith(".md") else name
-    return f"[[{stem}]]"
-
-
-def dangling_link_hint(missing: list[str]) -> str:
-    """悬空链接提醒：只提示，不自动创建，也不说明别处有没有。"""
-    if not missing:
-        return ""
-    listing = "；".join(_display_link(name) for name in missing)
-    return (
-        f"提醒：以下 [[链接]] 在当前机器人可见的作用域里找不到对应文件：{listing}。"
-        "只提示，不会自动创建；请核对链接目标，或先写入对应的记忆。"
-    )
-
-
 def _size_label(size: int) -> str:
     """向上取到 0.1KB，避免刚超过阈值时显示成“约 8.0KB，超过 8KB”。"""
     tenths = math.ceil(size / 102.4)
@@ -427,13 +410,3 @@ def long_file_reasons(
         if dates > LONG_FILE_DATES:
             reasons.append(f"正文里有 {dates} 个日期")
     return reasons
-
-
-def long_file_hint(file: str, reasons: list[str]) -> str:
-    """长文件回执：建议拆分或整理。"""
-    if not reasons:
-        return ""
-    return (
-        f"提醒：{file} 偏长（{'，'.join(reasons)}），建议拆分或整理；"
-        "日志按天或按条拆分，普通记忆合并成更短的几条。"
-    )

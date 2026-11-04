@@ -56,6 +56,7 @@ pkg_memstore = importlib.import_module(f"{PACKAGE}.core.memstore")
 pkg_registry = importlib.import_module(f"{PACKAGE}.core.registry")
 pkg_sharing = importlib.import_module(f"{PACKAGE}.core.sharing")
 pkg_tidy = importlib.import_module(f"{PACKAGE}.core.tidy")
+pkg_pending = importlib.import_module(f"{PACKAGE}.core.pending")
 
 UMO = "aiocqhttp:GroupMessage:100200"
 KEY = pkg_memstore.safe_key(UMO)
@@ -85,7 +86,7 @@ class FakePlugin:
         self._store = pkg_memstore.MemoryStore(base / "memories")
         self._registry = pkg_registry.SessionRegistry(base / "sessions.json")
         self._tidy = pkg_tidy.TidyBook(base / "tidy")
-        self._seen = pkg_sharing.SeenVersions(base / "state" / "shared_seen.json")
+        self._pending = pkg_pending.PendingBook(base / "state" / "pending")
         self._sessions: dict = {}
         self._state_dir = base / "state"
         self.config = {

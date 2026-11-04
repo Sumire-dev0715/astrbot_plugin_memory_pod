@@ -1,4 +1,4 @@
-"""Memory Beyond —— 为 AstrBot 重新设计的长期记忆与上下文压缩系统。
+"""鲸群记忆 —— 为 AstrBot 重新设计的长期记忆与上下文压缩系统。
 
 核心理念：真相在磁盘，上下文只带索引，细节按需取回，压缩后从磁盘重新注入。
 
@@ -44,14 +44,16 @@ from .core import (
     journal,
     loopguard,
     memstore,
+    pending,
     prompts,
     recall,
     registry,
     sharing,
     tidy,
     tokens,
+    writer,
 )
-from .core.turns import split_leading_system, split_turns
+from .core.turns import split_leading_system
 from .web_api import MemoryDashboard
 
 PLUGIN_NAME = "astrbot_plugin_memory_pod"
@@ -68,7 +70,6 @@ MIN_TAIL_BUDGET = 1000
 # 全局记忆关闭时对 scope=global 工具调用的固定回执；工具说明是静态的
 # 仍会列出 global，回执要把模型引导回 session。
 GLOBAL_MEMORY_OFF = "全局记忆已在插件配置中停用；请改用 session 作用域。"
-PEOPLE_FILE_RULE = "people 作用域一人一个文件，文件名必须是 user-<数字ID>.md。"
 SCOPE_ARG_ERROR = "scope 参数必须是 global、session 或 people。"
 # 会话运行时缓存上限（LRU 淘汰，仅内存快照，磁盘状态不受影响）。
 MAX_RUNTIME_SESSIONS = 256
@@ -166,10 +167,6 @@ class RuntimeSession:
     index_pin_key: tuple = ()
     # 开头块里已钉住的人物档案：ref -> 注入时的内容摘要（检测快照后的修改）
     index_pinned: dict[str, str] = field(default_factory=dict)
-    # 这些档案在快照里没有头尾截断，可以记"看过"
-    index_pinned_full: set[str] = field(default_factory=set)
-    # 当前快照是否已经在真实请求里记过共享"看过"（管理指令估算时不算）
-    index_seen_noted: bool = False
     # 开头块索引里实际出现过的文件引用；指针行据此决定是否附描述
     index_refs: set[str] = field(default_factory=set)
     awaiting_calibration: bool = False
@@ -179,8 +176,6 @@ class RuntimeSession:
     warned_window: bool = False
     warned_summarizer: bool = False
     warned_clip: bool = False
-    # 后台提取进行中（同一会话不并发提取）
-    extracting: bool = False
     # 工具循环中途累计清理的工具结果条数（仅内存，供 mb_status 展示）
     loop_cleared: int = 0
 
@@ -190,8 +185,6 @@ class RuntimeSession:
         self.index_loaded = False
         self.index_pin_key = ()
         self.index_pinned = {}
-        self.index_pinned_full = set()
-        self.index_seen_noted = False
         self.index_refs = set()
 
 
@@ -215,14 +208,17 @@ class MemoryBeyondPlugin(Star):
         # 作用域目录 -> 上次遗忘扫描时间
         self._last_sweep: dict[Path, float] = {}
         # 定期整理：每处的记录与进行中标记；作用域 -> 上次检查时间；
-        # 模型调用一次只跑一处，避免一波消息同时触发好几次复盘
+        # 后台整理与定期整理共用一个信号量，一次只跑一个
         self._tidy = tidy.TidyBook(data_dir / "tidy")
         self._tidy_checked: dict[str, float] = {}
-        self._tidy_gate = asyncio.Semaphore(1)
-        # 共享人物空间：成员表从配置解析，版本记录放在 state/ 下（不是记忆文件）
+        self._background_gate = asyncio.Semaphore(1)
+        # 待整理记录：每轮的对话缓冲，整理成功后删除
+        self._pending = pending.PendingBook(data_dir / "state" / "pending")
+        self._write_scheduled: set[str] = set()
+        self._pending_loop: asyncio.Task | None = None
+        # 共享人物空间：成员表从配置解析
         self._sharing = sharing.Membership()
         self._sharing_warned: set[str] = set()
-        self._seen = sharing.SeenVersions(data_dir / "state" / "shared_seen.json")
         self._refresh_sharing()
         self.dashboard = MemoryDashboard(self)
         self.dashboard.register()
@@ -242,6 +238,8 @@ class MemoryBeyondPlugin(Star):
                 + "当前 AstrBot 缺少 on_agent_begin / on_llm_tool_respond 钩子，"
                 "工具循环中途保护不生效（升级 AstrBot 后恢复）"
             )
+        # 重启后有待整理记录的会话照样会被每分钟一次的扫描找到
+        self._ensure_pending_loop()
 
     @staticmethod
     def _resolve_data_dir() -> Path:
@@ -645,11 +643,9 @@ class MemoryBeyondPlugin(Star):
             )
 
     def _guidance(self, umo: str = "") -> str:
-        shared = bool(umo) and self._sharing.is_member(self._platform_of(umo))
         return prompts.memory_guidance(
             self._global_on(),
             self._forgetting_on(),
-            shared_people=shared,
         )
 
     @staticmethod
@@ -727,50 +723,6 @@ class MemoryBeyondPlugin(Star):
             return True
         return self._people_permission(platform_id) == sharing.PERMISSION_EDIT
 
-    def _shared_people_actor(self, umo: str, store: memstore.ScopeStore) -> str:
-        """共享人物作用域对应的机器人 platform_id；不是共享空间返回空串。
-
-        提取写盘不在工具调用现场，没有事件的 platform_id，用 UMO 前缀定位
-        同一个成员身份，保证 SeenVersions 的键与工具层一致。
-        """
-        if not self._store.is_shared_people_scope(store):
-            return ""
-        platform_id = self._platform_of(umo)
-        return platform_id if self._sharing.is_member(platform_id) else ""
-
-    def _can_extract_people(self, umo: str) -> bool:
-        """后台 / 压缩联动提取能否写 people。
-
-        人物记忆恒开；共享人物空间里只有 edit 级成员能写，append / read 级
-        成员的提取拿不到 people 目标，只写 session。非成员不受限制。
-        """
-        permission = self._people_permission(self._platform_of(umo))
-        return permission is None or permission == sharing.PERMISSION_EDIT
-
-    async def _note_shared_seen(
-        self,
-        event: AstrMessageEvent,
-        scope: str,
-        store: memstore.ScopeStore,
-        file: str,
-        content: str | None = None,
-    ) -> None:
-        """记住这个机器人刚看过的共享文件版本（读取与召回全文都算看过）。"""
-        if scope != "people" or not file:
-            return
-        platform_id = self._event_actor(event)
-        if not self._sharing.is_member(platform_id):
-            return
-        try:
-            if content is None:
-                content = await store.read(file)
-            if content is None:
-                return
-            await asyncio.to_thread(self._seen.note, platform_id, file, content)
-        except OSError:
-            # 版本记录写不进去只影响覆盖检查，不能影响读取/写入本身
-            logger.debug(LOG_PREFIX + "共享人物空间的版本记录写盘失败", exc_info=True)
-
     def _scope_for(
         self, event: AstrMessageEvent, scope: str
     ) -> memstore.ScopeStore | None:
@@ -823,7 +775,7 @@ class MemoryBeyondPlugin(Star):
         umo = str(getattr(event, "unified_msg_origin", "") or "")
         if not umo:
             return
-        # 配置页改了共享成员时，索引/召回/提取立即按新成员表走
+        # 配置页改了共享成员时，索引/召回立即按新成员表走
         self._refresh_sharing()
         self._schedule_history_cleanup()
         # 其他插件自行发起的模型调用（event.request_llm，不带对话也没有历史）
@@ -897,9 +849,10 @@ class MemoryBeyondPlugin(Star):
         n_system = split_leading_system(contexts)
         memory_on = self._bool("enable_memory", True)
 
-        # ---- 后台定期提取：每隔 N 轮把最近的对话交给模型补记长期事实 ----
+        # ---- 把本轮用户消息记进待整理记录；整理由后台队列统一执行 ----
         if memory_on:
-            self._maybe_extract(rt, umo, contexts, n_system, now)
+            self._ensure_pending_loop()
+            self._record_pending_user(event, req, now)
             # ---- 遗忘扫描：长期没用到的记忆退出索引与召回（后台，按目录节流） ----
             self._maybe_forget(event, now)
             # ---- 定期整理：到了时间又攒够新记忆的作用域在后台复盘 ----
@@ -909,7 +862,7 @@ class MemoryBeyondPlugin(Star):
         index_msg = None
         recall_msg = None
         if memory_on:
-            block = await self._index_block(rt, event, note_seen=True)
+            block = await self._index_block(rt, event, record_usage=True)
             if block:
                 index_msg = prompts.build_index_message(block)
             # ---- 相关记忆召回：本轮用得上的记忆全文附在新消息之前 ----
@@ -1123,14 +1076,14 @@ class MemoryBeyondPlugin(Star):
         rt: RuntimeSession,
         event: AstrMessageEvent,
         *,
-        note_seen: bool = False,
+        record_usage: bool = False,
     ) -> str | None:
         """开头块：索引 + （私聊时）发送者人物档案，共用一个快照。
 
         快照只在对话切换、压缩、重置、管理页改动或相关配置变化时刷新；
-        记忆不变时逐轮逐字不变，才能命中模型服务的前缀缓存。note_seen 只在
-        真正发给模型的请求路径上置真：管理指令里估算开头块时不能把人物档案
-        记成"模型看过"。
+        记忆不变时逐轮逐字不变，才能命中模型服务的前缀缓存。record_usage
+        只在真正发给模型的请求路径上置真：管理指令里估算开头块时不能把
+        人物档案记成用过。
         """
         global_on = self._global_on()
         pin_key = self._pin_profile_key(event)
@@ -1139,11 +1092,7 @@ class MemoryBeyondPlugin(Star):
             and rt.index_global_on == global_on
             and rt.index_pin_key == pin_key
         ):
-            # 管理指令先估算过开头块时，快照可能还没在真实请求里记过"看过"；
-            # 这里按快照里的内容摘要补记，内容已变则交给召回块的更新提示。
-            if note_seen:
-                if pin_key and not rt.index_seen_noted:
-                    await self._note_pinned_seen(rt, event)
+            if record_usage:
                 # 钉在开头块的档案每轮都真的发给了模型，使用统计也要每轮记
                 await self._note_pinned_usage(rt, event)
             return rt.index_block
@@ -1159,11 +1108,8 @@ class MemoryBeyondPlugin(Star):
         session_snap = await session_store.load_index()
         profiles: list[injection.MemoryView] = []
         pinned: dict[str, str] = {}
-        pinned_full: set[str] = set()
         if pin_key:
-            profiles, pinned, pinned_full = await self._pinned_profiles(
-                event, note_seen=note_seen
-            )
+            profiles, pinned = await self._pinned_profiles(event)
         rt.index_block = injection.build_opening_block(
             global_index, session_snap.text, profiles
         )
@@ -1171,8 +1117,6 @@ class MemoryBeyondPlugin(Star):
         rt.index_global_on = global_on
         rt.index_pin_key = pin_key
         rt.index_pinned = pinned
-        rt.index_pinned_full = pinned_full
-        rt.index_seen_noted = note_seen
         rt.index_refs = {
             f"session/{name}"
             for name in injection.indexed_names(session_snap.text)
@@ -1181,7 +1125,7 @@ class MemoryBeyondPlugin(Star):
             rt.index_refs |= {
                 f"global/{name}" for name in injection.indexed_names(global_index)
             }
-        if note_seen:
+        if record_usage:
             await self._note_pinned_usage(rt, event)
         return rt.index_block
 
@@ -1202,23 +1146,21 @@ class MemoryBeyondPlugin(Star):
         return ("pin", platform, sender_id)
 
     async def _pinned_profiles(
-        self, event: AstrMessageEvent, *, note_seen: bool = False
-    ) -> tuple[list[injection.MemoryView], dict[str, str], set[str]]:
+        self, event: AstrMessageEvent
+    ) -> tuple[list[injection.MemoryView], dict[str, str]]:
         """读出发送者的人物档案，渲染成开头块里钉住的部分。
 
-        返回 (渲染视图, ref -> 注入时的内容摘要, 未截断的 ref 集合)。共享
-        人物空间里，未被头尾截断的 people 档案记进"看过"：模型确实看过
-        这份完整内容，之后整文件覆盖才允许。
+        返回 (渲染视图, ref -> 注入时的内容摘要)；摘要用来检测快照之后
+        档案有没有被改过。
         """
         sender_id, _ = self._sender_identity(event)
         name = f"user-{sender_id}.md"
         if not sender_id or not memstore.is_person_file(name):
-            return [], {}, set()
+            return [], {}
         platform_id = self._event_actor(event)
         shared = self._sharing.is_member(platform_id)
         views: list[injection.MemoryView] = []
         pinned: dict[str, str] = {}
-        full: set[str] = set()
         pairs: list[tuple[str, memstore.ScopeStore]] = [
             ("session", self._session_scope(event))
         ]
@@ -1239,16 +1181,7 @@ class MemoryBeyondPlugin(Star):
             )
             views.append(view)
             pinned[view.ref] = sharing.content_sha1(content)
-            if not view.truncated:
-                full.add(view.ref)
-            if (
-                note_seen
-                and label == "people"
-                and view.shared
-                and not view.truncated
-            ):
-                await self._note_shared_seen(event, label, store, name, content)
-        return views, pinned, full
+        return views, pinned
 
     async def _note_pinned_usage(
         self, rt: RuntimeSession, event: AstrMessageEvent
@@ -1270,29 +1203,6 @@ class MemoryBeyondPlugin(Star):
                 by_store.setdefault(store, []).append(file)
         for store, names in by_store.items():
             await asyncio.to_thread(store.note_used, names)
-
-    async def _note_pinned_seen(
-        self, rt: RuntimeSession, event: AstrMessageEvent
-    ) -> None:
-        """给快照里未截断的人物档案补记"看过"，只认与快照一致的内容。"""
-        people_store, _ = self._people_store_for_event(event)
-        for ref in rt.index_pinned:
-            if ref not in rt.index_pinned_full:
-                continue
-            scope, _, file = ref.partition("/")
-            if scope == "people":
-                store = people_store
-            else:
-                store = self._session_scope(event)
-            if store is None:
-                continue
-            content = await store.read(file)
-            if content is None:
-                continue
-            if sharing.content_sha1(content) != rt.index_pinned[ref]:
-                continue
-            await self._note_shared_seen(event, scope, store, file, content)
-        rt.index_seen_noted = True
 
     # ============================================================ 召回
 
@@ -1377,17 +1287,6 @@ class MemoryBeyondPlugin(Star):
                 if store is not None:
                     await asyncio.to_thread(store.note_used, [file])
             block = plan.block
-            if block:
-                # 召回实际附上的全文才算"看过"：以拼块时的同一份计划为准，
-                # 被预算挤成指针或按长度截断的不算。不再去块文本里找
-                # "### ref（" —— 别的记忆正文可以伪造相同的标题行。
-                for section in plan.sections:
-                    item = section.item
-                    if item.shared and not section.truncated:
-                        scope, _, file = item.ref.partition("/")
-                        await self._note_shared_seen(
-                            event, scope, stores[scope], file, item.content
-                        )
             return recall.build_recall_message(block) if block else None
         except Exception:  # noqa: BLE001 - 召回是锦上添花，失败不影响本轮
             logger.warning(LOG_PREFIX + f"会话 {umo} 相关记忆召回失败", exc_info=True)
@@ -1527,7 +1426,7 @@ class MemoryBeyondPlugin(Star):
         ]
         if self._global_on():
             targets.append(("global", None, None))
-        # 与遗忘扫描、后台提取一致：目录与权限都按事件的 platform_id 取；
+        # 与遗忘扫描、后台整理一致：目录与权限都按事件的 platform_id 取；
         # 共享人物空间只有 edit 级成员的会话能触发定期自动整理，read /
         # append 成员不会间接改写共享文件。管理页手动整理不受此限制。
         people_store, _ = self._people_store_for_event(event)
@@ -1548,7 +1447,7 @@ class MemoryBeyondPlugin(Star):
     async def _auto_tidy(
         self, targets: list[tuple[str, str | None, str | None]], mode: str
     ) -> None:
-        async with self._tidy_gate:
+        async with self._background_gate:
             for scope, key, cache_key in targets:
                 try:
                     await self.tidy_scope(scope, key, cache_key, mode)
@@ -1677,233 +1576,357 @@ class MemoryBeyondPlugin(Star):
             return None
         return chosen[:limit]
 
-    # ============================================================ 记忆提取
+    # ============================================================ 后台写入
 
-    async def _existing_for_extract(
-        self,
-        scope: memstore.ScopeStore,
-        transcript: str,
-        people: memstore.ScopeStore | None = None,
-        seen_actor: str = "",
-    ) -> tuple[str, dict[str, set[str]]]:
-        """抽取前给模型看的已有记忆：相关的附全文（可合并改写），其余只列名字；
-        人物记忆开启时，对话里说话人的人物文件也附全文（文件名前缀 people/）。
-
-        seen_actor 非空时，附上全文的人物文件同时记进 SeenVersions：这些
-        内容模型确实看过，真正落盘时的共享版本检查据此放行；期间被别的
-        机器人改过则拒绝覆盖。
-
-        返回 (提示词片段, 各作用域允许被改写的文件名集合)。
-        """
-        updatable: dict[str, set[str]] = {"session": set(), "people": set()}
-        headers = await asyncio.to_thread(scope.headers)
-        speakers = [f"user-{uid}.md" for uid in prompts.sender_ids_in(transcript)]
-        full: list[prompts.ExistingMemory] = []
-        used = 0
-        if headers:
-            candidates = [recall.Candidate("session", h) for h in headers]
-            related = recall.select_by_keywords(
-                candidates, transcript, speakers, recall.DEFAULT_MAX_FILES
-            )
-            for cand in related:
-                content = await scope.read(cand.header.file)
-                if not content or used + len(content) > prompts.EXISTING_FULL_CHARS:
-                    continue
-                used += len(content)
-                full.append(
-                    prompts.ExistingMemory(
-                        cand.header.file, cand.header.description, content
-                    )
-                )
-            updatable["session"] = {item.file for item in full}
-        if people is not None:
-            for name in speakers:
-                content = await people.read(name)
-                if not content or used + len(content) > prompts.EXISTING_FULL_CHARS:
-                    continue
-                used += len(content)
-                doc = memstore.parse_memory(content)
-                full.append(
-                    prompts.ExistingMemory(
-                        prompts.PEOPLE_PREFIX + name, doc.description, content
-                    )
-                )
-                updatable["people"].add(name)
-                if seen_actor:
-                    await asyncio.to_thread(
-                        self._seen.note, seen_actor, name, content
-                    )
-        listed = [
-            prompts.ExistingMemory(h.file, h.description)
-            for h in headers
-            if h.file not in updatable["session"]
-            and not journal.is_journal(h.file, h.type)
-        ]
-        if not full and not listed:
-            return "", updatable
-        return prompts.build_existing_section(full, listed), updatable
-
-    async def _store_drafts(
-        self,
-        umo: str,
-        drafts: list[prompts.MemoryDraft],
-        updatable: dict[str, set[str]],
-        source: str,
-        actor: str = "",
-        people: memstore.ScopeStore | None = None,
-    ) -> int:
-        """抽取出的记忆落盘：默认进会话作用域；people 不为 None 时，模型标为
-        people 的人物文件进该平台的人物作用域。绝不进全局。
-
-        调用方只在有写权限时传入 people（共享空间里仅 edit 级成员），
-        否则传 None，标为 people 的草稿会退回 session——没有可写的人物
-        作用域时只能记在会话里。
-
-        已存在的文件只有在抽取时附过全文（模型据此合并）才允许改写，
-        其余同名条目跳过——看不到原文就覆盖会丢内容。
-
-        共享人物空间里提取写入沿用工具层的覆盖前版本检查：提示词读到的全文
-        到真正写入之间若有别的机器人改过，宁可跳过这一条，也不整文件覆盖。
-
-        任务开始时捕获的 people 作用域在落盘前要再确认一次：后台提取跑在
-        模型调用之后，期间成员可能被移出共享或降成 read/append。身份或目录
-        映射变了就把 people 目标丢掉，草稿退回 session，不能继续往 _shared
-        写（此时 shared_people_actor 为空，连版本检查都不会做）。
-        """
-        if people is not None:
-            # 配置页改动可能还没被下一次请求带进来；落盘前主动同步一次成员表
-            self._refresh_sharing()
-            current = self._people_scope(umo)
-            if not self._can_extract_people(umo) or current.root != people.root:
-                logger.info(
-                    LOG_PREFIX
-                    + f"会话 {umo} 的共享人物身份已变化，本次提取不再写 people"
-                )
-                people = None
-        stores = {"session": self._store.session_scope(umo)}
-        shared_people_actor = ""
-        if people is not None:
-            stores["people"] = people
-            shared_people_actor = self._shared_people_actor(umo, people)
-        stored = 0
-        for draft in drafts:
-            label = draft.scope if draft.scope in stores else "session"
-            scope = stores[label]
+    @staticmethod
+    def _is_admin_event(event: AstrMessageEvent) -> bool:
+        """发送者是不是 AstrBot 管理员；事件没有管理员接口时返回 False。"""
+        checker = getattr(event, "is_admin", None)
+        if callable(checker):
             try:
-                if draft.filename not in updatable.get(label, set()) and scope.exists(
-                    draft.filename
-                ):
-                    continue
-                expected = None
-                if label == "people" and shared_people_actor:
-                    expected = await asyncio.to_thread(
-                        self._seen.seen, shared_people_actor, draft.filename
-                    )
-                report = await scope.write(
-                    draft.filename,
-                    prompts.render_memory_file(draft),
-                    actor=actor,
-                    expected_sha1=expected,
-                )
-                if report.ok:
-                    # 索引行由 write 按 frontmatter description 自动同步
-                    stored += 1
-                    if label == "people" and shared_people_actor:
-                        # 用刚写入的内容记"看过"，不要重读：写锁释放后别的
-                        # 机器人可能已经写入，重读会把对方的版本记成自己看过
-                        await asyncio.to_thread(
-                            self._seen.note,
-                            shared_people_actor,
-                            draft.filename,
-                            report.content,
-                        )
-                elif label == "people" and shared_people_actor:
-                    logger.info(
-                        LOG_PREFIX
-                        + f"{source}跳过共享人物记忆 {draft.filename}："
-                        + report.message
-                    )
-            except OSError as exc:
-                logger.warning(
-                    LOG_PREFIX + f"{source}写入记忆 {label}/{draft.filename} 失败：{exc}"
-                )
-        if stored:
-            logger.info(LOG_PREFIX + f"会话 {umo} {source}写入了 {stored} 条记忆")
-        return stored
+                return bool(checker())
+            except Exception:  # noqa: BLE001 - 判定失败按非管理员处理
+                return False
+        return str(getattr(event, "role", "") or "").strip().lower() == "admin"
 
-    def _maybe_extract(
-        self,
-        rt: RuntimeSession,
-        umo: str,
-        contexts: list[dict],
-        n_system: int,
-        now: float,
+    @staticmethod
+    def _response_has_tool_calls(resp) -> bool:
+        """这次响应是否还要继续调用工具；中间响应不当作最终回复记账。"""
+        if resp is None:
+            return False
+        for name in ("tools_call_name", "tools_call_args", "tool_calls"):
+            if getattr(resp, name, None):
+                return True
+        return False
+
+    def _record_pending_user(
+        self, event: AstrMessageEvent, req: ProviderRequest, now: float
     ) -> None:
-        """每隔 auto_extract_interval 轮，在后台把最近的对话交给模型补记长期事实。
+        """把本轮用户消息（已带发送者标注）追加进待整理记录。"""
+        umo = str(getattr(event, "unified_msg_origin", "") or "")
+        text = str(getattr(req, "prompt", "") or "")
+        if not umo or not text:
+            return
+        book = getattr(self, "_pending", None)
+        if book is None:
+            return
+        sender_id, _ = self._sender_identity(event)
+        key = memstore.safe_key(umo)
+        _, dropped = book.record_user(
+            key,
+            umo,
+            text,
+            self._is_admin_event(event),
+            sender_id,
+            now,
+            platform=self._event_actor(event) or self._platform_of(umo),
+        )
+        if dropped:
+            logger.warning(
+                LOG_PREFIX
+                + f"会话 {umo} 的待整理记录超过上限，丢弃了最旧的 {dropped} 轮"
+            )
 
-        主模型在这段时间里自己写过记忆就跳过：它已经在记，这一段交给它。
-        提取在后台进行，不拖慢本轮回复；同一会话同时只有一个提取任务。
-        """
+    def _record_pending_reply(
+        self, event: AstrMessageEvent, resp, now: float
+    ) -> None:
+        """补上机器人最终回复，并按需安排后台整理。"""
+        if self._response_has_tool_calls(resp):
+            return
+        umo = str(getattr(event, "unified_msg_origin", "") or "")
+        book = getattr(self, "_pending", None)
+        if not umo or book is None:
+            return
+        key = memstore.safe_key(umo)
+        state, found, dropped = book.finish_reply(
+            key,
+            umo,
+            self._completion_text(resp),
+            now,
+            platform=self._event_actor(event) or self._platform_of(umo),
+        )
+        if dropped:
+            logger.warning(
+                LOG_PREFIX
+                + f"会话 {umo} 的待整理记录超过上限，丢弃了最旧的 {dropped} 轮"
+            )
+        if not found:
+            return
+        if state.note_pending:
+            self._schedule_write(umo, "note")
+            return
         interval = self._int("auto_extract_interval", 10)
-        state = rt.state
-        if interval <= 0:
-            return
-        state.turns_since_extract += 1
-        if state.turns_since_extract < interval or rt.extracting:
-            return
-        state.turns_since_extract = 0
-        if state.wrote_since_extract:
-            state.wrote_since_extract = False
-            return
-        turns = split_turns(contexts, n_system)[-interval:]
-        messages = [m for turn in turns for m in turn.messages]
-        transcript = compress.render_transcript(messages)
-        if not transcript.strip():
-            return
-        state.extracted_at = now
-        rt.extracting = True
-        self._spawn(self._run_extraction(rt, umo, transcript), f"extract:{umo}")
+        if interval > 0 and state.rounds_since_write >= interval:
+            self._schedule_write(umo, "rounds")
 
-    async def _run_extraction(
-        self, rt: RuntimeSession, umo: str, transcript: str
-    ) -> None:
+    def _ensure_pending_loop(self) -> None:
+        """启动每分钟一次的待整理扫描；已在运行时不重复启动。"""
+        loop = getattr(self, "_pending_loop", None)
+        if loop is not None and not loop.done():
+            return
         try:
-            # 共享空间里只有 edit 级成员的后台提取能写 people
-            people = (
-                self._people_scope(umo) if self._can_extract_people(umo) else None
+            loop = asyncio.create_task(
+                self._pending_loop_run(), name="memory_beyond:pending-sweep"
             )
-            people_on = people is not None
-            scope = self._store.session_scope(umo)
-            existing, updatable = await self._existing_for_extract(
-                scope,
-                transcript,
-                people,
-                self._shared_people_actor(umo, people) if people is not None else "",
+        except RuntimeError:  # 没有事件循环（测试直接构造插件）时由调用方驱动
+            return
+        self._pending_loop = loop
+        tasks = getattr(self, "_tasks", None)
+        if tasks is not None:
+            tasks.add(loop)
+            loop.add_done_callback(tasks.discard)
+
+    async def _pending_loop_run(self) -> None:
+        while True:
+            await asyncio.sleep(60)
+            try:
+                self._pending_tick()
+            except Exception:  # noqa: BLE001 - 扫描失败不影响对话
+                logger.warning(LOG_PREFIX + "待整理扫描失败", exc_info=True)
+
+    def _pending_tick(self, now: float | None = None) -> None:
+        """找出空闲够久的会话，安排一次后台整理；插件重启后同样生效。"""
+        if not self._bool("enable_memory", True):
+            return
+        now = time.time() if now is None else now
+        idle_minutes = self._int("extract_idle_minutes", 10)
+        if idle_minutes <= 0:
+            return
+        idle = idle_minutes * 60
+        for state in self._pending.all():
+            if not state.records or state.failures >= pending.MAX_FAILURES:
+                continue
+            last = max(state.last_round_at, state.last_attempt)
+            if last > 0 and now - last < idle:
+                continue
+            # memory_note 要求回复结束后立即整理；重启后按空闲时间补上
+            self._schedule_write(state.umo, "note" if state.note_pending else "idle")
+
+    def _schedule_write(self, umo: str, reason: str) -> None:
+        """把一次后台整理排进队列；同一会话同时只排一个。"""
+        key = memstore.safe_key(umo)
+        if key in self._write_scheduled:
+            return
+        self._write_scheduled.add(key)
+        self._spawn(
+            self._run_write_for(key, umo, reason), f"write:{key}"
+        )
+
+    async def _run_write_for(self, key: str, umo: str, reason: str) -> None:
+        """后台队列的一格：与定期自动整理共用同一个信号量，不并发。"""
+        try:
+            async with self._background_gate:
+                await self._write_pending(key, umo, reason)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - 后台整理失败不影响对话
+            logger.warning(
+                LOG_PREFIX + f"会话 {umo} 后台整理出错（{reason}）", exc_info=True
             )
-            prompt = prompts.build_background_extract_prompt(
-                transcript, existing, people_on
-            )
-            text, attempts_log = await self._call_summarizer(umo, prompt)
-            if not text:
-                logger.info(
-                    LOG_PREFIX
-                    + f"会话 {umo} 后台记忆提取未完成（{'; '.join(attempts_log) or '无可用提供商'}），"
-                    "下个周期再试"
-                )
-                return
-            drafts = prompts.parse_memories(text, people_on)
-            await self._store_drafts(
-                umo,
-                drafts,
-                updatable,
-                "后台提取",
-                actor=f"extract@{self._platform_of(umo)}",
-                people=people,
+        finally:
+            self._write_scheduled.discard(key)
+
+    def _write_stores(
+        self, umo: str, platform: str, admin: bool
+    ) -> tuple[dict[str, memstore.ScopeStore], str | None, bool]:
+        """这次后台整理可用的作用域与共享人物空间权限。"""
+        stores: dict[str, memstore.ScopeStore] = {
+            "session": self._store.session_scope(umo)
+        }
+        platform = platform or self._platform_of(umo)
+        people_store = self._store.people_scope(platform)
+        people_shared = self._store.is_shared_people_scope(people_store)
+        permission = self._people_permission(platform) if people_shared else None
+        # read 级成员看不到可写的人物空间；write 规则里也写明不能写
+        if not (people_shared and permission == sharing.PERMISSION_READ):
+            stores["people"] = people_store
+        if self._global_on() and admin:
+            stores["global"] = self._global_scope()
+        return stores, permission, people_shared
+
+    async def _write_pending(
+        self, key: str, umo: str, reason: str, now: float | None = None
+    ) -> str:
+        """执行一次后台整理；返回结果说明（没有待整理记录时返回空串）。"""
+        if not self._bool("enable_memory", True):
+            return ""
+        now = time.time() if now is None else now
+        state = self._pending.load(key)
+        if not state.records:
+            return ""
+        records = list(state.records)
+        seqs = {record.seq for record in records}
+        sender = records[-1].sender
+        admin = records[-1].admin
+        platform = state.platform or self._platform_of(umo)
+        actor = f"extract@{platform}"
+        stores, permission, people_shared = self._write_stores(
+            umo, platform, admin
+        )
+        try:
+            context = await writer.build_context(
+                stores,
+                records,
+                now=now,
+                permission=permission,
+                admin=admin,
+                people_shared=people_shared,
+                global_on=self._global_on(),
             )
         except Exception:  # noqa: BLE001
-            logger.warning(LOG_PREFIX + f"会话 {umo} 后台记忆提取出错", exc_info=True)
-        finally:
-            rt.extracting = False
+            logger.warning(
+                LOG_PREFIX + f"会话 {umo} 拼装后台整理输入失败", exc_info=True
+            )
+            self._pending.record_failure(key, now, "拼装整理输入失败")
+            return ""
+        text, attempts_log = await self._call_summarizer(
+            umo, context.prompt, preferred_id=self._memory_provider_id()
+        )
+        if not text:
+            message = "整理模型调用失败：" + (
+                "；".join(attempts_log) or "没有可用的模型提供商"
+            )
+            failed, abandoned = self._pending.record_failure(key, now, message)
+            if abandoned:
+                logger.warning(
+                    LOG_PREFIX
+                    + f"会话 {umo} 后台整理连续失败 {failed.failures} 次，已放弃"
+                    "这批待整理记录"
+                )
+            else:
+                logger.info(
+                    LOG_PREFIX
+                    + f"会话 {umo} 后台整理未完成（{message}），保留记录下次重试"
+                )
+            return ""
+        raw_ops, journal_text = writer.parse_response(text)
+        if raw_ops is None:
+            failed, abandoned = self._pending.record_failure(
+                key, now, "整理模型输出无法解析"
+            )
+            if abandoned:
+                logger.warning(
+                    LOG_PREFIX
+                    + f"会话 {umo} 后台整理连续失败 {failed.failures} 次，已放弃"
+                    "这批待整理记录"
+                )
+            else:
+                logger.info(LOG_PREFIX + f"会话 {umo} 整理模型输出无法解析，保留记录")
+            return ""
+        files_by_scope = {
+            scope: set(await asyncio.to_thread(store.list_files))
+            for scope, store in stores.items()
+        }
+        journal_files = {
+            header.file
+            for store in stores.values()
+            for header in await asyncio.to_thread(store.headers)
+            if header.type == journal.JOURNAL_TYPE
+        }
+        ops, skipped = writer.validate_operations(
+            raw_ops,
+            files_by_scope=files_by_scope,
+            permission=permission,
+            people_shared=people_shared,
+            admin=admin,
+            global_on=self._global_on(),
+            sender=sender,
+            journal_files=journal_files,
+        )
+        for item in skipped:
+            logger.info(LOG_PREFIX + f"会话 {umo} 后台整理跳过：{item}")
+        result = await writer.apply_operations(
+            stores,
+            ops,
+            snapshots=context.snapshots,
+            now=now,
+            actor=actor,
+            source=sender,
+        )
+        for item in result.skipped:
+            logger.info(LOG_PREFIX + f"会话 {umo} 后台整理未写入：{item}")
+        if result.stale:
+            logger.info(LOG_PREFIX + f"会话 {umo} {result.message}")
+            self._pending.mark_attempt(key, now, result.message)
+            return ""
+        if ops and result.applied == 0:
+            # 模型给的操作一条都没写成功：记为一次失败，满 3 次后放弃
+            failed, abandoned = self._pending.record_failure(
+                key, now, "整理操作全部未写入"
+            )
+            if abandoned:
+                logger.warning(
+                    LOG_PREFIX
+                    + f"会话 {umo} 后台整理连续失败 {failed.failures} 次，已放弃"
+                    "这批待整理记录"
+                )
+            else:
+                logger.info(
+                    LOG_PREFIX
+                    + f"会话 {umo} 后台整理的操作全部未写入，保留记录下次重试"
+                )
+            return ""
+        journal_file = ""
+        if journal_text and "session" in stores:
+            journal_file, journal_new = await writer.write_journal(
+                stores["session"],
+                journal_text,
+                now=now,
+                actor=actor,
+                source=sender,
+            )
+            if journal_file:
+                logger.info(
+                    LOG_PREFIX
+                    + f"会话 {umo} {'新开' if journal_new else '续写'}日志 "
+                    f"{journal_file}"
+                )
+        message = result.message
+        if journal_file:
+            message += f"；日志 {'新开' if journal_new else '续写'} {journal_file}"
+        self._pending.drop_records(key, seqs, now, message)
+        self._invalidate_changes(umo, result.changes)
+        logger.info(LOG_PREFIX + f"会话 {umo} 后台整理完成（{reason}）：{message}")
+        return message
+
+    def _invalidate_changes(
+        self, umo: str, changes: list[tuple[str, str, str]]
+    ) -> None:
+        """后台写入后作废受影响的索引快照。"""
+        scopes = {scope for scope, _, _ in changes}
+        if "session" in scopes:
+            self._invalidate_index_cache(umo)
+        if "global" in scopes:
+            self._invalidate_index_cache(None)
+        deleted_people = [
+            file
+            for scope, file, op in changes
+            if scope == "people" and op == writer.OP_DELETE
+        ]
+        if deleted_people:
+            self._invalidate_pinned("people", deleted_people)
+
+    def _memory_provider_id(self) -> str:
+        """记忆整理模型：新键优先，旧键 consolidate_provider_id 兼容读取。"""
+        return self._str("memory_provider_id").strip() or self._str(
+            "consolidate_provider_id"
+        ).strip()
+
+    def _pending_label(self, umo: str) -> str:
+        """mb_status 里的待整理状态：条数、上次整理结果、连续失败次数。"""
+        state = self._pending.load(memstore.safe_key(umo))
+        if not state.records and not state.last_attempt:
+            return "暂无待整理记录"
+        parts = [f"待整理 {state.count} 轮"]
+        if state.last_success:
+            when = time.strftime("%m-%d %H:%M", time.localtime(state.last_success))
+            parts.append(f"上次成功 {when}：{state.last_result or '已整理'}")
+        elif state.last_attempt:
+            when = time.strftime("%m-%d %H:%M", time.localtime(state.last_attempt))
+            parts.append(f"上次尝试 {when}：{state.last_result or '未成功'}")
+        if state.failures:
+            parts.append(f"连续失败 {state.failures} 次")
+        return "；".join(parts)
 
     # ============================================================ 压缩执行
 
@@ -1931,20 +1954,6 @@ class MemoryBeyondPlugin(Star):
         if not transcript.strip():
             return
 
-        extract = self._bool("extract_memories", True) and self._bool(
-            "enable_memory", True
-        )
-        # 压缩联动提取与后台提取同一套门控：只有 edit 级成员能写 people
-        people = self._people_scope(umo) if self._can_extract_people(umo) else None
-        people_on = people is not None
-        existing, updatable = "", {}
-        if extract:
-            existing, updatable = await self._existing_for_extract(
-                self._store.session_scope(umo),
-                transcript,
-                people,
-                self._shared_people_actor(umo, people) if people is not None else "",
-            )
         max_chars = max(
             200, self._int("summary_max_chars", prompts.SUMMARY_MAX_CHARS_DEFAULT)
         )
@@ -1952,17 +1961,11 @@ class MemoryBeyondPlugin(Star):
             self._str("summary_prompt_template"),
             state.summary,
             transcript,
-            extract,
-            existing,
             now=prompts.format_time(now),
             max_chars=max_chars,
-            include_people=people_on,
         )
         text, attempts_log = await self._call_summarizer(umo, prompt)
-        if text:
-            summary, drafts = prompts.parse_summary_response(text, people_on)
-        else:
-            summary, drafts = "", []
+        summary = prompts.parse_summary(text) if text else ""
         if not summary:
             state.record_failure(now)
             await self._save_state(umo, state)
@@ -1993,15 +1996,6 @@ class MemoryBeyondPlugin(Star):
                 + f"会话 {umo} 的摘要 {len(state.summary)} 字，远超 summary_max_chars"
                 f"（{max_chars}）：摘要模型没守住字数上限，每轮都要多带这些内容；"
                 "可考虑换摘要模型或调大上限"
-            )
-        if extract and drafts:
-            await self._store_drafts(
-                umo,
-                drafts,
-                updatable,
-                "压缩联动提取",
-                actor=f"extract@{self._platform_of(umo)}",
-                people=people,
             )
         # 压缩后从磁盘重新注入记忆索引：清空快照，下次请求重新加载。
         # 索引不是靠"被摘要保留下来"，而是每次从源头重新加载。
@@ -2079,9 +2073,9 @@ class MemoryBeyondPlugin(Star):
         return await self._call_summarizer(None, prompt)
 
     async def call_consolidator(self, prompt: str) -> tuple[str | None, list[str]]:
-        """管理页整理记忆用的模型调用：整理专用提供商优先，留空同摘要提供商。"""
+        """管理页整理记忆用的模型调用：记忆整理模型优先，留空同摘要提供商。"""
         return await self._call_summarizer(
-            None, prompt, preferred_id=self._str("consolidate_provider_id")
+            None, prompt, preferred_id=self._memory_provider_id()
         )
 
     @staticmethod
@@ -2323,6 +2317,18 @@ class MemoryBeyondPlugin(Star):
             pass
         return ""
 
+    # ========================================================== 待整理记录
+
+    @filter.on_llm_response()
+    async def record_pending_round(self, event: AstrMessageEvent, resp: LLMResponse):
+        """本轮回复结束：补上机器人最终回复，并按需安排后台整理。"""
+        if not self._bool("enable_memory", True):
+            return
+        try:
+            self._record_pending_reply(event, resp, time.time())
+        except Exception:  # noqa: BLE001 - 记账失败不能影响回复
+            logger.warning(LOG_PREFIX + "记录待整理回复失败", exc_info=True)
+
     # ========================================================== token 校准
 
     @filter.on_llm_response()
@@ -2484,10 +2490,10 @@ class MemoryBeyondPlugin(Star):
     async def memory_read(
         self, event: AstrMessageEvent, scope: str, file: str = "MEMORY.md"
     ) -> str:
-        """读取长期记忆文件的完整内容。注入的索引只是目录：回答涉及某人、某事的细节之前，先用本工具取回对应文件再作答，不要凭索引行猜；更新某条记忆之前也先读它的当前内容。
+        """读取长期记忆文件的完整内容。索引只是目录：回答涉及某人、某事的细节之前，先用本工具取回对应文件再作答，不要凭索引行猜。
 
         Args:
-            scope(string): 作用域，global（机器人自我的全局记忆）、session（当前会话的记忆）或 people（人物记忆，一人一个 user-<数字ID>.md；通常同一平台所有会话共享，启用共享人物空间时是多个成员机器人共用的 _shared 目录）
+            scope(string): 作用域，global（机器人自我的全局记忆）、session（当前会话的记忆）或 people（人物记忆，一人一个 user-<数字ID>.md；通常同一平台所有会话共享）
             file(string): 记忆文件名，如 user-12345678.md；省略时读 MEMORY.md 索引全文
         """
         if not self._bool("enable_memory", True):
@@ -2532,8 +2538,6 @@ class MemoryBeyondPlugin(Star):
             if not restored:
                 # 恢复时已经记过一次使用
                 await asyncio.to_thread(store.note_used, [file])
-            # 共享人物空间：读过当前版本，之后的整文件覆盖才允许
-            await self._note_shared_seen(event, scope, store, file, content)
             # 时效按 frontmatter 的 updated 戳算；老文件没有戳才退回 mtime
             written = memstore.parse_stamp(
                 memstore.parse_memory(content).updated
@@ -2564,266 +2568,42 @@ class MemoryBeyondPlugin(Star):
                 return "\n".join(notes) + f"\n\n{content}"
         return content
 
-    @filter.llm_tool(name="memory_write")
-    async def memory_write(
-        self,
-        event: AstrMessageEvent,
-        scope: str,
-        file: str,
-        content: str = "",
-        delete: bool = False,
-    ) -> str:
-        """写入、修改或删除一个长期记忆文件（整文件覆盖；修改＝读出后改写重写入，删除＝delete 设 true）。一个文件只记一条事实，content 必须以 frontmatter 开头：--- / name: 与文件名一致 / description: 一句话钩子 / metadata: / type: user|feedback|project|reference|journal / ---，正文写事实本身。MEMORY.md 索引由插件自动维护，禁止直接写：要改索引行就重写对应文件的 description，要删索引行就删除对应文件。写前先查重，同一个人、同一件事始终更新同一个文件，不另建重复文件。type 为 journal 的是每日日志（文件名建议 daily-<日期>.md）：流水账不占单独索引行，只在索引末尾折叠成最近两篇加一行汇总，不参与自动召回，也不参与查重；需要时按日期用 memory_read 或 memory_search 检索。写入后会检查正文里的 [[文件名]] 链接指向的文件是否在当前机器人可见的作用域里，并在文件超过 8KB 或日期过密时提醒拆分或整理；这些只是回执提示，不会自动创建链接目标。作用域边界：关于具体用户或本会话的信息一律写 session，记人以发送者标注中的数字 ID 为锚（文件名 user-<数字ID>.md，昵称只作正文附注）；global 只存机器人自身的偏好与行为准则；people（启用时）只存某人亲口说的、换个群也成立的身份类事实。
+    @filter.llm_tool(name="memory_note")
+    async def memory_note(self, event: AstrMessageEvent, content: str) -> str:
+        """用户明确要求记住、更正或忘掉某件事时调用，用一句话写清要求。插件会把这条要求和发送者、时间记进本会话的待整理记录，在本轮回复结束后整理进长期记忆。
 
         Args:
-            scope(string): 作用域，global（机器人自我的全局记忆）、session（当前会话的记忆）或 people（人物记忆，一人一个 user-<数字ID>.md；通常同一平台所有会话共享，启用共享人物空间时是多个成员机器人共用的 _shared 目录）
-            file(string): 记忆文件名，须以 .md 结尾，如 user-12345678.md；不可为 MEMORY.md
-            content(string): 完整的文件内容，含 frontmatter（delete 为 false 时必填）
-            delete(boolean): 设为 true 时删除该文件并自动移除其索引行，此时忽略 content
+            content(string): 一句话写清用户的要求，例如"用户要求记住他的生日是 3 月 5 日"或"用户要求忘掉上次说的搬家计划"
         """
         if not self._bool("enable_memory", True):
             return "记忆功能已在插件配置中停用。"
-        store, scope, refused = self._tool_store(event, scope)
-        if store is None:
-            return refused
-        if scope == "people" and not memstore.is_person_file(file):
-            return PEOPLE_FILE_RULE
-        actor = self._event_actor(event)
-        if scope == "people":
-            actor, permission, identity_refusal = self._people_access(event, store)
-            if identity_refusal:
-                return identity_refusal
-        else:
-            permission = None
-        if delete:
-            # append 与 read 级成员都不能删除共享人物记忆
-            refusal = sharing.write_refusal(
-                permission, exists=True, delete=True
-            )
-            if refusal:
-                return refusal
-            report = await store.delete(file, actor=actor)
-            if report.ok:
-                # 删除后开头块不能再继续注入旧档案，也不能留着过期版本记录
-                self._invalidate_pinned(scope, [file])
-                await asyncio.to_thread(self._seen.forget_file, file)
-        else:
-            if not content.strip():
-                return "content 为空。写入需提供完整文件内容；如要删除请设 delete=true。"
-            existed = store.exists(file)
-            # 已遗忘的同名文件也会被整文件写入顶替（遗忘副本进回收站），
-            # 对 append 级成员同样是"覆盖"，不能当成新建放行
-            dormant = store.has_forgotten(file)
-            refusal = sharing.write_refusal(
-                permission, exists=existed or dormant, delete=False
-            )
-            if refusal:
-                return refusal
-            # 共享空间的版本检查放进 store.write 的锁里：先看自己最近读过的
-            # 版本，空串表示没看过——新建放行，覆盖（含并发新建时被对方抢先
-            # 写入）由 store 持锁拒绝。这样并发新建不会绕开检查。
-            expected = None
-            if scope == "people" and self._store.is_shared_people_scope(store):
-                expected = await asyncio.to_thread(self._seen.seen, actor, file)
-            report = await store.write(
-                file,
-                content,
-                source=self._sender_identity(event)[0],
-                actor=actor,
-                expected_sha1=expected,
-                # append 级成员"只能新建"也放进同一把锁，避免并发下绕过
-                forbid_overwrite=(permission == sharing.PERMISSION_APPEND),
-            )
-            if report.ok:
-                # 自己刚写的版本算看过，紧接着再整文件覆盖不会被版本检查误拦。
-                # 用 write 返回的落盘内容，不要重读磁盘（写锁释放后别人可能已写）。
-                await self._note_shared_seen(
-                    event, scope, store, file, report.content
-                )
-            if report.ok and not existed:
-                hint = await self._duplicate_hint(store, file, content)
-                if hint:
-                    report = memstore.WriteReport(True, report.message + "\n" + hint)
-                if history.looks_like_manual_backup(file):
-                    report = memstore.WriteReport(
-                        True,
-                        report.message
-                        + "\n提醒：覆盖和删除前插件已自动保存旧版，管理页可以恢复，"
-                        "不需要手动备份（backup、副本或 zz- 开头的文件）。",
-                    )
-            if report.ok:
-                extra = await self._write_insights(event, store, file)
-                if extra:
-                    report = memstore.WriteReport(
-                        True, report.message + "\n" + extra
-                    )
-        if report.ok:
-            self._note_model_wrote(event)
-        return report.message
-
-    @filter.llm_tool(name="memory_edit")
-    async def memory_edit(
-        self,
-        event: AstrMessageEvent,
-        scope: str,
-        file: str,
-        old_text: str = "",
-        new_text: str = "",
-        replace_all: bool = False,
-        mode: str = "replace",
-    ) -> str:
-        """修改一个已有的长期记忆文件。默认 replace 模式：把 old_text 替换成 new_text，文件其余内容原样保留；改一处、补一句、更新 description 时用它，不要用 memory_write 整文件重写（重写容易丢内容）。replace 时 old_text 必须与文件现有内容逐字一致（空格、换行、标点都算）且只出现一次，所以先用 memory_read 读出当前内容再复制片段；new_text 留空等于删掉这段。append 模式：old_text 留空时把 new_text 追加到文件末尾，old_text 是某个小节标题行（如 ## 作息与习惯）时追加到该小节末尾。section 模式：old_text 是一个小节标题行，new_text 替换这一节标题下的正文，标题行保留，范围到下一个同级或更高级标题为止；标题不存在或出现多次时报错，并列出文件里的所有标题。共享人物空间里 section 模式会做覆盖前版本检查：先用 memory_read 读当前版本，其他机器人改过之后要先重读，否则会拒绝覆盖。每次修改前插件自动保存旧版；修改后会检查 [[文件名]] 链接和文件长度并在回执里提醒。
-
-        Args:
-            scope(string): 作用域，global（机器人自我的全局记忆）、session（当前会话的记忆）或 people（人物记忆，一人一个 user-<数字ID>.md；通常同一平台所有会话共享，启用共享人物空间时是多个成员机器人共用的 _shared 目录）
-            file(string): 要修改的记忆文件名，如 user-12345678.md；不可为 MEMORY.md
-            old_text(string): replace 模式下要被替换的原文片段，须与文件内容逐字一致且只出现一次；append 模式下留空表示追加到文件末尾，填小节标题行表示追加到该小节末尾；section 模式下填一个小节标题行，如 ## 作息与习惯
-            new_text(string): replace 模式下的替换文字（留空表示删掉 old_text）；append 模式下要追加的文字；section 模式下是这一节的新正文（留空表示清空这一节正文）
-            replace_all(boolean): replace 模式下设为 true 时替换文件里所有匹配处（如统一改一个称呼），默认只接受唯一匹配；append 与 section 模式下忽略
-            mode(string): replace（默认，局部替换）、append（追加，不覆盖已有文字）或 section（按小节标题替换该节正文）
-        """
-        if not self._bool("enable_memory", True):
-            return "记忆功能已在插件配置中停用。"
-        store, scope, refused = self._tool_store(event, scope)
-        if store is None:
-            return refused
-        if scope == "people" and not memstore.is_person_file(file):
-            return PEOPLE_FILE_RULE
-        mode = (mode or "replace").strip().lower()
-        if mode not in ("replace", "append", "section"):
-            return "mode 只能是 replace（默认）、append 或 section。"
-        if scope == "people":
-            actor, permission, identity_refusal = self._people_access(event, store)
-            if identity_refusal:
-                return identity_refusal
-        else:
-            actor, permission = self._event_actor(event), None
-        refusal = sharing.edit_refusal(permission, mode)
-        if refusal:
-            return refusal
-        expected = None
-        if (
-            scope == "people"
-            and self._store.is_shared_people_scope(store)
-            and mode == "section"
-            and (file or "").strip()
-        ):
-            # section 不是逐字替换，可能基于过期内容整节覆盖；共享空间里沿用
-            # memory_write 的覆盖前版本检查。空串表示没读过，锁内会拒绝。
-            expected = await asyncio.to_thread(self._seen.seen, actor, file)
-        report = await store.edit(
-            file,
-            old_text,
-            new_text,
-            replace_all,
-            source=self._sender_identity(event)[0],
-            actor=actor,
-            mode=mode,
-            expected_sha1=expected,
-        )
-        if report.ok:
-            # 自己刚改过的版本算看过；同样用 edit 返回的落盘内容，避免重读竞态
-            await self._note_shared_seen(
-                event, scope, store, file, report.content
-            )
-            self._note_model_wrote(event)
-            extra = await self._write_insights(event, store, file)
-            if extra:
-                report = memstore.WriteReport(True, report.message + "\n" + extra)
-        return report.message
-
-    async def _duplicate_hint(
-        self, store: memstore.ScopeStore, file: str, content: str
-    ) -> str:
-        """新建文件后用召回的打分看看有没有疑似记同一件事的旧文件，有就提醒合并。
-
-        日志是流水账，既不拿别的日志当查重候选，新建日志时也不提示查重。
-        """
-        try:
-            doc = memstore.parse_memory(content)
-            if journal.is_journal(file, doc.type):
-                return ""
-            text = f"{doc.description} {doc.body[:600]}"
-            headers = await asyncio.to_thread(store.headers)
-            similar = recall.similar_memories(
-                text, headers, file, mem_type=doc.type
-            )
-        except Exception:  # noqa: BLE001 - 查重只是提醒，失败不影响写入
-            logger.debug(LOG_PREFIX + "写入查重失败", exc_info=True)
-            return ""
-        if not similar:
-            return ""
-        listing = "；".join(
-            f"{h.file}（{h.description or '无描述'}）" for h in similar
-        )
-        return (
-            f"提醒：新文件可能与已有记忆记的是同一件事：{listing}。"
-            "请核对，确属同一件事就合并进一个文件、删掉多余的。"
-        )
-
-    def _visible_stores(self, event: AstrMessageEvent) -> list[memstore.ScopeStore]:
-        """当前机器人能看到的记忆作用域：global（启用时）、当前会话、people（启用时）。
-
-        共享人物空间只映射到成员共用的 _shared；非成员的 people 目录只属于
-        自己。链接检查只用这几个作用域，不会暴露别的会话或别的机器人里有没有
-        某个文件。
-        """
-        stores: list[memstore.ScopeStore] = []
-        if self._global_on():
-            stores.append(self._global_scope())
-        stores.append(self._session_scope(event))
-        people_store, _ = self._people_store_for_event(event)
-        if people_store is not None:
-            stores.append(people_store)
-        return stores
-
-    async def _write_insights(
-        self, event: AstrMessageEvent, store: memstore.ScopeStore, file: str
-    ) -> str:
-        """写入 / 修改成功后的回执补充：悬空链接与长文件提醒。
-
-        只是提醒，失败也不影响已经完成的写入，所以这里吞掉异常，最多记一条
-        调试日志。
-        """
-        try:
-            file = (file or "").strip().lstrip("/")
-            content = await store.read(file)
-            if content is None:
-                return ""
-            doc = memstore.parse_memory(content)
-            available: set[str] = set()
-            for visible in self._visible_stores(event):
-                available.update(visible.list_files())
-                if self._forgetting_on():
-                    # 已遗忘文件仍可被 memory_read 恢复，链接到它不算悬空
-                    available.update(visible.forgotten_files())
-            notes: list[str] = []
-            missing = insights.dangling_links(
-                memstore.extract_links(doc.body), available
-            )
-            hint = insights.dangling_link_hint(missing)
-            if hint:
-                notes.append(hint)
-            reasons = insights.long_file_reasons(
-                file, doc.type, doc.body, len(content.encode("utf-8"))
-            )
-            hint = insights.long_file_hint(file, reasons)
-            if hint:
-                notes.append(hint)
-            return "\n".join(notes)
-        except Exception:  # noqa: BLE001 - 提醒失败不影响已完成的写入
-            logger.debug(LOG_PREFIX + "写入回执的链接/长文件检查失败", exc_info=True)
-            return ""
-
-    def _note_model_wrote(self, event: AstrMessageEvent) -> None:
-        # 索引快照不在这里刷新：开头的注入内容一变，整段历史的提示词
-        # 缓存都会失效。新写的记忆已在磁盘上，相关时由召回带上全文，
-        # 下次压缩或新对话时进入索引。这里只记下"主模型自己记过了"，
-        # 后台定期提取据此跳过这一段。
+        content = (content or "").strip()
+        if not content:
+            return "content 不能为空：请用一句话写清用户要求记住、更正或忘掉什么。"
+        if len(content) > pending.MAX_NOTE_CHARS:
+            content = content[: pending.MAX_NOTE_CHARS]
         umo = str(getattr(event, "unified_msg_origin", "") or "")
-        rt = self._sessions.get(umo)
-        if rt is not None:
-            rt.state.wrote_since_extract = True
+        if not umo:
+            return "无法确定当前会话，这条要求没有记下。"
+        book = getattr(self, "_pending", None)
+        if book is None:
+            return "记忆功能暂不可用，这条要求没有记下。"
+        sender_id, _ = self._sender_identity(event)
+        key = memstore.safe_key(umo)
+        _, dropped = book.add_note(
+            key,
+            umo,
+            content,
+            sender_id,
+            time.time(),
+            platform=self._event_actor(event) or self._platform_of(umo),
+        )
+        if dropped:
+            logger.warning(
+                LOG_PREFIX
+                + f"会话 {umo} 的待整理记录超过上限，丢弃了最旧的 {dropped} 轮"
+            )
+        return "已记下，稍后整理进长期记忆。"
 
     @filter.llm_tool(name="memory_search")
     async def memory_search(
@@ -2833,7 +2613,7 @@ class MemoryBeyondPlugin(Star):
         scope: str = "all",
         mode: str = "all",
     ) -> str:
-        """在长期记忆里全文搜索。写入前查重、索引被截断、或不确定某条记忆是否存在时，用本工具查找；它直接搜文件内容，不依赖索引。
+        """在长期记忆里全文搜索。索引被截断、或不确定某条记忆是否存在时，用本工具查找；它直接搜文件内容，不依赖索引。
 
         Args:
             query(string): 搜索词，可用空格分隔多个词；默认要同时命中所有词，mode=any 时命中任意一个即可
@@ -3031,7 +2811,7 @@ class MemoryBeyondPlugin(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("mb_status")
     async def show_status(self, event: AstrMessageEvent):
-        """查看 Memory Beyond 当前会话的记忆与压缩状态。"""
+        """查看鲸群记忆当前会话的记忆与压缩状态。"""
         umo = str(event.unified_msg_origin)
         # 配置页可能刚改过共享成员，状态里的目录与权限要和工具一致
         self._refresh_sharing()
@@ -3055,7 +2835,7 @@ class MemoryBeyondPlugin(Star):
             logger.debug(LOG_PREFIX + "会话长文件扫描失败", exc_info=True)
             long_files = []
         configured_id = self._str("summary_provider_id").strip() or "（未配置，用当前对话提供商）"
-        tidy_id = self._str("consolidate_provider_id").strip() or "（未配置，同摘要提供商）"
+        tidy_id = self._memory_provider_id() or "（未配置，同摘要提供商）"
 
         now = time.time()
         cooldown = (
@@ -3133,7 +2913,7 @@ class MemoryBeyondPlugin(Star):
             f"整理提供商：{tidy_id}",
             f"摘要链路：{cooldown}",
             f"相关记忆召回：{self._recall_label()}",
-            f"后台记忆提取：{self._extract_label(state)}",
+            f"后台整理：{self._pending_label(umo)}",
             f"记忆遗忘：{self._forget_label(umo)}",
             f"共享人物空间：{self._sharing_label(umo)}",
             f"会话长文件：{self._long_files_label(long_files)}",
@@ -3214,12 +2994,6 @@ class MemoryBeyondPlugin(Star):
         name = "模型挑选" if mode == "llm" else "关键词匹配"
         return f"{name}，每轮最多 {limit} 条"
 
-    def _extract_label(self, state: compress.SessionState) -> str:
-        interval = self._int("auto_extract_interval", 10)
-        if interval <= 0:
-            return "关闭"
-        return f"每 {interval} 轮一次（距上次 {state.turns_since_extract} 轮）"
-
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("mb_reset")
     async def reset_session(self, event: AstrMessageEvent):
@@ -3253,7 +3027,7 @@ class MemoryBeyondPlugin(Star):
             )
 
     async def terminate(self):
-        """卸载/重载时：撤下 WebUI 接口、取消后台提取、登记簿落盘。
+        """卸载/重载时：撤下 WebUI 接口、取消后台整理与扫描任务、登记簿落盘。
 
         压缩状态与记忆在每次变更时已即时落盘。
         """

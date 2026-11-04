@@ -210,18 +210,6 @@ def test_edit_replace_default_unchanged(tmp_path):
 # ---------------------------------------------------------------- 版本记录与召回标注
 
 
-def test_seen_versions_roundtrip(tmp_path):
-    seen = sharing.SeenVersions(tmp_path / "state" / "shared_seen.json")
-    seen.note("Bot-A", "user-1.md", "第一版")
-    assert seen.seen("Bot-A", "user-1.md") == sharing.content_sha1("第一版")
-    assert seen.is_current("Bot-A", "user-1.md", "第一版") is True
-    assert seen.is_current("Bot-A", "user-1.md", "第二版") is False
-    assert seen.is_current("Bot-B", "user-1.md", "第一版") is False
-    # 重新加载后仍然记得
-    again = sharing.SeenVersions(tmp_path / "state" / "shared_seen.json")
-    assert again.seen("Bot-A", "user-1.md") == sharing.content_sha1("第一版")
-
-
 def test_recall_block_marks_shared_people_files():
     items = [
         recall.Recalled("people/user-1.md", "内容", 1_800_000_000.0, shared=True),

@@ -156,9 +156,13 @@
     chainOkSub: "最近没有失败",
     chainCooling: "退避中",
     chainCoolingSub: "剩余 {left}，已连续失败 {n} 次",
-    extract: "后台记忆提取",
-    extractTurns: "距上次 {n} 轮",
-    extractSub: "上次运行：{time}",
+    pending: "后台整理",
+    pendingNone: "暂无待整理记录",
+    pendingRounds: "待整理 {n} 轮",
+    pendingSub: "上次 {time}：{result}",
+    pendingFailures: "连续失败 {n} 次",
+    fileLong: "偏长",
+    fileDangling: "悬空链接",
     lastRequest: "最近请求",
     tokens: "{n} tokens",
     partsTitle: "上下文构成（最近一次请求，估算）",
@@ -1625,6 +1629,8 @@
         { class: "file-item-top" },
         h("span", { class: "file-name" }, f.file),
         typeTag(f.type),
+        (f.long && f.long.length) ? h("span", { class: "file-age", title: f.long.join("；") }, t("fileLong")) : null,
+        (f.dangling && f.dangling.length) ? h("span", { class: "file-age", title: f.dangling.join("、") }, t("fileDangling")) : null,
         h("span", { class: "file-age", title: fmtTime(f.updated || f.mtime) }, relTime(f.updated || f.mtime))
       ),
       h(
@@ -2841,7 +2847,12 @@
           cooling ? t("chainCooling") : t("chainOk"),
           cooling ? t("chainCoolingSub", { left: fmtDuration(c.failUntil - now), n: c.failCount }) : t("chainOkSub")
         ),
-        stat(t("extract"), t("extractTurns", { n: c.turnsSinceExtract || 0 }), t("extractSub", { time: relTime(c.extractedAt) })),
+        stat(
+          t("pending"),
+          c.pendingCount ? t("pendingRounds", { n: c.pendingCount }) : t("pendingNone"),
+          t("pendingSub", { time: c.lastWriteAt ? relTime(c.lastWriteAt) : "—", result: c.lastWriteResult || "—" })
+            + (c.pendingFailures ? "；" + t("pendingFailures", { n: c.pendingFailures }) : "")
+        ),
         stat(t("lastRequest"), relTime(c.lastRequestAt), fmtTime(c.lastRequestAt))
       ),
       h(

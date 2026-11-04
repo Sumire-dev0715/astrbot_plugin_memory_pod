@@ -27,6 +27,7 @@ JOURNAL_TYPE = "journal"
 RECENT_ENTRIES = 2
 
 JOURNAL_DATE_RE = re.compile(r"^(?:daily|journal)-(\d{4}-\d{2}-\d{2})")
+_HEADING_DATE_RE = re.compile(r"^##\s+(\d{4}-\d{2}-\d{2})\s*$", re.M)
 _TARGET_RE = re.compile(r"\]\(([^()\s]+\.md)\)")
 _SUMMARY_PREFIX = "- 日志共 "
 _SUMMARY_MARK = "不自动召回"
@@ -42,6 +43,9 @@ class JournalEntry:
     date: str = ""
     # 没有日期时按最近修改排序
     updated: float = 0.0
+    # 这篇日志覆盖的日期范围（最早的 ## 日期小标题 ~ 最近一次更新）
+    start_date: str = ""
+    end_date: str = ""
 
 
 def is_journal_name(name: str) -> bool:
@@ -63,38 +67,100 @@ def journal_date(name: str) -> str:
     return match.group(1) if match else ""
 
 
+def heading_dates(text: str) -> list[str]:
+    """正文里的 `## YYYY-MM-DD` 小标题日期（去重保序）。"""
+    dates: list[str] = []
+    for date in _HEADING_DATE_RE.findall(text or ""):
+        if date not in dates:
+            dates.append(date)
+    return dates
+
+
+def last_heading_date(text: str) -> str:
+    """正文里最后一个 `## YYYY-MM-DD` 小标题的日期；没有返回空串。"""
+    dates = heading_dates(text)
+    return dates[-1] if dates else ""
+
+
+def _updated_date(updated: float) -> str:
+    if updated <= 0:
+        return ""
+    return time.strftime("%Y-%m-%d", time.localtime(updated))
+
+
+def entry_span(name: str, text: str, updated: float) -> tuple[str, str]:
+    """一篇日志的日期范围：最早的日期小标题（没有就用文件名日期）到最近更新。
+
+    后台整理续写日志时每天会加 `## YYYY-MM-DD`，一篇日志可能跨好几天；
+    索引里的日期范围要能看出它从哪天记到哪天。老文件没有小标题时退回
+    文件名日期与最近修改时间。
+    """
+    dates = heading_dates(text)
+    file_date = journal_date(name)
+    start = min(dates) if dates else file_date
+    if dates:
+        # 有日期小标题：这篇日志跨了好几天，结束日期取最近一次更新
+        end = _updated_date(updated) or max(dates)
+    else:
+        # 老式 daily-*.md 没有小标题：文件名日期就是它记的那一天
+        end = file_date or _updated_date(updated)
+    if not start:
+        start = end
+    if not end:
+        end = start
+    if start and end and end < start:
+        end = start
+    return start, end
+
+
+def _entry_span(entry: JournalEntry) -> tuple[str, str]:
+    start = entry.start_date or entry.date or journal_date(entry.name)
+    end = entry.end_date or entry.date or _updated_date(entry.updated)
+    if not start:
+        start = end
+    if not end:
+        end = start
+    if start and end and end < start:
+        end = start
+    return start, end
+
+
+def _span_label(start: str, end: str) -> str:
+    if not start:
+        return ""
+    if not end or end == start:
+        return f"（{start}）"
+    return f"（{start} ~ {end}）"
+
+
 def _index_line(entry: JournalEntry) -> str:
     # 标准索引行的清洗与格式化在 memstore；这里延迟导入避免循环依赖。
     from .memstore import format_index_line
 
-    return format_index_line(entry.name, entry.description)
+    line = format_index_line(entry.name, entry.description)
+    start, end = _entry_span(entry)
+    return line + _span_label(start, end)
 
 
 def _entry_date(entry: JournalEntry) -> str:
-    """日志日期：优先文件名日期，没有日期规则时按最近修改推算。
-
-    用于汇总日期区间，也做"最近两篇"排序的次键；以 type: journal 标注、
-    文件名不带日期的日志因此也能进入汇总区间。
-    """
-    date = entry.date or journal_date(entry.name)
-    if date:
-        return date
-    if entry.updated > 0:
-        return time.strftime("%Y-%m-%d", time.localtime(entry.updated))
-    return ""
+    """日志的最近日期；用于"最近两篇"排序的次键。"""
+    _, end = _entry_span(entry)
+    return end
 
 
 def _summary_line(entries: list[JournalEntry]) -> str:
-    dates = sorted(date for date in map(_entry_date, entries) if date)
-    if not dates:
+    spans = [_entry_span(entry) for entry in entries]
+    starts = sorted(start for start, _ in spans if start)
+    ends = sorted(end for _, end in spans if end)
+    if not starts or not ends:
         span = ""
-    elif dates[0] == dates[-1]:
-        span = f"（{dates[0]}）"
+    elif starts[0] == ends[-1]:
+        span = f"（{starts[0]}）"
     else:
-        span = f"（{dates[0]} ~ {dates[-1]}）"
+        span = f"（{starts[0]} ~ {ends[-1]}）"
     return (
         f"{_SUMMARY_PREFIX}{len(entries)} 篇{span}，不自动召回；"
-        "按日期用 memory_read 读 daily-<日期>.md，或用 memory_search 搜"
+        "按日期用 memory_read 读日志文件，或用 memory_search 搜"
     )
 
 

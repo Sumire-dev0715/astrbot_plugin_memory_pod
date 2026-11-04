@@ -174,7 +174,6 @@ def make_request_plugin(tmp_path, conf, window=1_000_000):
     plugin._tasks = set()
     plugin._index_block = lambda *args, **kwargs: _async_value(None)
     plugin._recall_message = lambda *args, **kwargs: _async_value(None)
-    plugin._maybe_extract = lambda *args, **kwargs: None
     plugin._maybe_forget = lambda *args, **kwargs: None
     plugin._maybe_tidy = lambda *args, **kwargs: None
     plugin._save_state = lambda umo, state: _async_value(None)

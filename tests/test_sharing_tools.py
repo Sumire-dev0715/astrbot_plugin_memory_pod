@@ -152,6 +152,7 @@ pkg_prompts = importlib.import_module(f"{PACKAGE}.core.prompts")
 pkg_recall = importlib.import_module(f"{PACKAGE}.core.recall")
 pkg_registry = importlib.import_module(f"{PACKAGE}.core.registry")
 pkg_sharing = importlib.import_module(f"{PACKAGE}.core.sharing")
+pkg_pending = importlib.import_module(f"{PACKAGE}.core.pending")
 
 
 def run(coro):
@@ -243,7 +244,7 @@ def make_plugin(tmp_path, members):
         "recall_mode": "keyword",
         "recall_max_files": 5,
         "auto_extract_interval": 0,
-        "extract_memories": True,
+        "extract_idle_minutes": 10,
         "keep_recent_turns": 1,
         "summary_max_chars": 500,
     }
@@ -254,8 +255,13 @@ def make_plugin(tmp_path, members):
     plugin._history_cleanup_at = time.time()
     plugin._sharing = pkg_sharing.Membership()
     plugin._sharing_warned = set()
-    plugin._seen = pkg_sharing.SeenVersions(tmp_path / "state" / "shared_seen.json")
     plugin._state_dir = tmp_path / "state"
+    plugin._pending = pkg_pending.PendingBook(tmp_path / "state" / "pending")
+    plugin._write_scheduled = set()
+    plugin._tasks = set()
+    plugin._pending_loop = None
+    plugin._tidy_checked = {}
+    plugin._background_gate = asyncio.Semaphore(1)
     plugin._store.set_shared_people(plugin._sharing)
     plugin._refresh_sharing()
     return plugin
@@ -297,7 +303,7 @@ def test_member_people_scope_is_shared_and_non_member_stays_own(tmp_path):
     assert other.root.name != pkg_sharing.SHARED_KEY
     assert member.root != other.root
 
-    run(plugin.memory_write(FakeEvent("Bot-C"), "people", "user-1.md", person_file("user-1")))
+    run(other.write("user-1.md", person_file("user-1")))
     assert (other.root / "user-1.md").is_file()
     assert not (member.root / "user-1.md").exists()
 
@@ -305,293 +311,17 @@ def test_member_people_scope_is_shared_and_non_member_stays_own(tmp_path):
 # ---------------------------------------------------------------- 三种权限
 
 
-def test_edit_permission_can_write_edit_delete(tmp_path):
-    plugin = make_plugin(tmp_path, ["Bot-A=edit"])
-    event = FakeEvent("Bot-A")
-
-    result = run(plugin.memory_write(event, "people", "user-123.md", person_file()))
-    assert "已写入" in result
-    # 自己刚写的版本算看过，可以不重新读就覆盖
-    result = run(
-        plugin.memory_write(
-            event, "people", "user-123.md", person_file(body="新的身份")
-        )
-    )
-    assert "已写入" in result
-    result = run(
-        plugin.memory_edit(
-            event, "people", "user-123.md", old_text="新的身份", new_text="改后的身份"
-        )
-    )
-    assert "已修改" in result
-    result = run(plugin.memory_write(event, "people", "user-123.md", delete=True))
-    assert "已删除" in result
 
 
-def test_append_permission_only_creates_and_appends(tmp_path):
-    plugin = make_plugin(tmp_path, ["Bot-A=append"])
-    event = FakeEvent("Bot-A")
-
-    result = run(plugin.memory_write(event, "people", "user-123.md", person_file()))
-    assert "已写入" in result
-
-    result = run(
-        plugin.memory_write(
-            event, "people", "user-123.md", person_file(body="想整文件覆盖")
-        )
-    )
-    assert result == pkg_sharing.APPEND_OVERWRITE_REFUSAL
-
-    result = run(plugin.memory_write(event, "people", "user-123.md", delete=True))
-    assert result == pkg_sharing.APPEND_DELETE_REFUSAL
-
-    result = run(
-        plugin.memory_edit(
-            event, "people", "user-123.md", old_text="工程师", new_text="研究员"
-        )
-    )
-    assert result == pkg_sharing.APPEND_EDIT_REFUSAL
-
-    result = run(
-        plugin.memory_edit(
-            event, "people", "user-123.md", new_text="补充：喜欢钓鱼", mode="append"
-        )
-    )
-    assert "追加" in result
-    content = run(plugin._store.people_scope("Bot-A").read("user-123.md"))
-    assert content.rstrip().endswith("补充：喜欢钓鱼")
-
-
-def test_append_member_cannot_replace_a_forgotten_shared_file(tmp_path):
-    plugin = make_plugin(tmp_path, ["Bot-A=edit", "Bot-B=append"])
-    event_a = FakeEvent("Bot-A")
-    event_b = FakeEvent("Bot-B")
-    store = plugin._store.people_scope("Bot-A")
-    run(plugin.memory_write(event_a, "people", "user-1.md", person_file("user-1")))
-    run(store.forget("user-1.md", actor="system"))
-    assert store.has_forgotten("user-1.md") and not store.exists("user-1.md")
-
-    result = run(
-        plugin.memory_write(
-            event_b, "people", "user-1.md", person_file("user-1", body="取代")
-        )
-    )
-    assert result == pkg_sharing.APPEND_OVERWRITE_REFUSAL
-    assert store.has_forgotten("user-1.md")
-    assert not store.exists("user-1.md")
-
-
-def test_read_permission_can_read_but_not_write(tmp_path):
-    plugin = make_plugin(tmp_path, ["Bot-A=read"])
-    event = FakeEvent("Bot-A")
-    store = plugin._store.people_scope("Bot-A")
-    run(store.write("user-123.md", person_file(), actor="system"))
-
-    assert "测试用户" in run(
-        plugin.memory_read(event, "people", "user-123.md")
-    )
-    assert run(
-        plugin.memory_write(event, "people", "user-2.md", person_file("user-2"))
-    ) == pkg_sharing.READ_ONLY_REFUSAL
-    assert run(
-        plugin.memory_write(event, "people", "user-123.md", delete=True)
-    ) == pkg_sharing.READ_ONLY_REFUSAL
-    assert run(
-        plugin.memory_edit(
-            event, "people", "user-123.md", old_text="工程师", new_text="研究员"
-        )
-    ) == pkg_sharing.READ_ONLY_REFUSAL
-    assert run(
-        plugin.memory_edit(
-            event, "people", "user-123.md", new_text="补充", mode="append"
-        )
-    ) == pkg_sharing.READ_ONLY_REFUSAL
-    assert store.exists("user-123.md")
 
 
 # ---------------------------------------------------------------- 版本检查
 
 
-def test_version_check_read_never_read_and_changed_by_other(tmp_path):
-    plugin = make_plugin(tmp_path, ["Bot-A=edit", "Bot-B=edit"])
-    event_a = FakeEvent("Bot-A")
-    event_b = FakeEvent("Bot-B")
-
-    run(plugin.memory_write(event_a, "people", "user-123.md", person_file()))
-
-    # 没读过：不允许整文件覆盖
-    result = run(
-        plugin.memory_write(
-            event_b, "people", "user-123.md", person_file(body="B 的版本")
-        )
-    )
-    assert result == pkg_sharing.version_conflict_message("user-123.md")
-    assert "memory_read" in result and "memory_edit" in result
-
-    # 读过之后、内容没变：允许
-    assert "测试用户" in run(
-        plugin.memory_read(event_b, "people", "user-123.md")
-    )
-    result = run(
-        plugin.memory_write(
-            event_b, "people", "user-123.md", person_file(body="B 的版本")
-        )
-    )
-    assert "已写入" in result
-
-    # A 读过 B 的版本后，B 又改了：A 的覆盖被拒
-    run(plugin.memory_read(event_a, "people", "user-123.md"))
-    assert "已写入" in run(
-        plugin.memory_write(
-            event_b, "people", "user-123.md", person_file(body="B 又改了")
-        )
-    )
-    result = run(
-        plugin.memory_write(
-            event_a, "people", "user-123.md", person_file(body="A 想覆盖")
-        )
-    )
-    assert result == pkg_sharing.version_conflict_message("user-123.md")
 
 
-def test_concurrent_overwrites_only_one_passes_version_check(tmp_path):
-    plugin = make_plugin(tmp_path, ["Bot-A=edit", "Bot-B=edit"])
-    event_a = FakeEvent("Bot-A")
-    event_b = FakeEvent("Bot-B")
-    run(plugin.memory_write(event_a, "people", "user-123.md", person_file()))
-    # A 自己刚写过（seen 已更新），B 也读到了同一版；两边随后同时整文件覆盖
-    assert "测试用户" in run(
-        plugin.memory_read(event_b, "people", "user-123.md")
-    )
-
-    async def both():
-        return await asyncio.gather(
-            plugin.memory_write(
-                event_a, "people", "user-123.md", person_file(body="A 的版本")
-            ),
-            plugin.memory_write(
-                event_b, "people", "user-123.md", person_file(body="B 的版本")
-            ),
-        )
-
-    results = run(both())
-    assert sum("已写入" in result for result in results) == 1
-    assert sum(
-        result == pkg_sharing.version_conflict_message("user-123.md")
-        for result in results
-    ) == 1
-    final = run(plugin._store.people_scope("Bot-A").read("user-123.md"))
-    assert ("A 的版本" in final) != ("B 的版本" in final)
 
 
-def test_read_member_cannot_restore_a_forgotten_shared_file(tmp_path):
-    plugin = make_plugin(tmp_path, ["Bot-A=edit", "Bot-B=read"])
-    plugin.config["enable_forgetting"] = True
-    event_a = FakeEvent("Bot-A", sender_id="123")
-    event_b = FakeEvent("Bot-B", sender_id="123")
-    store = plugin._store.people_scope("Bot-A")
-    run(plugin.memory_write(event_a, "people", "user-123.md", person_file()))
-    run(store.forget("user-123.md", actor="system"))
-    assert store.has_forgotten("user-123.md") and not store.exists("user-123.md")
-
-    result = run(plugin.memory_read(event_b, "people", "user-123.md"))
-    assert "只返回内容，未恢复在册" in result
-    assert store.has_forgotten("user-123.md") and not store.exists("user-123.md")
-
-    # 身份必选召回也不能替 read 级成员恢复
-    run(plugin._recall_message(event_b, event_b.unified_msg_origin, "你好"))
-    assert store.has_forgotten("user-123.md") and not store.exists("user-123.md")
-
-
-def test_recall_full_text_counts_as_seen(tmp_path):
-    plugin = make_plugin(tmp_path, ["Bot-A=edit"])
-    event = FakeEvent("Bot-A", sender_id="123")
-    store = plugin._store.people_scope("Bot-A")
-    run(store.write("user-123.md", person_file(), actor="system"))
-    raw = run(store.read("user-123.md"))
-    assert plugin._seen.seen("Bot-A", "user-123.md") == ""
-
-    message = run(plugin._recall_message(event, event.unified_msg_origin, "你好"))
-    assert message is not None
-    assert "多个机器人共享" in message["content"]
-    assert plugin._seen.seen("Bot-A", "user-123.md") == pkg_sharing.content_sha1(raw)
-
-    # 召回附上的全文算看过，之后的整文件覆盖不会被版本检查挡住
-    result = run(
-        plugin.memory_write(
-            event, "people", "user-123.md", person_file(body="召回后覆盖")
-        )
-    )
-    assert "已写入" in result
-
-
-def test_recall_only_counts_the_full_text_it_actually_attaches(tmp_path):
-    plugin = make_plugin(tmp_path, ["Bot-A=edit"])
-    event = FakeEvent("Bot-A", sender_id="123")
-    store = plugin._store.people_scope("Bot-A")
-    run(
-        store.write(
-            "user-123.md",
-            person_file(body="长" * (pkg_recall.FILE_CHARS + 10)),
-            actor="system",
-        )
-    )
-
-    message = run(plugin._recall_message(event, event.unified_msg_origin, "你好"))
-    assert message is not None and "中间省略" in message["content"]
-    # 召回块只附了头尾瘦身后的内容，不算看过完整版本
-    assert plugin._seen.seen("Bot-A", "user-123.md") == ""
-    result = run(
-        plugin.memory_write(
-            event, "people", "user-123.md", person_file(body="想覆盖")
-        )
-    )
-    assert result == pkg_sharing.version_conflict_message("user-123.md")
-
-
-def test_recall_seen_ignores_forged_titles_and_budget_evicted_files(tmp_path):
-    """预算挤成指针的文件即使标题被伪造进别的正文，也不算"看过"。
-
-    判定以 plan.sections 为准：user-444444.md、user-555555.md 排在超长
-    文件之后，超出整块预算只能进指针行；user-555555.md 的标题行被伪造在
-    user-222222.md 的正文开头（会随全文一起进块）。旧做法在块文本里找
-    标题，会把它误记成"看过"。
-    """
-    plugin = make_plugin(tmp_path, ["Bot-A=edit"])
-    event = FakeEvent("Bot-A", sender_id="111111")
-    store = plugin._store.people_scope("Bot-A")
-    forged = "### people/user-555555.md（今天写入）"
-    long_body = "长" * (pkg_recall.FILE_CHARS + 50)
-    run(store.write("user-111111.md", person_file("user-111111", body="很短"), actor="system"))
-    run(
-        store.write(
-            "user-222222.md",
-            person_file("user-222222", body=forged + "\n" + long_body),
-            actor="system",
-        )
-    )
-    run(store.write("user-333333.md", person_file("user-333333", body=long_body), actor="system"))
-    run(store.write("user-444444.md", person_file("user-444444", body=long_body), actor="system"))
-    run(store.write("user-555555.md", person_file("user-555555", body="很短"), actor="system"))
-
-    message = run(
-        plugin._recall_message(
-            event,
-            event.unified_msg_origin,
-            "你好 222222 333333 444444 555555",
-        )
-    )
-    content = message["content"]
-    assert "中间省略" in content
-    # 伪造的标题在块里只有一处，而且不是共享空间的真实小节标题
-    assert content.count("### people/user-555555.md") == 1
-    assert "### people/user-555555.md（多个机器人共享" not in content
-    # 被预算挤掉、被截断的都不算看过；真正附上全文的才算
-    assert plugin._seen.seen("Bot-A", "user-444444.md") == ""
-    assert plugin._seen.seen("Bot-A", "user-555555.md") == ""
-    assert plugin._seen.seen("Bot-A", "user-222222.md") == ""
-    first = run(store.read("user-111111.md"))
-    assert plugin._seen.seen("Bot-A", "user-111111.md") == pkg_sharing.content_sha1(first)
 
 
 # ---------------------------------------------------------------- 私聊人物档案
@@ -614,7 +344,7 @@ def test_private_profile_pinned_in_opening_and_excluded_from_recall(tmp_path):
     )
 
     rt = main.RuntimeSession(state=pkg_compress.SessionState())
-    opening = run(plugin._index_block(rt, event, note_seen=True))
+    opening = run(plugin._index_block(rt, event, record_usage=True))
     assert opening is not None
     assert pkg_injection.PROFILE_HEADING in opening
     assert "### session/user-123.md（user｜" in opening
@@ -622,13 +352,10 @@ def test_private_profile_pinned_in_opening_and_excluded_from_recall(tmp_path):
     assert "本会话里的身份" in opening and "跨群身份事实" in opening
     # 注入的是去掉 frontmatter 的正文
     assert "name: user-123" not in opening and "metadata:" not in opening
-    # 共享空间的"看过"覆盖开头块，按注入时的完整内容记
-    raw = run(people.read("user-123.md"))
-    assert plugin._seen.seen("Bot-A", "user-123.md") == pkg_sharing.content_sha1(raw)
     # 钉在开头块的档案每轮都算用到：不会被遗忘扫描当成从未使用
     assert people.usage_of("user-123.md").uses == 1
     assert session.usage_of("user-123.md").uses == 1
-    run(plugin._index_block(rt, event, note_seen=True))  # 命中快照也算一轮
+    run(plugin._index_block(rt, event, record_usage=True))  # 命中快照也算一轮
     assert people.usage_of("user-123.md").uses == 2
     assert session.usage_of("user-123.md").uses == 2
 
@@ -642,38 +369,6 @@ def test_private_profile_pinned_in_opening_and_excluded_from_recall(tmp_path):
     assert "本会话里的身份" not in content and "跨群身份事实" not in content
 
 
-def test_status_estimated_snapshot_records_seen_on_next_real_request(tmp_path):
-    """管理指令先估算开头块不算"看过"；下一次真实请求按快照内容补记。"""
-    plugin = make_plugin(tmp_path, ["Bot-A=edit"])
-    event = FakeEvent("Bot-A", sender_id="123")
-    people = plugin._store.people_scope("Bot-A")
-    run(people.write("user-123.md", person_file(body="跨群身份事实"), actor="system"))
-    rt = main.RuntimeSession(state=pkg_compress.SessionState())
-
-    run(plugin._index_block(rt, event))  # mb_status 的估算路径
-    assert plugin._seen.seen("Bot-A", "user-123.md") == ""
-
-    run(plugin._index_block(rt, event, note_seen=True))  # 命中同一快照
-    raw = run(people.read("user-123.md"))
-    assert plugin._seen.seen("Bot-A", "user-123.md") == pkg_sharing.content_sha1(raw)
-
-
-def test_truncated_pinned_profile_is_not_marked_seen(tmp_path):
-    plugin = make_plugin(tmp_path, ["Bot-A=edit"])
-    event = FakeEvent("Bot-A", sender_id="123")
-    people = plugin._store.people_scope("Bot-A")
-    run(
-        people.write(
-            "user-123.md",
-            person_file(body="长" * (pkg_recall.FILE_CHARS + 100)),
-            actor="system",
-        )
-    )
-    rt = main.RuntimeSession(state=pkg_compress.SessionState())
-    opening = run(plugin._index_block(rt, event, note_seen=True))
-    assert "中间省略" in opening
-    # 只注入了头尾，不算看过完整版本
-    assert plugin._seen.seen("Bot-A", "user-123.md") == ""
 
 
 def test_deleting_pinned_profile_invalidates_opening_snapshot(tmp_path):
@@ -683,14 +378,16 @@ def test_deleting_pinned_profile_invalidates_opening_snapshot(tmp_path):
     run(people.write("user-123.md", person_file(body="跨群身份事实"), actor="system"))
     rt = main.RuntimeSession(state=pkg_compress.SessionState())
     plugin._sessions[event.unified_msg_origin] = rt
-    opening = run(plugin._index_block(rt, event, note_seen=True))
+    opening = run(plugin._index_block(rt, event, record_usage=True))
     assert "跨群身份事实" in opening
 
-    result = run(plugin.memory_write(event, "people", "user-123.md", delete=True))
-    assert "已删除" in result
+    result = run(people.delete("user-123.md"))
+    assert result.ok
+    # 后台删除后由插件作废开头块快照（与 core.writer 的删除路径一致）
+    plugin._invalidate_changes(event.unified_msg_origin, [("people", "user-123.md", "delete")])
     assert rt.index_loaded is False
     # 下一次开头块不再包含已删除的档案
-    refreshed = run(plugin._index_block(rt, event, note_seen=True))
+    refreshed = run(plugin._index_block(rt, event, record_usage=True))
     assert refreshed is None or "跨群身份事实" not in refreshed
 
 
@@ -708,7 +405,7 @@ def test_forgetting_pinned_profile_invalidates_opening_snapshot(tmp_path):
 
     rt = main.RuntimeSession(state=pkg_compress.SessionState())
     plugin._sessions[event.unified_msg_origin] = rt
-    opening = run(plugin._index_block(rt, event, note_seen=True))
+    opening = run(plugin._index_block(rt, event, record_usage=True))
     assert "跨群身份事实" in opening
 
     now = time.time()
@@ -717,7 +414,7 @@ def test_forgetting_pinned_profile_invalidates_opening_snapshot(tmp_path):
     run(plugin._forget_sweep([("", people)], now))
     assert people.has_forgotten("user-123.md")
     assert rt.index_loaded is False
-    refreshed = run(plugin._index_block(rt, event, note_seen=True))
+    refreshed = run(plugin._index_block(rt, event, record_usage=True))
     assert refreshed is None or "跨群身份事实" not in refreshed
 
 
@@ -821,9 +518,6 @@ def test_pin_snapshot_is_stable_and_updated_profile_wins(tmp_path):
     assert message is not None
     assert "人物档案已更新，以这里为准" in message["content"]
     assert "新版本档案" in message["content"]
-    # 实际附上的是未截断的最新全文，算"看过"
-    raw = run(people.read("user-123.md"))
-    assert plugin._seen.seen("Bot-A", "user-123.md") == pkg_sharing.content_sha1(raw)
 
     # 索引刷新（压缩/切换对话/管理页改动后）改为钉住新版本
     rt.clear_index()
@@ -994,16 +688,6 @@ def test_recall_message_passes_model_choice_to_core_pipeline(tmp_path, monkeypat
 # ---------------------------------------------------------------- 提取门控
 
 
-def test_extract_gate_depends_on_permission(tmp_path):
-    edit = make_plugin(tmp_path / "edit", ["Bot-A=edit"])
-    assert edit._can_extract_people("Bot-A:FriendMessage:1") is True
-    for level in ("append", "read"):
-        plugin = make_plugin(tmp_path / level, [f"Bot-A={level}"])
-        assert plugin._can_extract_people("Bot-A:FriendMessage:1") is False
-    # 非成员维持上游行为
-    outsider = make_plugin(tmp_path / "outsider", ["Bot-A=edit"])
-    assert outsider._can_extract_people("Bot-C:FriendMessage:1") is True
-
 
 def test_auto_tidy_people_target_requires_edit(tmp_path):
     """定期自动整理共享人物空间只由 edit 级成员的会话触发。"""
@@ -1015,7 +699,6 @@ def test_auto_tidy_people_target_requires_edit(tmp_path):
         )
         plugin.config["auto_consolidate"] = "auto"
         plugin._tidy_checked = {}
-        plugin._tidy_gate = asyncio.Lock()
         plugin._tasks = set()
         seen = []
 
@@ -1083,61 +766,6 @@ def test_auto_forget_people_target_uses_event_identity(tmp_path):
     assert all(name != pkg_sharing.SHARED_KEY for _, name in mismatch[0])
 
 
-def test_background_extraction_writes_people_only_for_edit(tmp_path):
-    for level, expect_shared in (("edit", True), ("append", False), ("read", False)):
-        plugin = make_plugin(tmp_path / level, [f"Bot-A={level}"])
-        event = FakeEvent("Bot-A")
-
-        async def fake(umo, prompt):
-            return EXTRACT_TEXT, []
-
-        plugin._call_summarizer = fake
-        rt = main.RuntimeSession(state=pkg_compress.SessionState())
-        run(
-            plugin._run_extraction(
-                rt, event.unified_msg_origin, "用户 123 说自己是工程师"
-            )
-        )
-        shared = plugin._store.people_scope("Bot-A")
-        session = plugin._store.session_scope(event.unified_msg_origin)
-        if expect_shared:
-            assert shared.exists("user-123.md")
-            assert not session.exists("user-123.md")
-        else:
-            assert not shared.exists("user-123.md")
-            assert session.exists("user-123.md")
-
-
-def test_compression_extraction_writes_people_only_for_edit(tmp_path):
-    contexts = [
-        {"role": "system", "content": "系统"},
-        {"role": "user", "content": "我叫小明，是一名工程师"},
-        {"role": "assistant", "content": "好的"},
-        {"role": "user", "content": "今天也在写代码"},
-        {"role": "assistant", "content": "嗯"},
-    ]
-    for level, expect_shared in (("edit", True), ("append", False)):
-        plugin = make_plugin(tmp_path / level, [f"Bot-A={level}"])
-        event = FakeEvent("Bot-A")
-
-        async def fake(umo, prompt):
-            return f"<summary>摘要</summary>{EXTRACT_TEXT}", []
-
-        plugin._call_summarizer = fake
-        rt = main.RuntimeSession(state=pkg_compress.SessionState())
-        run(
-            plugin._compress(
-                event, rt, event.unified_msg_origin, contexts, 1000
-            )
-        )
-        shared = plugin._store.people_scope("Bot-A")
-        session = plugin._store.session_scope(event.unified_msg_origin)
-        if expect_shared:
-            assert shared.exists("user-123.md")
-            assert not session.exists("user-123.md")
-        else:
-            assert not shared.exists("user-123.md")
-            assert session.exists("user-123.md")
 
 
 # ---------------------------------------------------------------- 空配置与规范
@@ -1148,38 +776,18 @@ def test_empty_config_behaves_like_upstream(tmp_path):
     event = FakeEvent("Bot-A")
     store = plugin._store.people_scope("Bot-A")
     assert store.root.name != pkg_sharing.SHARED_KEY
+    run(store.write("user-123.md", person_file(), actor="system"))
 
-    assert "已写入" in run(
-        plugin.memory_write(event, "people", "user-123.md", person_file())
+    assert "身份：测试用户" in run(
+        plugin.memory_read(event, "people", "user-123.md")
     )
-    # 空配置没有版本检查：没读过也能整文件覆盖
-    assert "已写入" in run(
-        plugin.memory_write(
-            event, "people", "user-123.md", person_file(body="第二版")
-        )
-    )
-    assert "已修改" in run(
-        plugin.memory_edit(
-            event, "people", "user-123.md", old_text="第二版", new_text="第三版"
-        )
-    )
-    assert "已删除" in run(
-        plugin.memory_write(event, "people", "user-123.md", delete=True)
-    )
+    assert "user-123.md" in run(plugin.memory_search(event, "工程师"))
+    assert "已记下" in run(plugin.memory_note(event, "记住用户是工程师"))
 
     guidance = plugin._guidance(event.unified_msg_origin)
-    assert guidance == pkg_prompts.memory_guidance(
-        False, False, shared_people=False
-    )
+    assert guidance == pkg_prompts.memory_guidance(False, False)
     assert "共享人物空间" not in guidance
 
-
-def test_shared_member_guidance_adds_shared_rule(tmp_path):
-    plugin = make_plugin(tmp_path, ["Bot-A=read"])
-    guidance = plugin._guidance("Bot-A:FriendMessage:1")
-    assert "共享人物空间" in guidance
-    assert "中性的第三人称" in guidance
-    assert "一律写 session" in guidance
 
 
 # ---------------------------------------------------------------- /mb_status
@@ -1234,304 +842,13 @@ def test_mb_status_shows_shared_space_and_permission(tmp_path):
 # ---------------------------------------------------------------- 3.4 编辑与检索
 
 
-def test_append_permission_cannot_use_section_mode(tmp_path):
-    plugin = make_plugin(tmp_path, ["Bot-A=append"])
-    event = FakeEvent("Bot-A")
-    body = "## 基本信息\n\n身份：工程师\n"
-    assert "已写入" in run(
-        plugin.memory_write(event, "people", "user-123.md", person_file(body=body))
-    )
-    store = plugin._people_scope(event.unified_msg_origin)
-    before = run(store.read("user-123.md"))
-
-    result = run(
-        plugin.memory_edit(
-            event,
-            "people",
-            "user-123.md",
-            old_text="## 基本信息",
-            new_text="身份：研究员",
-            mode="section",
-        )
-    )
-    assert "只能用 mode=append" in result
-    assert run(store.read("user-123.md")) == before
 
 
-def test_edit_permission_section_mode_keeps_heading_and_history(tmp_path):
-    plugin = make_plugin(tmp_path, ["Bot-A=edit"])
-    event = FakeEvent("Bot-A")
-    body = "## 基本信息\n\n身份：工程师\n\n## 爱好\n\n钓鱼\n"
-    assert "已写入" in run(
-        plugin.memory_write(event, "people", "user-123.md", person_file(body=body))
-    )
-    store = plugin._people_scope(event.unified_msg_origin)
-
-    result = run(
-        plugin.memory_edit(
-            event,
-            "people",
-            "user-123.md",
-            old_text="## 基本信息",
-            new_text="身份：研究员",
-            mode="section",
-        )
-    )
-    assert "已替换" in result
-    content = run(store.read("user-123.md"))
-    assert "## 基本信息" in content and "身份：研究员" in content
-    assert "身份：工程师" not in content
-    assert "## 爱好" in content and "钓鱼" in content
-
-    versions = store.history_versions("user-123.md")
-    assert versions and versions[0].action == pkg_history.ACTION_EDIT
-    assert versions[0].actor == "Bot-A"
-    assert "身份：工程师" in store.read_history("user-123.md", versions[0].version)
 
 
-def test_section_edit_requires_fresh_read_in_shared_space(tmp_path):
-    plugin = make_plugin(tmp_path, ["Bot-A=edit", "Bot-B=edit"])
-    bot_a = FakeEvent("Bot-A", umo="Bot-A:FriendMessage:1")
-    bot_b = FakeEvent("Bot-B", umo="Bot-B:FriendMessage:2")
-    store = plugin._people_scope(bot_a.unified_msg_origin)
-    body = "## 作息\n\n早睡\n"
-    assert "已写入" in run(
-        plugin.memory_write(bot_a, "people", "user-123.md", person_file(body=body))
-    )
-
-    # 没读过当前版本，不能直接整节覆盖
-    no_read = run(
-        plugin.memory_edit(
-            bot_b,
-            "people",
-            "user-123.md",
-            old_text="## 作息",
-            new_text="晚睡",
-            mode="section",
-        )
-    )
-    assert "已发生变化" in no_read
-    assert "早睡" in run(store.read("user-123.md"))
-
-    # B 读过后 A 又改了同一节：B 基于旧版本的 section 要被拒绝
-    run(plugin.memory_read(bot_b, "people", "user-123.md"))
-    assert "已替换" in run(
-        plugin.memory_edit(
-            bot_a,
-            "people",
-            "user-123.md",
-            old_text="## 作息",
-            new_text="早睡早起",
-            mode="section",
-        )
-    )
-    stale = run(
-        plugin.memory_edit(
-            bot_b,
-            "people",
-            "user-123.md",
-            old_text="## 作息",
-            new_text="晚睡",
-            mode="section",
-        )
-    )
-    assert "已发生变化" in stale
-    content = run(store.read("user-123.md"))
-    assert "早睡早起" in content and "晚睡" not in content
-
-    # 重新读取当前版本后就能改
-    run(plugin.memory_read(bot_b, "people", "user-123.md"))
-    fresh = run(
-        plugin.memory_edit(
-            bot_b,
-            "people",
-            "user-123.md",
-            old_text="## 作息",
-            new_text="晚睡",
-            mode="section",
-        )
-    )
-    assert "已替换" in fresh
-    assert "晚睡" in run(store.read("user-123.md"))
 
 
-def test_dangling_link_hint_only_checks_visible_scopes(tmp_path):
-    plugin = make_plugin(tmp_path, ["Bot-A=edit", "Bot-B=edit"])
-    bot_a = FakeEvent("Bot-A", umo="Bot-A:FriendMessage:1")
-    bot_b = FakeEvent("Bot-B", umo="Bot-B:FriendMessage:2")
-    bot_c = FakeEvent("Bot-C", umo="Bot-C:FriendMessage:3")
 
-    # 共享人物文件对两个成员都可见
-    assert "已写入" in run(
-        plugin.memory_write(
-            bot_a, "people", "user-1.md", person_file("user-1", "身份：甲")
-        )
-    )
-    # Bot-A 的会话文件与 Bot-C 的独立人物文件，Bot-B 都看不到
-    assert "已写入" in run(
-        plugin.memory_write(
-            bot_a, "session", "private-note.md", person_file("private-note", "甲的秘密")
-        )
-    )
-    assert "已写入" in run(
-        plugin.memory_write(
-            bot_c, "people", "user-9.md", person_file("user-9", "身份：丙")
-        )
-    )
-
-    result = run(
-        plugin.memory_write(
-            bot_b,
-            "session",
-            "b.md",
-            person_file("b", "见 [[user-1]]、[[private-note]] 与 [[user-9]]。"),
-        )
-    )
-    assert "已写入" in result
-    assert "[[private-note]]" in result and "找不到" in result
-    assert "[[user-9]]" in result
-    # 共享人物文件可见，不算悬空
-    assert "[[user-1]]" not in result
-
-
-def test_dangling_link_hint_sees_enabled_global_and_people(tmp_path):
-    plugin = make_plugin(tmp_path, [])
-    plugin.config["enable_global_memory"] = True
-    event = FakeEvent("Bot-A")
-    assert "已写入" in run(
-        plugin.memory_write(event, "global", "g.md", person_file("g", "全局事实"))
-    )
-    linked = run(
-        plugin.memory_write(
-            event, "session", "s.md", person_file("s", "见 [[g]]")
-        )
-    )
-    assert "[[g]]" not in linked
-
-    # 人物记忆恒开：people 目录里的文件在可见范围里，链接不算悬空
-    run(
-        plugin._store.people_scope("Bot-A").write(
-            "user-1.md", person_file("user-1", "身份：甲")
-        )
-    )
-    visible = run(
-        plugin.memory_write(
-            event, "session", "t.md", person_file("t", "见 [[user-1]]")
-        )
-    )
-    assert "[[user-1]]" not in visible
-    assert "找不到" not in visible
-
-
-def test_dangling_link_hint_does_not_see_other_session_of_same_bot(tmp_path):
-    plugin = make_plugin(tmp_path, [])
-    event_a = FakeEvent("Bot-A", umo="Bot-A:FriendMessage:1")
-    event_b = FakeEvent("Bot-A", umo="Bot-A:FriendMessage:2")
-    assert "已写入" in run(
-        plugin.memory_write(
-            event_a, "session", "only-in-a.md", person_file("only-in-a", "只在本会话")
-        )
-    )
-    result = run(
-        plugin.memory_write(
-            event_b,
-            "session",
-            "b.md",
-            person_file("b", "见 [[only-in-a]]。"),
-        )
-    )
-    assert "[[only-in-a]]" in result and "找不到" in result
-
-
-def test_dangling_link_hint_treats_forgotten_file_as_existing(tmp_path):
-    plugin = make_plugin(tmp_path, [])
-    plugin.config["enable_forgetting"] = True
-    event = FakeEvent("Bot-A")
-    store = plugin._session_scope(event)
-    assert "已写入" in run(
-        plugin.memory_write(
-            event, "session", "old.md", person_file("old", "旧记忆")
-        )
-    )
-    assert run(store.forget("old.md")).ok
-
-    linked = run(
-        plugin.memory_write(
-            event, "session", "new.md", person_file("new", "见 [[old]]。")
-        )
-    )
-    assert "[[old]]" not in linked
-
-    # 关闭遗忘后 memory_read 无法恢复该文件，链接才算悬空
-    plugin.config["enable_forgetting"] = False
-    hidden = run(
-        plugin.memory_write(
-            event, "session", "other.md", person_file("other", "见 [[old]]。")
-        )
-    )
-    assert "[[old]]" in hidden and "找不到" in hidden
-
-
-def test_write_and_edit_receipts_mention_links_and_long_files(tmp_path):
-    plugin = make_plugin(tmp_path, [])
-    event = FakeEvent("Bot-A")
-    long_body = "见 [[missing]]。" + "x" * (9 * 1024)
-    result = run(
-        plugin.memory_write(
-            event, "session", "big.md", person_file("big", long_body)
-        )
-    )
-    assert "找不到对应文件" in result and "[[missing]]" in result
-    assert "偏长" in result and "超过 8KB" in result
-
-    # 日志只按体积判断：日期很多但文件不大时不提醒
-    log = run(
-        plugin.memory_write(
-            event,
-            "session",
-            "daily-2026-11-03.md",
-            person_file("daily-2026-11-03", "2026-01-01 " * 20),
-        )
-    )
-    assert "偏长" not in log
-
-    # memory_edit 的成功回执也走同一套检查
-    assert "已写入" in run(
-        plugin.memory_write(
-            event,
-            "session",
-            "small.md",
-            person_file("small", "## 甲\n\n旧正文\n"),
-        )
-    )
-    edited = run(
-        plugin.memory_edit(
-            event,
-            "session",
-            "small.md",
-            old_text="## 甲",
-            new_text="见 [[nope]]",
-            mode="section",
-        )
-    )
-    assert "已替换" in edited
-    assert "[[nope]]" in edited and "找不到" in edited
-
-
-def test_long_file_hint_normalizes_file_name_for_journal_detection(tmp_path):
-    plugin = make_plugin(tmp_path, [])
-    event = FakeEvent("Bot-A")
-    for name in ("/daily-2026-11-04.md", " daily-2026-11-05.md "):
-        result = run(
-            plugin.memory_write(
-                event,
-                "session",
-                name,
-                person_file("daily", "2026-01-01 " * 20),
-            )
-        )
-        assert "已写入" in result
-        assert "偏长" not in result
 
 
 def test_memory_search_tool_mode_ranking_and_format(tmp_path):
@@ -1602,35 +919,16 @@ def test_memory_search_tool_forgotten_results_use_same_ranking_and_cap(tmp_path)
 def test_mb_status_lists_long_session_files(tmp_path):
     plugin = make_plugin(tmp_path, [])
     event = FakeEvent("Bot-A")
-    assert "已写入" in run(
-        plugin.memory_write(
-            event,
-            "session",
-            "big.md",
-            person_file("big", "x" * (9 * 1024)),
-        )
-    )
-    assert "已写入" in run(
-        plugin.memory_write(
-            event, "session", "short.md", person_file("short", "短正文")
-        )
-    )
-    assert "已写入" in run(
-        plugin.memory_write(
-            event,
-            "session",
-            "dense.md",
-            person_file("dense", "2026-01-01 " * 16),
-        )
-    )
-    assert "已写入" in run(
-        plugin.memory_write(
-            event,
-            "session",
+    store = plugin._session_scope(event)
+    assert run(store.write("big.md", person_file("big", "x" * (9 * 1024)))).ok
+    assert run(store.write("short.md", person_file("short", "短正文"))).ok
+    assert run(store.write("dense.md", person_file("dense", "2026-01-01 " * 16))).ok
+    assert run(
+        store.write(
             "daily-2026-11-03.md",
             person_file("daily-2026-11-03", "2026-01-01 " * 20),
         )
-    )
+    ).ok
     text = _status_text(plugin, event)
     line = next(
         item for item in text.splitlines() if item.startswith("会话长文件：")
@@ -1646,11 +944,7 @@ def test_mb_status_survives_non_utf8_session_file(tmp_path):
     plugin = make_plugin(tmp_path, [])
     event = FakeEvent("Bot-A")
     store = plugin._session_scope(event)
-    assert "已写入" in run(
-        plugin.memory_write(
-            event, "session", "ok.md", person_file("ok", "短正文")
-        )
-    )
+    assert run(store.write("ok.md", person_file("ok", "短正文"))).ok
     # 直接放一个非 UTF-8 的大文件：状态页只做统计，不能因解码失败而崩掉
     (store.root / "bad.md").write_bytes(b"\xff" * (9 * 1024))
     text = _status_text(plugin, event)
@@ -1679,12 +973,12 @@ def test_read_search_and_pin_follow_event_platform_not_umo_prefix(tmp_path):
     opening = run(plugin._index_block(rt, event))
     assert opening is None or "共享私密正文" not in opening
 
-    # 非成员写入也落在自己的 people 目录，不会借 UMO 前缀写进 _shared
-    result = run(
-        plugin.memory_write(event, "people", "user-9.md", person_file("user-9"))
-    )
-    assert "已写入" in result
-    assert plugin._store.people_scope("Bot-Z").exists("user-9.md")
+    # 非成员的后台写入也落在自己的 people 目录，不会借 UMO 前缀写进 _shared
+    stores, _, _ = plugin._write_stores(event.unified_msg_origin, "Bot-Z", False)
+    own = plugin._store.people_scope("Bot-Z")
+    assert stores["people"].root == own.root
+    assert run(own.write("user-9.md", person_file("user-9"))).ok
+    assert own.exists("user-9.md")
     assert not shared.exists("user-9.md")
 
     # 取不到 platform_id 且 UMO 指向共享目录：fail-closed
@@ -1697,104 +991,7 @@ def test_read_search_and_pin_follow_event_platform_not_umo_prefix(tmp_path):
     ) == pkg_sharing.IDENTITY_REFUSAL
 
 
-def test_write_seen_uses_written_content_not_reread_race(tmp_path, monkeypatch):
-    """写锁释放后别的机器人先写入，不能把对方内容记成自己看过。"""
-    plugin = make_plugin(tmp_path, ["Bot-A=edit", "Bot-B=edit"])
-    event = FakeEvent("Bot-A")
-    store = plugin._store.people_scope("Bot-A")
-    run(store.write("user-1.md", person_file("user-1", body="初始"), actor="system"))
-    assert "初始" in run(plugin.memory_read(event, "people", "user-1.md"))
 
-    original = store.write
-    raced = {"done": False}
-
-    async def write_then_other(*args, **kwargs):
-        report = await original(*args, **kwargs)
-        if report.ok and not raced["done"]:
-            raced["done"] = True
-            # 模拟 A 写入后、记 seen 之前 B 抢先写入
-            await original("user-1.md", person_file("user-1", body="B 抢先写的"))
-        return report
-
-    monkeypatch.setattr(store, "write", write_then_other)
-    result = run(
-        plugin.memory_write(
-            event, "people", "user-1.md", person_file("user-1", body="A 的版本")
-        )
-    )
-    assert "已写入" in result
-    current = run(store.read("user-1.md"))
-    assert "B 抢先写的" in current
-    # seen 必须是 A 自己写下的版本，不是磁盘上的 B 版本
-    assert plugin._seen.seen("Bot-A", "user-1.md") != pkg_sharing.content_sha1(current)
-
-    # A 没读过 B 的版本，下一次整文件覆盖必须被版本检查挡住
-    again = run(
-        plugin.memory_write(
-            event, "people", "user-1.md", person_file("user-1", body="A 再覆盖")
-        )
-    )
-    assert again == pkg_sharing.version_conflict_message("user-1.md")
-
-
-def test_deleted_shared_file_does_not_leave_a_stale_seen_lock(tmp_path):
-    """文件被删除后旧 seen 不能把同名文件重新创建锁死。"""
-    plugin = make_plugin(tmp_path, ["Bot-A=edit"])
-    event = FakeEvent("Bot-A")
-    store = plugin._store.people_scope("Bot-A")
-    assert "已写入" in run(
-        plugin.memory_write(event, "people", "user-1.md", person_file("user-1"))
-    )
-    run(plugin.memory_read(event, "people", "user-1.md"))
-    assert plugin._seen.seen("Bot-A", "user-1.md")
-
-    assert "已删除" in run(
-        plugin.memory_write(event, "people", "user-1.md", delete=True)
-    )
-    # 删除路径应清掉所有机器人的版本记录
-    assert plugin._seen.seen("Bot-A", "user-1.md") == ""
-
-    # 故意再塞回一个过期哈希：文件不存在时 store.write 不应拿它跟空串比较
-    plugin._seen.note("Bot-A", "user-1.md", "旧版本的正文")
-    assert "已写入" in run(
-        plugin.memory_write(
-            event, "people", "user-1.md", person_file("user-1", body="重建")
-        )
-    )
-    assert "重建" in run(store.read("user-1.md"))
-
-
-def test_extraction_rechecks_shared_membership_before_people_write(tmp_path):
-    """提取任务开始后被移出共享，落盘时不能继续写 _shared。"""
-    plugin = make_plugin(tmp_path, ["Bot-A=edit"])
-    umo = "Bot-A:FriendMessage:100"
-    shared = plugin._store.people_scope("Bot-A")
-    session = plugin._store.session_scope(umo)
-    draft = pkg_prompts.MemoryDraft(
-        type="user",
-        name="user-1",
-        description="身份",
-        content="工程师",
-        scope="people",
-    )
-
-    # 任务开始时 people 目标是共享目录；落盘前成员被移出
-    plugin.config["shared_people_bots"] = []
-    plugin._refresh_sharing()
-    stored = run(
-        plugin._store_drafts(
-            umo,
-            [draft],
-            {"session": set(), "people": {"user-1.md"}},
-            "测试提取",
-            actor="extract@Bot-A",
-            people=shared,
-        )
-    )
-    assert stored == 1
-    assert session.exists("user-1.md")
-    assert not shared.exists("user-1.md")
-    assert "工程师" in run(session.read("user-1.md"))
 
 
 def test_platform_type_mismatch_stays_disabled_when_types_temporarily_missing(tmp_path):
@@ -1856,58 +1053,8 @@ def test_tools_cannot_read_history_trash_or_forgotten_paths(tmp_path):
     for name, body in hidden.items():
         read = run(plugin.memory_read(event, "session", name))
         assert body not in read
-        written = run(
-            plugin.memory_write(event, "session", name, person_file(body="想写进去"))
-        )
-        assert "文件名不合法" in written
-        edited = run(
-            plugin.memory_edit(
-                event, "session", name, old_text="历史", new_text="改"
-            )
-        )
-        assert "文件名不合法" in edited
     # 搜索只扫作用域根目录的 .md，不碰隐藏目录
     assert run(plugin.memory_search(event, "历史版本正文")) == "没有找到匹配「历史版本正文」的记忆。"
 
 
 # ---------------------------------------------------------------- 3.7.2 人物记忆恒开
-
-
-def test_people_paths_work_without_any_switch(tmp_path):
-    """配置里没有人物记忆开关：工具、开头块、召回、后台提取都照常可用。"""
-    plugin = make_plugin(tmp_path, [])
-    event = FakeEvent("Bot-A", sender_id="123")
-
-    # 工具：写、读、搜
-    assert "已写入" in run(
-        plugin.memory_write(event, "people", "user-123.md", person_file())
-    )
-    assert "工程师" in run(plugin.memory_read(event, "people", "user-123.md"))
-    found = run(plugin.memory_search(event, "工程师"))
-    assert "[people] user-123.md" in found
-
-    # 规范里始终描述 people 作用域，不再有"已停用"的拒绝说明
-    guidance = plugin._guidance(event.unified_msg_origin)
-    assert "- people：" in guidance
-    assert "人物记忆（people 作用域）已在插件配置中停用" not in guidance
-
-    # 开头块：私聊发送者档案固定注入
-    rt = main.RuntimeSession(state=pkg_compress.SessionState())
-    opening = run(plugin._index_block(rt, event))
-    assert opening is not None and pkg_injection.PROFILE_HEADING in opening
-    assert "工程师" in opening
-
-    # 召回：群聊里人物文件作为身份必选进入召回块
-    group = FakeEvent("Bot-A", sender_id="123", umo="Bot-A:GroupMessage:9")
-    message = run(
-        plugin._recall_message(
-            group,
-            group.unified_msg_origin,
-            "你好",
-            main.RuntimeSession(state=pkg_compress.SessionState()),
-        )
-    )
-    assert message is not None and "工程师" in message["content"]
-
-    # 后台提取：非共享成员始终可以写 people
-    assert plugin._can_extract_people(group.unified_msg_origin)

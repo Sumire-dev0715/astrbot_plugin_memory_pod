@@ -406,9 +406,6 @@ def test_dangling_links_normalize_and_ignore_existing():
     assert insights.dangling_links(["b", " c.md ", "b.md"], {"b.md", "c.md"}) == []
     missing = insights.dangling_links(["missing", "x.md", "missing.md"], set())
     assert missing == ["missing.md", "x.md"]
-    hint = insights.dangling_link_hint(missing)
-    assert "[[missing]]" in hint and "[[x]]" in hint
-    assert "不会自动创建" in hint
 
 
 # ---------------------------------------------------------------- 长文件阈值
@@ -471,11 +468,6 @@ def test_long_files_lists_only_over_threshold(tmp_path):
     assert all(item.file != "daily-2026-11-03.md" for item in long_files)
     assert INDEX_FILENAME not in [item.file for item in long_files]
 
-
-def test_long_file_hint_mentions_split_or_tidy():
-    hint = insights.long_file_hint("a.md", ["约 9.0KB，超过 8KB"])
-    assert "a.md" in hint and "拆分或整理" in hint
-    assert insights.long_file_hint("a.md", []) == ""
 
 
 def test_is_journal_names_still_used_for_ordering():

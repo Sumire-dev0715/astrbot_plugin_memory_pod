@@ -26,7 +26,17 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from astrbot.api import logger
 
-from .core import consolidate, history, memstore, registry, sharing, tidy, transfer
+from .core import (
+    consolidate,
+    history,
+    insights,
+    memstore,
+    pending,
+    registry,
+    sharing,
+    tidy,
+    transfer,
+)
 from .core.compress import SessionState
 
 if TYPE_CHECKING:
@@ -118,6 +128,29 @@ def _header_dict(header: memstore.MemoryHeader) -> dict:
     }
 
 
+def _file_flags(store: memstore.ScopeStore, headers: list[memstore.MemoryHeader]) -> dict[str, dict]:
+    """文件列表里的提醒标记：悬空链接与过长文件（同步，放进线程执行）。"""
+    available = {header.file for header in headers} | set(store.forgotten_files())
+    flags: dict[str, dict] = {}
+    for header in headers:
+        content = store._read_text_lenient(header.file)
+        if content is None:
+            continue
+        doc = memstore.parse_memory(content)
+        missing = insights.dangling_links(
+            memstore.extract_links(doc.body), available
+        )
+        reasons = insights.long_file_reasons(
+            header.file, doc.type, doc.body, len(content.encode("utf-8"))
+        )
+        if missing or reasons:
+            flags[header.file] = {
+                "dangling": missing,
+                "long": reasons,
+            }
+    return flags
+
+
 def _history_dict(version: history.HistoryVersion) -> dict:
     return {
         "file": version.file,
@@ -163,8 +196,8 @@ def _record_dict(key: str, record: registry.SessionRecord | None) -> dict:
     }
 
 
-def _state_dict(state: SessionState) -> dict:
-    return {
+def _state_dict(state: SessionState, pending_state: pending.PendingState | None = None) -> dict:
+    data = {
         "watermark": state.watermark,
         "summary": state.summary,
         "ratio": state.ratio,
@@ -175,10 +208,19 @@ def _state_dict(state: SessionState) -> dict:
         "failCount": state.fail_count,
         "failUntil": state.fail_until,
         "compressedAt": state.compressed_at,
-        "turnsSinceExtract": state.turns_since_extract,
-        "extractedAt": state.extracted_at,
         "lastRequestAt": state.last_request_at,
     }
+    if pending_state is not None:
+        data.update(
+            {
+                "pendingCount": pending_state.count,
+                "pendingFailures": pending_state.failures,
+                "lastWriteAt": pending_state.last_success
+                or pending_state.last_attempt,
+                "lastWriteResult": pending_state.last_result,
+            }
+        )
+    return data
 
 
 def _scan_scope(store: memstore.ScopeStore) -> tuple[int, float]:
@@ -533,8 +575,14 @@ class MemoryDashboard:
             index_text = (
                 index_path.read_text("utf-8") if index_path.is_file() else ""
             )
+            flags = _file_flags(store, headers)
+            files = []
+            for header in headers:
+                item = _header_dict(header)
+                item.update(flags.get(header.file, {}))
+                files.append(item)
             return {
-                "files": [_header_dict(h) for h in headers],
+                "files": files,
                 "forgotten": [_header_dict(h) for h in store.forgotten_headers()],
                 # 回收站条目只在打开标签时按需拉取，这里只给数量
                 "trashCount": store.trash_count(),
@@ -621,7 +669,7 @@ class MemoryDashboard:
     async def session_state(self) -> dict:
         key = self._session_key(_query("key"))
         state, live = await self._session_state(key)
-        data = _state_dict(state)
+        data = _state_dict(state, self.plugin._pending.load(key))
         data["live"] = live
         data["now"] = time.time()
         return _ok(data)
@@ -694,15 +742,12 @@ class MemoryDashboard:
                 detail = "；已撤回刚写入的新文件" if rolled.ok else ""
                 raise ApiError(renamed.message + detail)
             # 整理记录与待确认方案里的旧名正文副本不能留下，否则撤销整理
-            # 还能把 old.md 写回来；旧名的"看过"哈希也一并作废
+            # 还能把 old.md 写回来
             await asyncio.to_thread(
                 self.plugin._tidy.remove_file,
                 tidy.scope_id(scope, key),
                 old,
             )
-            seen = getattr(self.plugin, "_seen", None)
-            if seen is not None:
-                await asyncio.to_thread(seen.forget_file, old)
             message = f"{message}；{renamed.message}"
         self._changed(key)
         return _ok({"file": name, "mtime": store.mtime(name) or 0.0}, message)
@@ -764,9 +809,6 @@ class MemoryDashboard:
         report = await store.delete_forgotten(name, actor=history.ACTOR_WEBUI)
         if not report.ok:
             raise ApiError(report.message)
-        seen = getattr(self.plugin, "_seen", None)
-        if seen is not None:
-            await asyncio.to_thread(seen.forget_file, name)
         return _ok({"file": name}, report.message)
 
     # ------------------------------------------------------------ 历史与回收站
@@ -872,7 +914,6 @@ class MemoryDashboard:
         report = await store.delete_file_completely(
             name, actor=history.ACTOR_WEBUI
         )
-        seen = getattr(self.plugin, "_seen", None)
         if not report.ok:
             # 正文可能只残留在 tidy/*.runs.json 的 before 里（整理合并后
             # 回收站又按保留期清掉了）。这时 memstore 报"没有找到"，但撤销
@@ -882,8 +923,6 @@ class MemoryDashboard:
                     self.plugin._tidy.remove_file, sid, name
                 )
                 if removed:
-                    if seen is not None:
-                        await asyncio.to_thread(seen.forget_file, name)
                     self._changed(key)
                     return _ok(
                         {"file": name},
@@ -893,8 +932,6 @@ class MemoryDashboard:
         # 整理记录与待确认方案里也留着改动前原文；彻底删除要一并清掉，
         # 否则撤销整理会把刚删掉的正文写回来
         await asyncio.to_thread(self.plugin._tidy.remove_file, sid, name)
-        if seen is not None:
-            await asyncio.to_thread(seen.forget_file, name)
         self._changed(key)
         return _ok({"file": name}, report.message)
 
@@ -955,10 +992,11 @@ class MemoryDashboard:
             await store.purge(actor=history.ACTOR_WEBUI) if store is not None else 0
         )
         plugin.invalidate_for_key(key)
-        # 记忆都没了，待确认的方案与整理记录也跟着作废
+        # 记忆都没了，待确认的方案、整理记录与待整理对话也跟着作废
         await asyncio.to_thread(
             plugin._tidy.remove, tidy.scope_id(SCOPE_SESSION, key)
         )
+        plugin._pending.clear(key)
         if _text(body.get("target")).strip().lower() != "all":
             return _ok({"removed": removed}, f"已删除 {removed} 个记忆文件")
 
@@ -1174,11 +1212,6 @@ class MemoryDashboard:
             # 人物档案可能钉在私聊开头块里；people 目录名不对应任何会话
             # 运行时，invalidate_for_key 会按 people/ 前缀作废所有相关快照。
             self._changed(ref.key)
-            # 人物文件被搬走/覆盖后，旧的"看过"哈希会让下一次同名覆盖
-            # 误判；人物空间一旦变动，全部版本记录重来最保守。
-            seen = getattr(self.plugin, "_seen", None)
-            if seen is not None:
-                seen.clear()
 
     async def _drop_pending(self, ref: transfer.ScopeRef) -> None:
         """记忆被搬动后，那里待确认的整理方案就对不上了。"""

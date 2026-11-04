@@ -20,6 +20,7 @@ from .memstore import (
     compose_memory,
 )
 from .recall import age_label
+from .writer import WRITE_RULES
 
 # 一次整理最多带上的记忆正文总字符数；超出的文件本次不参与
 MAX_INPUT_CHARS = 60000
@@ -44,6 +45,8 @@ CONSOLIDATE_PROMPT = """你是聊天机器人的记忆整理助手。下面是�
 - 规范格式：type 只能是 user、feedback、project、reference、journal 之一；description 写成一句能让人判断"何时该读全文"的钩子；feedback 与 project 类正文附 **Why:** 与 **How to apply:** 两行；
 - 不编造：只能重组、精简、改写已有信息，不得添加文件里没有的事实；
 - 拿不准的不动。不需要整理就输出空数组。
+
+{write_rules}
 
 输出放在 <operations></operations> 标签内，是一个 JSON 数组，元素只有两种：
 {{"op": "write", "file": "文件名.md", "type": "类型", "description": "一句话钩子", "content": "完整正文（不含 frontmatter）", "reason": "为什么这样改"}}
@@ -102,7 +105,9 @@ def build_prompt(
             f"{usage_label(header, now)}）===\n{content.strip()}"
         )
     prompt = CONSOLIDATE_PROMPT.format(
-        scope_label=scope_label, files="\n\n".join(blocks) or "（空）"
+        scope_label=scope_label,
+        files="\n\n".join(blocks) or "（空）",
+        write_rules=WRITE_RULES,
     )
     return prompt, skipped
 

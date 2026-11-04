@@ -234,12 +234,12 @@ def test_edit_rejects_bad_input(tmp_path):
     assert "没有找到" in run(store.edit("a.md", "不存在的片段", "x")).message
     assert not run(store.edit("a.md", "", "x")).ok
     assert not run(store.edit("a.md", "正文", "正文")).ok
-    assert "memory_write" in run(store.edit("nope.md", "a", "b")).message
+    assert "文件不存在" in run(store.edit("nope.md", "a", "b")).message
     assert not run(store.edit("../a.md", "a", "b")).ok
     assert not run(store.edit(INDEX_FILENAME, "a", "b")).ok
-    # 改完文件就空了：拒绝，提示走删除
+    # 改完文件就空了：拒绝写入
     report = run(store.edit("a.md", whole, ""))
-    assert not report.ok and "delete=true" in report.message
+    assert not report.ok and "不会写入" in report.message
     assert run(store.read("a.md")) == whole
 
 

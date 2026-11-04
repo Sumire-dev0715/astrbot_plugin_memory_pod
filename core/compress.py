@@ -78,10 +78,6 @@ class SessionState:
     fail_count: int = 0
     fail_until: float = 0.0
     compressed_at: float = 0.0
-    # 后台定期提取：距上次提取经过的请求轮数、期间主模型是否自己写过记忆
-    turns_since_extract: int = 0
-    wrote_since_extract: bool = False
-    extracted_at: float = 0.0
     # 最近一次请求的时间，判断提示词缓存是否已经冷掉（清理旧工具结果用）
     last_request_at: float = 0.0
 
@@ -99,9 +95,6 @@ class SessionState:
             "fail_count": self.fail_count,
             "fail_until": self.fail_until,
             "compressed_at": self.compressed_at,
-            "turns_since_extract": self.turns_since_extract,
-            "wrote_since_extract": self.wrote_since_extract,
-            "extracted_at": self.extracted_at,
             "last_request_at": self.last_request_at,
         }
 
@@ -122,9 +115,6 @@ class SessionState:
             state.fail_count = max(0, int(raw.get("fail_count", 0)))
             state.fail_until = float(raw.get("fail_until", 0.0))
             state.compressed_at = float(raw.get("compressed_at", 0.0))
-            state.turns_since_extract = max(0, int(raw.get("turns_since_extract", 0)))
-            state.wrote_since_extract = bool(raw.get("wrote_since_extract", False))
-            state.extracted_at = float(raw.get("extracted_at", 0.0))
             state.last_request_at = float(raw.get("last_request_at", 0.0))
         except (TypeError, ValueError):
             return cls(cid=state.cid, summary=state.summary, anchor=state.anchor)
@@ -354,7 +344,7 @@ def build_view(
 def _clip_content(content, cap: int):
     if isinstance(content, str) and len(content) > cap:
         omitted = len(content) - cap
-        return content[:cap] + f"…（Memory Beyond 应急裁剪，省略 {omitted} 字符）"
+        return content[:cap] + f"…（鲸群记忆应急裁剪，省略 {omitted} 字符）"
     return content
 
 

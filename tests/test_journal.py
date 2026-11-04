@@ -101,10 +101,10 @@ def test_fold_moves_journals_to_end_and_keeps_non_journal_order():
         "- [alpha](alpha.md) — 甲",
         "- [beta](beta.md) — 乙",
         "",
-        "- [daily-2026-11-03](daily-2026-11-03.md) — 新日志",
-        "- [journal-2026-11-02](journal-2026-11-02.md) — 次新日志",
+        "- [daily-2026-11-03](daily-2026-11-03.md) — 新日志（2026-11-03）",
+        "- [journal-2026-11-02](journal-2026-11-02.md) — 次新日志（2026-11-02）",
         "- 日志共 3 篇（2026-10-15 ~ 2026-11-03），不自动召回；"
-        "按日期用 memory_read 读 daily-<日期>.md，或用 memory_search 搜",
+        "按日期用 memory_read 读日志文件，或用 memory_search 搜",
     ]
     # 重复折叠结果不变（每次索引同步都会跑一遍）
     assert journal.fold_index(folded, entries) == folded
@@ -154,10 +154,10 @@ def test_store_sync_folds_legacy_index_without_losing_non_journal(tmp_path):
         "",
     ]
     assert lines[4:] == [
-        "- [daily-2026-11-03](daily-2026-11-03.md) — 新日志",
-        "- [daily-2026-11-02](daily-2026-11-02.md) — 次新日志",
+        "- [daily-2026-11-03](daily-2026-11-03.md) — 新日志（2026-11-03）",
+        "- [daily-2026-11-02](daily-2026-11-02.md) — 次新日志（2026-11-02）",
         "- 日志共 3 篇（2026-10-15 ~ 2026-11-03），不自动召回；"
-        "按日期用 memory_read 读 daily-<日期>.md，或用 memory_search 搜",
+        "按日期用 memory_read 读日志文件，或用 memory_search 搜",
     ]
     # 日志没有独占行，也不算索引缺行
     assert store.index_report().missing == []
@@ -181,8 +181,8 @@ def test_journal_write_keeps_only_recent_two_lines(tmp_path):
         run(store.write(f"{name}.md", memory_md(name, f"{day} 的日志")))
     lines = (tmp_path / INDEX_FILENAME).read_text("utf-8").splitlines()
     assert len(lines) == 3
-    assert lines[0] == "- [daily-2026-11-04](daily-2026-11-04.md) — 04 的日志"
-    assert lines[1] == "- [daily-2026-11-03](daily-2026-11-03.md) — 03 的日志"
+    assert lines[0] == "- [daily-2026-11-04](daily-2026-11-04.md) — 04 的日志（2026-11-04）"
+    assert lines[1] == "- [daily-2026-11-03](daily-2026-11-03.md) — 03 的日志（2026-11-03）"
     assert lines[2].startswith("- 日志共 4 篇（2026-11-01 ~ 2026-11-04），不自动召回")
     assert "daily-2026-11-02" not in "\n".join(lines)
 
@@ -200,7 +200,7 @@ def test_rebuild_index_folds_journals(tmp_path):
     assert run(store.rebuild_index()) == 2
     lines = (tmp_path / INDEX_FILENAME).read_text("utf-8").splitlines()
     assert lines[0] == "- [alpha](alpha.md) — 甲"
-    assert lines[1] == "- [daily-2026-11-03](daily-2026-11-03.md) — 日志"
+    assert lines[1] == "- [daily-2026-11-03](daily-2026-11-03.md) — 日志（2026-11-03）"
     assert lines[2].startswith("- 日志共 1 篇（2026-11-03）")
 
 
@@ -374,24 +374,6 @@ def test_selector_prompt_and_response_exclude_journals():
 # ---------------------------------------------------------------- 查重
 
 
-def test_similar_memories_skips_journals_and_new_journal_has_no_hint():
-    headers = [
-        header("daily-2026-11-03.md", "每周六晚上的开黑活动", "journal"),
-        header("notes.md", "每周六晚上的开黑活动", "journal"),
-        header("project-game.md", "每周六晚上的开黑活动"),
-    ]
-    text = "每周六晚上八点开黑，群里集合"
-    # 日志不作为查重候选（日期命名与 type 命名都不算）
-    assert [
-        item.file for item in recall.similar_memories(text, headers, "other.md")
-    ] == ["project-game.md"]
-    # 新建日志本身不提示查重：文件名规则与 type 规则都算
-    assert recall.similar_memories(text, headers, "daily-2026-11-04.md") == []
-    assert (
-        recall.similar_memories(text, headers, "notes.md", mem_type="journal")
-        == []
-    )
-
 
 # ---------------------------------------------------------------- 截断
 
@@ -489,17 +471,17 @@ def test_truncate_index_keeps_journal_block_when_it_fits():
 # ---------------------------------------------------------------- 记忆规范
 
 
-def test_guidance_describes_journal_type():
+def test_chat_guidance_leaves_journal_rules_to_background():
+    """聊天侧只读，不再写 journal 的写入规则；规则在后台提示词里。"""
     text = prompts.memory_guidance(True)
-    assert "journal" in text
-    assert "daily-<日期>.md" in text
-    assert "不参与自动召回" in text
-    assert "不参与写入查重" in text
+    assert "daily-<日期>.md" not in text
+    assert "写入查重" not in text
 
 
-def test_extract_and_consolidate_prompts_know_journal():
-    extract = prompts.extract_rules()
-    assert "journal" in extract and "不要新建日志" in extract
+def test_background_and_consolidate_prompts_know_journal():
+    from core import writer
+
+    assert writer.JOURNAL_MAX_CHARS == 3000
     assert "journal" in consolidate.CONSOLIDATE_PROMPT
     assert "不要删除日志文件" in consolidate.CONSOLIDATE_PROMPT
 

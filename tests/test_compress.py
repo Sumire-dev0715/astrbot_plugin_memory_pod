@@ -436,18 +436,17 @@ def test_new_state_fields_roundtrip_and_defaults():
         cid="c1",
         cache_hit_tokens=1200,
         compressed_at=10.0,
-        turns_since_extract=4,
-        wrote_since_extract=True,
-        extracted_at=20.0,
         last_request_at=30.0,
     )
     assert SessionState.from_dict(state.to_dict()) == state
     old = SessionState.from_dict({"cid": "c1"})  # 旧版本状态文件
     assert old.cache_hit_tokens == -1
-    assert old.turns_since_extract == 0
-    assert old.wrote_since_extract is False
     assert old.last_request_at == 0.0
-    assert SessionState.from_dict({"turns_since_extract": -3}).turns_since_extract == 0
+    # 旧版本遗留的提取字段被忽略，不影响压缩状态
+    legacy = SessionState.from_dict(
+        {"cid": "c1", "turns_since_extract": 4, "extracted_at": 20.0}
+    )
+    assert legacy.cid == "c1" and legacy.last_request_at == 0.0
 
 
 # ---------------------------------------------------------------- 空闲清理旧工具结果

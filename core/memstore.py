@@ -939,7 +939,7 @@ class ScopeStore:
         async with self._lock:
             if not path.is_file():
                 return WriteReport(
-                    False, f"文件不存在：{name}（新建文件请用 memory_write）"
+                    False, f"文件不存在：{name}"
                 )
             if mode == "section":
                 # section 只替换一节，正文其余行的 CRLF 要原样留在磁盘上
@@ -1018,7 +1018,7 @@ class ScopeStore:
             if not updated.strip():
                 return WriteReport(
                     False,
-                    "改完整个文件就空了，不会写入；要删除文件请用 memory_write 并设 delete=true。",
+                    "改完整个文件就空了，不会写入。",
                 )
             return await self._commit(
                 name,
@@ -2189,16 +2189,24 @@ class ScopeStore:
     ) -> list[journal.JournalEntry]:
         """索引折叠用的日志条目：以磁盘上的实际文件为准，不信任旧索引行。"""
         headers = self.headers() if headers is None else headers
-        return [
-            journal.JournalEntry(
-                name=header.file,
-                description=header.description,
-                date=journal.journal_date(header.file),
-                updated=header.updated,
+        entries = []
+        for header in headers:
+            if not journal.is_journal(header.file, header.type):
+                continue
+            start, end = journal.entry_span(
+                header.file, header.text, header.updated
             )
-            for header in headers
-            if journal.is_journal(header.file, header.type)
-        ]
+            entries.append(
+                journal.JournalEntry(
+                    name=header.file,
+                    description=header.description,
+                    date=journal.journal_date(header.file),
+                    updated=header.updated,
+                    start_date=start,
+                    end_date=end,
+                )
+            )
+        return entries
 
     def _sync_index_line(self, filename: str, description: str) -> tuple[int, int]:
         """增改 filename 对应的索引行（原位更新，保持行序稳定）。

@@ -39,7 +39,7 @@ from dataclasses import dataclass
 from . import injection, journal
 from .injection import (
     DAY_SECONDS,
-    FILE_CHARS,
+    FILE_CHARS,  # noqa: F401 - 测试与调用方从这里取召回单文件预算
     TOTAL_CHARS,
     age_days,
     age_label,  # noqa: F401 - core.consolidate 从这里导入
@@ -206,44 +206,6 @@ def choose_candidates(
 # ---------------------------------------------------------------- 写入查重
 
 # 新建文件时提示"可能重复"的门槛：描述三处重合，或两处重合加正文两处
-DUP_MIN_SCORE = 8
-_USER_FILE_RE = re.compile(r"^user-[^/]+\.md$")
-
-
-def similar_memories(
-    text: str,
-    headers: list[MemoryHeader],
-    exclude: str,
-    limit: int = 2,
-    mem_type: str = "",
-) -> list[MemoryHeader]:
-    """用召回同一套打分找出与新内容最像的已有记忆，供写入回执提示查重。
-
-    两个记人文件（user-<ID>.md）ID 不同就是两个人，不算重复——同一个
-    群里同行、同好的人很多，描述相近是常态。日志既不作为查重候选，新建
-    日志本身也不查重：流水账天天写，提醒合并只会制造噪声。
-    """
-    if journal.is_journal(exclude, mem_type):
-        return []
-    tokens = tokenize(text)
-    if not tokens:
-        return []
-    is_user = bool(_USER_FILE_RE.match(exclude))
-    scored = []
-    for header in headers:
-        if header.file == exclude:
-            continue
-        if journal.is_journal(header.file, header.type):
-            continue
-        if is_user and _USER_FILE_RE.match(header.file):
-            continue
-        value = score(tokens, header)
-        if value >= DUP_MIN_SCORE:
-            scored.append((value, header.updated, header))
-    scored.sort(key=lambda item: (item[0], item[1]), reverse=True)
-    return [header for _, _, header in scored[:limit]]
-
-
 # ---------------------------------------------------------------- 模型挑选
 
 SELECTOR_PROMPT = """记忆清单（每行：编号、作用域/文件名、类型、写入日期、一句话描述）：

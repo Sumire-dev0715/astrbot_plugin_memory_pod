@@ -1,4 +1,4 @@
-"""Memory Beyond 核心逻辑：不依赖 AstrBot，本包内全部可独立测试。
+"""鲸群记忆核心逻辑：不依赖 AstrBot，本包内全部可独立测试。
 
     tokens.py    —— token 估算（口径对齐 AstrBot 平台的字符启发式）
     turns.py     —— 消息轮次切分（tool_call 与其结果不可分割）
@@ -8,4 +8,6 @@
     compress.py  —— 摘要 + 水位线的上下文压缩状态机
     prompts.py   —— 注入块、system prompt 规范、摘要提示词模板
     injection.py —— 注入视图：去 frontmatter、头尾瘦身、标题与档案区
+    pending.py   —— 待整理记录：每轮对话的临时缓冲与上限
+    writer.py    —— 后台整理：共享写入规则、操作校验、写入与日志分段
 """

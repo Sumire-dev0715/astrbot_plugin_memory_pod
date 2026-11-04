@@ -7,7 +7,7 @@
   "config": {
     "enable_memory": {
       "description": "Enable long-term memory",
-      "hint": "Adds the memory index to each conversation and gives the model the memory_read / memory_write / memory_edit / memory_search tools. When turned off, saved memories stay on disk; the bot just stops reading and writing them."
+      "hint": "Adds the memory index to each conversation and gives the model the memory_read / memory_search / memory_note tools. Memories are written only by the background writer; the chat model is read-only. When turned off, saved memories stay on disk; the bot just stops reading and writing them."
     },
     "enable_global_memory": {
       "description": "Enable global memory (the bot's own memory, shared by all chats)",
@@ -52,15 +52,15 @@
     },
     "summary_provider_id": {
       "description": "Summary model provider",
-      "hint": "The provider used for compression summaries, background memory extraction and \"Model picks\" recall. A cheap, fast model is a good choice. Leave empty to use the current chat's provider. If the chosen provider fails after all retries, the current chat's provider is used instead. Tidying memories on the memory page uses it too unless the next option names a different provider."
+      "hint": "The provider used for compression summaries and \"Model picks\" recall. A cheap, fast model is a good choice. Leave empty to use the current chat's provider. If the chosen provider fails after all retries, the current chat's provider is used instead. Tidying memories uses the memory tidying provider below instead."
     },
-    "consolidate_provider_id": {
-      "description": "Memory tidying model provider",
-      "hint": "The provider used by \"Tidy memories\" and \"Tidy all memories\" on the memory page, and by periodic tidying. Tidying reads every memory in a scope and proposes merges and rewrites, which asks more of the model than a summary does, so you can pick a stronger model here. Leave empty to use the summary provider; if both are empty, the default chat provider is used. If the chosen provider fails after all retries, the summary provider and then the default chat provider are tried in turn."
+    "memory_provider_id": {
+      "description": "Memory writing model provider",
+      "hint": "The provider used by background memory writing, \"Tidy memories\"/\"Tidy all memories\" on the memory page, and periodic tidying. Writing memories needs to read the conversation and existing memories and propose structured edits, which asks more of the model than a summary does, so you can pick a stronger model here. Leave empty to use the summary provider; if both are empty, the default chat provider is used. If the chosen provider fails after all retries, the summary provider and then the default chat provider are tried in turn."
     },
     "auto_consolidate": {
       "description": "Tidy memories periodically",
-      "hint": "Once enough time has passed and at least 3 memories have been added or changed since the last tidy, the plugin has the model review every memory in a scope in the background (the current chat, plus global and people memories when those are on), merging duplicates and dropping outdated ones. If the model finds nothing to change, nothing changes, and that still counts as a tidy. \"Ask me first\" keeps the proposed changes on the memory page until you confirm them; \"Tidy right away\" writes them at once, and the last 5 runs can be undone from \"Tidy history\" on the memory page. Checks only happen while people are chatting and use the memory tidying model provider. You can also set this on the memory page. Off by default.",
+      "hint": "Once enough time has passed and at least 3 memories have been added or changed since the last tidy, the plugin has the model review every memory in a scope in the background (the current chat, global memory and people memory), merging duplicates and dropping outdated ones. If the model finds nothing to change, nothing changes, and that still counts as a tidy. \"Ask me first\" keeps the proposed changes on the memory page until you confirm them; \"Tidy right away\" writes them at once, and the last 5 runs can be undone from \"Tidy history\" on the memory page. Checks only happen while people are chatting and use the memory tidying model provider. You can also set this on the memory page. Off by default.",
       "labels": [
         "Off",
         "Ask me first",
@@ -87,13 +87,13 @@
       "description": "Summary length limit (characters)",
       "hint": "Asks the summary model to keep the rolling summary within this many characters; outdated and resolved items are dropped on each roll so the summary does not keep growing. The summary is sent with every request, so a larger limit means more fixed cost per turn. Default 1500."
     },
-    "extract_memories": {
-      "description": "Extract memories while compressing",
-      "hint": "In the same model call that writes the summary, long-term facts about to leave the context are saved as memory files (current chat only)."
-    },
     "auto_extract_interval": {
-      "description": "Background memory extraction interval (turns)",
-      "hint": "Every this many turns, recent messages are handed to the summary model in the background to note down anything worth remembering long term (current chat only; related memories are updated instead of duplicated). Skipped if the bot already wrote a memory itself during that stretch. Runs in the background and does not slow replies. Default 10; 0 turns it off."
+      "description": "Background memory writing interval (turns)",
+      "hint": "Every this many conversation turns, the pending conversation is handed to the memory writing model in the background to write down anything worth remembering long term. Runs in the background and does not slow replies. Default 10; 0 turns it off."
+    },
+    "extract_idle_minutes": {
+      "description": "Write memories after this much idle time (minutes)",
+      "hint": "After the last turn of a conversation, if nothing new arrives for this many minutes, the pending conversation is written to long-term memory in the background. A background scan runs once a minute and also finds pending records left from before a restart. Default 10; 0 turns the idle trigger off (the every-N-turns trigger and memory_note still work)."
     },
     "history_keep_days": {
       "description": "History retention (days)",
@@ -259,9 +259,13 @@
       "chainOkSub": "No recent failures",
       "chainCooling": "Backing off",
       "chainCoolingSub": "{left} left, {n} failures in a row",
-      "extract": "Background memory extraction",
-      "extractTurns": "{n} turns since last run",
-      "extractSub": "Last run {time}",
+      "pending": "Background memory writing",
+      "pendingNone": "Nothing pending",
+      "pendingRounds": "{n} turns pending",
+      "pendingSub": "Last {time}: {result}",
+      "pendingFailures": "{n} failures in a row",
+      "fileLong": "Long",
+      "fileDangling": "Dangling link",
       "lastRequest": "Last request",
       "tokens": "{n} tokens",
       "partsTitle": "What the context is made of (last request, estimated)",

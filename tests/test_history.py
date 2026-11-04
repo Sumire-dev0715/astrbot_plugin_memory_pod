@@ -538,12 +538,6 @@ def test_history_and_trash_never_show_up_as_memory(store):
         assert await store.search("绝密旧版本一号") == []
         assert await store.search("回收站内容二号") == []
         assert await store.search("当前版本") == ["a.md: " + "当前版本"]
-        # 查重也只看在册文件
-        assert recall.similar_memories(
-            "绝密旧版本一号 回收站内容二号 绝密旧版本一号",
-            store.headers(),
-            "c.md",
-        ) == []
         report = store.index_report()
         assert report.missing == [] and report.dangling == []
         assert set(store.usage()) == {"a.md"}
