@@ -29,15 +29,15 @@ def _make_old_dirs(tmp_path):
 def test_unknown_old_dirs_are_ignored_and_left_untouched(tmp_path, monkeypatch):
     marker_dirs = _make_old_dirs(tmp_path)
     monkeypatch.setattr(
-        main.MemoryBeyondPlugin,
+        main.MemoryPodPlugin,
         "_resolve_data_dir",
         staticmethod(lambda: tmp_path),
     )
     monkeypatch.setattr(
-        main.MemoryBeyondPlugin, "_ensure_pending_loop", lambda self: None
+        main.MemoryPodPlugin, "_ensure_pending_loop", lambda self: None
     )
 
-    plugin = main.MemoryBeyondPlugin(FakeContext(), {"enable_memory": True})
+    plugin = main.MemoryPodPlugin(FakeContext(), {"enable_memory": True})
     # 旧目录不会被当成作用域
     assert plugin._store.session_keys() == []
     assert plugin._store.people_keys() == []
@@ -68,14 +68,14 @@ def test_old_scope_dirs_hidden_files_do_not_break_tools(tmp_path, monkeypatch):
     (hidden / ".history").mkdir()
     (hidden / ".history" / "x.md").write_text("旧历史", "utf-8")
     monkeypatch.setattr(
-        main.MemoryBeyondPlugin,
+        main.MemoryPodPlugin,
         "_resolve_data_dir",
         staticmethod(lambda: tmp_path),
     )
     monkeypatch.setattr(
-        main.MemoryBeyondPlugin, "_ensure_pending_loop", lambda self: None
+        main.MemoryPodPlugin, "_ensure_pending_loop", lambda self: None
     )
-    plugin = main.MemoryBeyondPlugin(FakeContext(), {"enable_memory": True})
+    plugin = main.MemoryPodPlugin(FakeContext(), {"enable_memory": True})
     event = FakeEvent("Bot-A")
     session = plugin._session_scope(event)
     assert session.list_files() == []

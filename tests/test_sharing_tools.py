@@ -229,7 +229,7 @@ def note_file(name="note", description="合成记忆", body="合成正文"):
 
 
 def make_plugin(tmp_path, members):
-    plugin = object.__new__(main.MemoryBeyondPlugin)
+    plugin = object.__new__(main.MemoryPodPlugin)
     plugin.context = FakeContext()
     plugin.config = {
         "enable_memory": True,

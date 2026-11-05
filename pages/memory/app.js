@@ -112,7 +112,7 @@
     linksLabel: "链接到",
     openLink: "打开这条记忆",
     linkMissing: "这条记忆不存在",
-    newHint: "新记忆会在下一次对话开始或下一次压缩后进入索引",
+    newHint: "新记忆会在下一次对话开始或开头块刷新后进入索引",
     savedAt: "最近写入：{time}",
     stampLine: "首次记于 {created} · 最近更新 {updated}",
     sourceLine: "来源 ID {ids}",
@@ -146,11 +146,6 @@
     cacheHit: "提示词缓存命中",
     cacheHitSub: "最近一次请求",
     notReported: "未上报",
-    pending: "后台整理",
-    pendingNone: "暂无待整理记录",
-    pendingRounds: "待整理 {n} 轮",
-    pendingSub: "上次 {time}：{result}",
-    pendingFailures: "连续失败 {n} 次",
     fileLong: "偏长",
     fileDangling: "悬空链接",
     lastRequest: "最近请求",
@@ -162,7 +157,8 @@
     part_history: "历史",
     part_prompt: "本轮输入",
     part_recall: "召回记忆",
-    systemPromptSub: "其中插件开头块 {n} tokens",
+    part_plugin: "插件开头块",
+    openingBlockSub: "索引与私聊人物档案，每轮附加",
     summaryTitle: "AstrBot 压缩后的摘要",
     noSummary: "AstrBot 还没有压缩过这段对话。",
     liveTag: "实时",
@@ -493,11 +489,6 @@
       return t("daysAgo", { n: Math.floor(diff / 86400) });
     }
     return fmtTime(ts).slice(0, 10);
-  }
-
-  function fmtDuration(sec) {
-    sec = Math.max(0, Math.round(sec));
-    return sec < 60 ? t("seconds", { n: sec }) : t("minutes", { n: Math.ceil(sec / 60) });
   }
 
   function fmtNum(n) {
@@ -2805,10 +2796,11 @@
         "div",
         { class: "stats" },
         stat(t("lastEstimate"), t("tokens", { n: fmtNum(c.estimate) }), t("lastRequest")),
+        stat(t("part_system"), t("tokens", { n: fmtNum(parts.system || 0) }), ""),
         stat(
-          t("part_system"),
-          t("tokens", { n: fmtNum(parts.system || 0) }),
-          t("systemPromptSub", { n: fmtNum(parts.plugin || 0) })
+          t("part_plugin"),
+          t("tokens", { n: fmtNum(parts.plugin || 0) }),
+          t("openingBlockSub")
         ),
         stat(t("lastActual"), c.actual > 0 ? t("tokens", { n: fmtNum(c.actual) }) : "—", t("lastActualSub")),
         stat(t("cacheHit"), c.cacheHit >= 0 ? t("tokens", { n: fmtNum(c.cacheHit) }) : t("notReported"), t("cacheHitSub")),

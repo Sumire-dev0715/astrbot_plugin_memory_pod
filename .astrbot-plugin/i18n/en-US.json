@@ -195,11 +195,6 @@
       "cacheHit": "Prompt cache hit",
       "cacheHitSub": "Last request",
       "notReported": "Not reported",
-      "pending": "Background memory writing",
-      "pendingNone": "Nothing pending",
-      "pendingRounds": "{n} turns pending",
-      "pendingSub": "Last {time}: {result}",
-      "pendingFailures": "{n} failures in a row",
       "fileLong": "Long",
       "fileDangling": "Dangling link",
       "lastRequest": "Last request",
@@ -421,8 +416,9 @@
       "contextReadonlyNotice": "This panel is read-only. Context truncation and compaction are handled by AstrBot’s own context settings; this plugin no longer changes the conversation history.",
       "part_system": "System prompt",
       "part_prompt": "Current input",
-      "systemPromptSub": "Plugin opening block takes {n} tokens",
-      "contextWindow": "Context window"
+      "contextWindow": "Context window",
+      "part_plugin": "Plugin opening block",
+      "openingBlockSub": "Index and private profiles, attached every turn"
     }
   }
 }

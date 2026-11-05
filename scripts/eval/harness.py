@@ -575,10 +575,10 @@ class TurnResult:
     # 本轮回复后、模拟空闲前就完成的后台调用数（memory_note 立即整理）
     immediate_background_calls: int = 0
     background_calls: int = 0
-    viewed_contexts: list[dict] = field(default_factory=list)
-    # 本轮请求的系统提示词（插件开头块就接在这里）与召回块附加内容
+    # 本轮请求的系统提示词（静态记忆规范在这里）与临时附加内容
+    # （插件开头块、召回块都在这里，带 _no_save）
     system_prompt: str = ""
-    recall_parts: list[str] = field(default_factory=list)
+    extra_parts: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -686,8 +686,7 @@ async def run_turn(env: EvalEnv, turn: Turn) -> TurnResult:
 
     await plugin.inject_memory(event, req)
     chars = prompt_chars(req)
-    viewed = copy.deepcopy(req.contexts)
-    recall_parts = [
+    extra_parts = [
         str(part.get("text") or "")
         for part in getattr(req, "extra_user_content_parts", None) or []
         if isinstance(part, dict)
@@ -701,7 +700,7 @@ async def run_turn(env: EvalEnv, turn: Turn) -> TurnResult:
     if req.prompt:
         # AstrBot 把本轮用户消息的附加内容拼在正文之后（entities.assemble_context）
         content = str(req.prompt)
-        extras = [part for part in recall_parts if part]
+        extras = [part for part in extra_parts if part]
         if extras:
             content = content + "\n\n" + "\n\n".join(extras)
         run_messages.append({"role": "user", "content": content})
@@ -775,9 +774,8 @@ async def run_turn(env: EvalEnv, turn: Turn) -> TurnResult:
         sent_prompt=str(req.prompt or ""),
         tool_calls=tool_records,
         prompt_chars=chars,
-        viewed_contexts=viewed,
         system_prompt=system,
-        recall_parts=recall_parts,
+        extra_parts=extra_parts,
     )
 
 

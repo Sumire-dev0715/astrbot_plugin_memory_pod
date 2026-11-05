@@ -56,6 +56,15 @@ def test_context_panel_is_read_only():
     assert 't("noSummary")' in source
 
 
+def test_context_panel_leaves_no_dead_ui():
+    source = _source()
+    assert "fmtDuration" not in source
+    assert "pendingRounds" not in source
+    assert "下一次压缩" not in source
+    api_source = (ROOT / "web_api.py").read_text("utf-8")
+    assert "hasContext" not in api_source
+
+
 def test_archive_tab_is_gone():
     source = _source()
     assert 't("tabArchives")' not in source

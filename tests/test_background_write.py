@@ -613,9 +613,6 @@ def test_pending_records_are_invisible_to_memory_channels(tmp_path):
     assert state.count == 1
 
 
-# ---------------------------------------------------------------- 旧摘要
-
-
 def _async_value(value):
     async def inner(*args, **kwargs):
         return value
@@ -758,28 +755,22 @@ def test_background_prompt_contains_link_and_long_file_hints(tmp_path):
     assert "已经很长，优先按小节替换" in context.prompt
 
 
-def test_web_state_and_page_show_pending_status():
+def test_context_dict_has_only_context_numbers():
+    """上下文面板不再展示后台整理状态；待整理只在 /mb_status 与总览里。"""
     pkg_web = importlib.import_module(f"{PACKAGE}.web_api")
-
-    state = pkg_pending.PendingState(
-        umo="Bot-A:FriendMessage:1",
-        records=[pkg_pending.Round(seq=1, at=NOW, user="u", reply="r")],
-        failures=1,
-        last_attempt=NOW,
-        last_result="模型不可用",
-        last_success=NOW - 10,
+    data = pkg_web._context_dict(
+        pkg_context_stats.ContextStats(parts={"history": 3}, estimate=7)
     )
-    data = pkg_web._context_dict(pkg_context_stats.ContextStats(), state)
-    assert data["pendingCount"] == 1
-    assert data["pendingFailures"] == 1
-    assert data["lastWriteAt"] == NOW - 10
-    assert data["lastWriteResult"] == "模型不可用"
+    assert set(data) == {"parts", "estimate", "actual", "cacheHit", "requestAt"}
+    assert data["estimate"] == 7
 
     page = (
         Path(__file__).resolve().parent.parent / "pages" / "memory" / "app.js"
     ).read_text("utf-8")
-    for key in ("pendingRounds", "pendingFailures", "fileLong", "fileDangling"):
+    for key in ("fileLong", "fileDangling"):
         assert key in page
+    for key in ("pendingRounds", "pendingFailures"):
+        assert key not in page
 
 
 def test_management_file_list_flags_long_and_dangling(tmp_path):
@@ -1038,23 +1029,47 @@ def test_journal_write_failure_is_reported(tmp_path, monkeypatch):
     assert "日志写入失败" in state.last_result
 
 
-def test_journal_write_invalidates_open_snapshot(tmp_path):
+def test_journal_write_keeps_open_snapshot_until_refresh(tmp_path):
+    """3.8.1：新建/追加记忆只落盘，不刷新开头块快照。"""
     plugin = make_plugin(tmp_path, [])
     event = FakeEvent("Bot-A")
     umo = event.unified_msg_origin
     key = pkg_memstore.safe_key(umo)
+    run(plugin._store.session_scope(umo).write(
+        "seed.md", "---\nname: seed\ndescription: 旧记忆\n---\n\n正文\n"
+    ))
     plugin._record_pending_user(event, _request("聊点事"), NOW)
     plugin._record_pending_reply(event, _response("好"), NOW + 1)
     rt = main.RuntimeSession()
     run(plugin._index_block(rt, event))
     plugin._sessions[umo] = rt
+    before = rt.index_block
 
     async def fake_model(umo_arg, prompt, **kwargs):
         return ("<journal>一段流水</journal>", [])
 
     plugin._call_model = fake_model
     run(plugin._write_pending(key, umo, "idle", now=NOW + 2))
-    assert rt.index_loaded is False
+    assert rt.index_loaded is True
+    assert rt.index_block == before
+
+
+def test_delete_change_invalidates_open_snapshot(tmp_path):
+    plugin = make_plugin(tmp_path, [])
+    event = FakeEvent("Bot-A")
+    rt = main.RuntimeSession()
+    run(plugin._index_block(rt, event))
+    plugin._sessions[event.unified_msg_origin] = rt
+    assert rt.index_loaded is True
+
+    plugin._invalidate_changes(
+        event.unified_msg_origin, [("session", "a.md", "write")]
+    )
+    assert rt.index_loaded is True  # 改写不刷新快照
+    plugin._invalidate_changes(
+        event.unified_msg_origin, [("session", "a.md", "delete")]
+    )
+    assert rt.index_loaded is False  # 删除必须立刻从开头块消失
 
 
 def test_memory_note_per_round_cap(tmp_path):

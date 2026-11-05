@@ -482,11 +482,11 @@ def test_management_page_offers_journal_type():
     assert "typeHint_journal:" in app_js
 
 
-# ---------------------------------------------------------------- 升级与索引体检
+# ---------------------------------------------------------------- 索引折叠与体检
 
 
-def test_load_index_folds_legacy_without_writing_then_ensure_persists(tmp_path):
-    """升级后第一次注入就能看到折叠格式；ensure 才把文件改成新格式。"""
+def test_load_index_folds_journal_lines_in_injection_view(tmp_path):
+    """load_index 只读地折叠注入视图；磁盘上的索引文件保持原样。"""
     store = ScopeStore(tmp_path)
     a = memory_md("alpha", "甲", "project")
     b = memory_md("beta", "乙", "project")

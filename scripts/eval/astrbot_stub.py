@@ -243,7 +243,7 @@ def load_plugin(repo_root: str | Path):
     package.__path__ = [str(repo_root)]  # type: ignore[attr-defined]
     sys.modules[PLUGIN_PACKAGE] = package
     module = importlib.import_module(f"{PLUGIN_PACKAGE}.main")
-    return module, module.MemoryBeyondPlugin
+    return module, module.MemoryPodPlugin
 
 
 @contextmanager

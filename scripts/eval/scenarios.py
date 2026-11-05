@@ -822,14 +822,21 @@ def private_profile_pinned() -> Scenario:
 
     def check(env: EvalEnv):
         turn = env.turns[0]
-        index_block = turn.system_prompt
+        index_block = next(
+            (
+                str(part)
+                for part in turn.extra_parts
+                if str(part).startswith("<memory_pod_index>")
+            ),
+            "",
+        )
         if "美式咖啡" not in index_block:
             return False, "私聊人物档案没有钉进开头块"
         if "# 发送者人物档案（私聊）" not in index_block:
             return False, "开头块里缺少人物档案区标题"
         duplicated = any(
             "美式咖啡" in str(part)
-            for part in turn.recall_parts
+            for part in turn.extra_parts
             if str(part).startswith("<memory_pod_recall>")
         )
         if duplicated:

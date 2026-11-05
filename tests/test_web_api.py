@@ -549,6 +549,17 @@ def test_session_context_reads_disk_or_live(plugin, dash):
     assert data["live"] is True and data["estimate"] == 30
 
 
+def test_session_context_does_not_guess_unrecoverable_umo(plugin, dash):
+    """目录名无法还原成同一个 UMO 时，不能拿它去读别的对话的摘要。"""
+    long_umo = "aiocqhttp:FriendMessage:" + "x" * 120
+    key = pkg_memstore.safe_key(long_umo)
+    assert pkg_registry.umo_from_key(key)
+    assert pkg_memstore.safe_key(pkg_registry.umo_from_key(key)) != key
+    plugin.summary = "不应该是这个摘要"
+    data = ok(call(dash, "session/context", {"key": key}))
+    assert data["summary"] == "" and data["hasSummary"] is False
+
+
 def test_session_context_shows_astrbot_summary(plugin, dash):
     plugin._registry.touch(KEY, UMO, "开黑群")
     plugin.summary = "之前的对话摘要正文"

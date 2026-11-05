@@ -3,7 +3,7 @@
 AstrBot 自己负责截断与压缩上下文（PLAN 3.8.1），插件只记录自己看到的
 请求构成，供 `/mb_status` 与管理页的只读「上下文」面板展示：
 
-- 每轮的估算分项（系统提示词、其中插件开头块、工具声明、历史、本轮输入、
+- 每轮的估算分项（系统提示词、插件开头块、工具声明、历史、本轮输入、
   召回块）与总额；
 - 提供商最近一次上报的输入 token 数与缓存命中数；
 - 从当前对话历史里读出 AstrBot 最近一次压缩留下的摘要。
@@ -16,6 +16,8 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass, field
+
+from .turns import is_internal_message
 
 # AstrBot 4.29.4 摘要压缩后写回历史的摘要消息前缀
 # （core/agent/context/ 下的摘要模块，约 296 行）
@@ -50,7 +52,11 @@ def history_head(contexts: list[dict]) -> str:
     两种情况都会改变这个指纹。历史为空时返回空串。
     """
     for message in contexts or []:
-        if not isinstance(message, dict) or message.get("role") == "system":
+        if (
+            not isinstance(message, dict)
+            or message.get("role") == "system"
+            or is_internal_message(message)
+        ):
             continue
         return message_fingerprint(message)
     return ""

@@ -41,7 +41,7 @@ from .core import (
 )
 
 if TYPE_CHECKING:
-    from .main import MemoryBeyondPlugin
+    from .main import MemoryPodPlugin
 
 try:  # v4.26 起的插件 Web API 请求对象
     from astrbot.api.web import request as _plugin_request
@@ -203,28 +203,14 @@ def _record_dict(key: str, record: registry.SessionRecord | None) -> dict:
     }
 
 
-def _context_dict(
-    stats: context_stats.ContextStats,
-    pending_state: pending.PendingState | None = None,
-) -> dict:
-    data = {
+def _context_dict(stats: context_stats.ContextStats) -> dict:
+    return {
         "parts": dict(stats.parts or {}),
         "estimate": stats.estimate,
         "actual": stats.actual,
         "cacheHit": stats.cache_hit,
         "requestAt": stats.request_at,
     }
-    if pending_state is not None:
-        data.update(
-            {
-                "pendingCount": pending_state.count,
-                "pendingFailures": pending_state.failures,
-                "lastWriteAt": pending_state.last_success
-                or pending_state.last_attempt,
-                "lastWriteResult": pending_state.last_result,
-            }
-        )
-    return data
 
 
 def _scan_scope(store: memstore.ScopeStore) -> tuple[int, float]:
@@ -284,7 +270,7 @@ def _people_info(key: str, membership: sharing.Membership) -> dict:
 class MemoryDashboard:
     """把 WebUI 接口挂到 AstrBot 上，并实现每个接口。"""
 
-    def __init__(self, plugin: "MemoryBeyondPlugin"):
+    def __init__(self, plugin: "MemoryPodPlugin"):
         self.plugin = plugin
         self.transfer = transfer.MemoryTransfer(plugin._store, plugin._registry)
         # 令牌 -> (过期时间, 内容)：生成好的备份、上传待导入的备份
@@ -512,7 +498,6 @@ class MemoryDashboard:
                 item.update(
                     fileCount=count,
                     updatedAt=latest,
-                    hasContext=plugin.stats_path_for_key(key).is_file(),
                     tidyPending=pending(SCOPE_SESSION, key),
                 )
                 sessions.append(item)
@@ -683,8 +668,12 @@ class MemoryDashboard:
         stats, live = await self._session_stats(key)
         record = self.plugin._registry.get(key)
         umo = record.umo if record is not None else registry.umo_from_key(key)
+        # 目录名不可逆：还原出的 UMO 必须再能转回同一个目录名，否则
+        # 读到的是别的对话的摘要
+        if umo and memstore.safe_key(umo) != key:
+            umo = ""
         summary = await self.plugin.astrbot_summary(umo) if umo else ""
-        data = _context_dict(stats, self.plugin._pending.load(key))
+        data = _context_dict(stats)
         data["live"] = live
         data["now"] = time.time()
         data["summary"] = summary

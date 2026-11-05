@@ -10,16 +10,19 @@
                    会话登记、记忆整理
 
 注入位置（PLAN 3.8.1，依据 AstrBot 4.29.4 源码）：
-- 稳定的开头块（记忆规范、索引、私聊档案）接在 req.system_prompt 后面。
-  AstrBot 把 system_prompt 作为开头唯一的 system 消息（tool_loop_agent_runner
-  第 324-328 行），按轮数截断时开头 system 消息整体保留（truncator
-  _split_system_rest），LLM 摘要压缩时也只保留开头的 system 消息；
-  回存历史时第一条 system 消息被跳过
-  （agent_sub_stages/internal.py 第 517-520 行）。
-- 每轮变化的召回块放进 req.extra_user_content_parts，带 _no_save 标记：
-  它随本轮用户消息一起进入请求（entities.assemble_context），是最新的一轮，
-  截断与压缩都会保留；回存历史时按内容块丢弃（message.model_dump +
+- 记忆规范（静态指令）接在 req.system_prompt 后面。AstrBot 把它作为开头
+  唯一的 system 消息（tool_loop_agent_runner 第 324-328 行），按轮数截断
+  时开头 system 消息整体保留（truncator _split_system_rest），回存历史时
+  第一条 system 消息被跳过（agent_sub_stages/internal.py 第 517-520 行）。
+- 开头块（索引、私聊档案）与每轮召回块都放进 req.extra_user_content_parts，
+  带 _no_save 标记：它们随本轮用户消息一起进入请求（entities.assemble_context），
+  属于最新的一轮，截断与压缩都保留；AstrBot 的摘要压缩只把最旧轮次发给
+  摘要模型（round_utils.split_into_rounds），所以索引与档案不会被压缩进
+  摘要；回存历史时按内容块丢弃（message.model_dump +
   dump_messages_with_checkpoints），不会在平台历史里逐轮累积。
+  开头块不放系统提示词，是因为摘要压缩会把开头 system 消息当成最旧一轮
+  一起喂给摘要模型，摘要又会被 AstrBot 持久化；把索引与档案留在最新一轮
+  才能同时满足"不被截断/摘要"和"不进历史"。
 
 兼容性立场：只依赖 @filter.on_llm_request() / @filter.on_llm_response() /
 @filter.llm_tool() 等公开插件接口、不 monkey-patch。跟随 AstrBot 取上下文
@@ -143,7 +146,7 @@ class RuntimeSession:
         self.history_head = None
 
 
-class MemoryBeyondPlugin(Star):
+class MemoryPodPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig | None = None):
         super().__init__(context, config)
         self.config = config if config is not None else {}
@@ -691,8 +694,8 @@ class MemoryBeyondPlugin(Star):
     async def inject_memory(
         self, event: AstrMessageEvent, req: ProviderRequest
     ):
-        """请求前的介入点：把记忆规范与开头块接进系统提示词，召回块附在本轮
-        用户消息上。AstrBot 之后如何截断、压缩上下文由它自己决定。"""
+        """请求前的介入点：记忆规范接进系统提示词，开头块与召回块作为本轮
+        用户消息的附加内容。AstrBot 之后如何截断、压缩上下文由它自己决定。"""
         try:
             await self._process_request(event, req)
         except Exception:  # noqa: BLE001 - 插件缺陷不能拖垮 LLM 请求链路
@@ -768,19 +771,20 @@ class MemoryBeyondPlugin(Star):
         if memory_on:
             recall_block = await self._recall_message(event, umo, query, rt)
 
-        # ---- 开头块接在 AstrBot 原有的系统提示词后面 ----
+        # ---- 记忆规范留在系统提示词；开头块与召回块都作为本轮用户消息的
+        # 附加内容。AstrBot 的摘要压缩会把开头 system 消息当成最旧的一轮
+        # 一起喂给摘要模型（round_utils.split_into_rounds），只有最新一轮的
+        # 附加内容既不会被截断，也不会被压缩进摘要。 ----
         system_prompt = str(req.system_prompt or "")
         if guidance and guidance not in system_prompt:
             system_prompt += guidance
-        if opening:
-            # 同一个请求被重复处理时，先去掉上一次追加的旧块再放最新的
-            system_prompt = prompts.strip_index_block(system_prompt)
-            system_prompt += "\n\n" + opening
         req.system_prompt = system_prompt
 
-        # ---- 召回块：本轮用户消息的附加内容，_no_save 不进入会话历史 ----
+        # ---- 开头块与召回块：_no_save 附加内容，不进会话历史 ----
+        if opening:
+            self._attach_temp_part(req, opening, prompts.INDEX_BLOCK_OPEN)
         if recall_block:
-            self._attach_recall_part(req, recall_block)
+            self._attach_temp_part(req, recall_block, RECALL_MARKER)
 
         # ---- 按插件看到的样子估算本轮上下文构成（AstrBot 截断之前） ----
         estimator = tokens.TokenEstimator()
@@ -810,18 +814,19 @@ class MemoryBeyondPlugin(Star):
         await self._save_stats(umo)
 
     @staticmethod
-    def _attach_recall_part(req: ProviderRequest, block: str) -> None:
-        """把召回块作为本轮用户消息的附加内容放进去。
+    def _attach_temp_part(req: ProviderRequest, block: str, marker: str) -> None:
+        """把注入块作为本轮用户消息的附加内容放进去。
 
         AstrBot 的 ProviderRequest 文档明确这个字段用于"不能持久化的每轮
         上下文"（star/context.py 第 254 行）；内容块带 _no_save，回存历史时
         由 dump_messages_with_checkpoints 丢弃，提供商发送前也会忽略。
+        同一个请求被重复处理时按 marker 去重，不重复追加。
         """
         parts = list(getattr(req, "extra_user_content_parts", None) or [])
         for part in parts:
             text = part.get("text") if isinstance(part, dict) else getattr(part, "text", "")
-            if isinstance(text, str) and RECALL_MARKER in text:
-                return  # 同一请求被重复处理，不重复追加
+            if isinstance(text, str) and marker in text:
+                return
         parts.append({"type": "text", "text": block, "_no_save": True})
         req.extra_user_content_parts = parts
 
@@ -1332,15 +1337,15 @@ class MemoryBeyondPlugin(Star):
                 done = sum(1 for item in results if item["ok"])
                 outcome = tidy.OUTCOME_APPLIED
                 message = f"自动应用了 {done} / {len(results)} 项修改"
-                self._invalidate_index_cache(cache_key)
-                self._invalidate_pinned(
-                    scope,
-                    [
-                        item["file"]
-                        for item in results
-                        if item.get("ok") and item.get("op") == "delete"
-                    ],
-                )
+                # 同样只为删除刷新快照；改写/合并等新内容由召回补充
+                deleted = [
+                    item["file"]
+                    for item in results
+                    if item.get("ok") and item.get("op") == "delete"
+                ]
+                if deleted:
+                    self._invalidate_index_cache(cache_key)
+                    self._invalidate_pinned(scope, deleted)
             # 计时从整理结束算起：这次自己写的文件不算下一轮的"新记忆"
             finished = time.time()
 
@@ -1814,11 +1819,18 @@ class MemoryBeyondPlugin(Star):
     def _invalidate_changes(
         self, umo: str, changes: list[tuple[str, str, str]]
     ) -> None:
-        """后台写入后作废受影响的索引快照。"""
-        scopes = {scope for scope, _, _ in changes}
-        if "session" in scopes:
+        """后台写入后只对删除作废开头块快照。
+
+        新建、追加、改写按 PLAN 3.8.1 不刷新快照：记忆不变时开头块逐轮
+        逐字不变，才能命中提示词缓存；新内容由每轮召回补充。删除没有
+        最新全文可附，必须立刻让已删内容从开头块消失。
+        """
+        deleted_scopes = {
+            scope for scope, _, op in changes if op == writer.OP_DELETE
+        }
+        if "session" in deleted_scopes:
             self._invalidate_index_cache(umo)
-        if "global" in scopes:
+        if "global" in deleted_scopes:
             self._invalidate_index_cache(None)
         deleted_people = [
             file
@@ -2449,10 +2461,10 @@ class MemoryBeyondPlugin(Star):
 
     @staticmethod
     def _format_parts(parts: dict) -> str:
-        """构成说明：系统提示词（其中插件开头块）→ 工具声明 → 历史 → 本轮输入 → 召回。"""
+        """构成说明：系统提示词 → 插件开头块 → 工具声明 → 历史 → 本轮输入 → 召回。"""
         return (
             f"　构成：系统提示词 {parts.get('system', 0)}"
-            f"（其中插件开头块 {parts.get('plugin', 0)}）"
+            f" + 插件开头块 {parts.get('plugin', 0)}"
             f" + 工具声明 {parts.get('tools', 0)}"
             f" + 历史 {parts.get('history', 0)}"
             f" + 本轮输入 {parts.get('prompt', 0)}"

@@ -48,6 +48,20 @@ def test_history_head_skips_leading_system_messages():
     assert context_stats.history_head([{"role": "system", "content": "x"}]) == ""
 
 
+def test_history_head_skips_platform_internal_messages():
+    contexts = [
+        {"role": "_checkpoint", "content": {"id": "ckpt-1"}},
+        {"role": "user", "content": "第一句"},
+        {"role": "assistant", "content": "好"},
+    ]
+    assert context_stats.history_head(contexts) == context_stats.message_fingerprint(
+        contexts[1]
+    )
+    # 内部记录 id 变化不会让开头指纹跟着变
+    changed = [{"role": "_checkpoint", "content": {"id": "ckpt-2"}}, *contexts[1:]]
+    assert context_stats.history_head(changed) == context_stats.history_head(contexts)
+
+
 def test_history_head_changes_after_truncation_or_summary():
     original = [
         {"role": "user", "content": "第一句"},
