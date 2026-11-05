@@ -15,6 +15,7 @@ def test_schema_has_exactly_the_remaining_configs():
         "enable_memory",
         "recall_max_files",
         "recall_full_files",
+        "memory_reminder_turns",
         "history_keep_days",
         "trash_keep_days",
         "enable_forgetting",
@@ -39,10 +40,24 @@ def test_recall_hint_has_no_model_selection():
 
 def test_enable_memory_hint_names_three_layers_and_current_tools():
     hint = load("_conf_schema.json")["enable_memory"]["hint"]
-    for name in ("memory_read", "memory_search"):
+    for name in (
+        "memory_read",
+        "memory_search",
+        "memory_write",
+        "memory_edit",
+        "memory_delete",
+    ):
         assert name in hint
     for layer in ("留言板", "小本本", "悄悄话"):
         assert layer in hint
+
+
+def test_reminder_turns_config_defaults_to_10_and_can_be_disabled():
+    schema = load("_conf_schema.json")["memory_reminder_turns"]
+    assert schema["default"] == 10
+    assert schema["type"] == "int"
+    assert "填 0" in schema["hint"]
+    assert "截断或压缩" in schema["hint"]
 
 
 def test_metadata_version_and_no_removed_features():

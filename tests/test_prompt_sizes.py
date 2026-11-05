@@ -14,8 +14,13 @@ from scripts import prompt_sizes  # noqa: E402
 
 def test_collect_sizes_has_required_fields():
     sizes = prompt_sizes.collect_sizes()
-    # 本项之后聊天模型只有读工具；写入工具由下一项加入
-    assert set(sizes["tools"]) == {"memory_read", "memory_search"}
+    assert set(sizes["tools"]) == {
+        "memory_read",
+        "memory_search",
+        "memory_write",
+        "memory_edit",
+        "memory_delete",
+    }
     assert sizes["guidance"] > 0
     assert sizes["tool_total"] == sum(
         item["description"] for item in sizes["tools"].values()
@@ -26,10 +31,15 @@ def test_collect_sizes_has_required_fields():
     assert sizes["chat_total"] == (
         sizes["guidance"] + sizes["tool_schema_total"]
     )
+    assert sizes["chat_side_total"] == (
+        sizes["chat_total"] + sizes["index_shell"] + sizes["recall_shell"]
+    )
     assert sizes["index_shell"] > 0
     assert sizes["recall_shell"] > 0
     assert sizes["within_limit"] is True
     assert sizes["chat_total"] <= 2000
+    # 3.8.8：记忆规范 + 开头块里的说明 + 5 个工具说明合计也不超过 2000
+    assert sizes["chat_side_total"] <= 2000
     assert "background_prompt" not in sizes
 
 
@@ -44,4 +54,5 @@ def test_cli_json_output():
     assert result.returncode == 0, result.stderr
     payload = json.loads(result.stdout)
     assert payload["chat_total"] <= 2000
+    assert payload["chat_side_total"] <= 2000
     assert payload["within_limit"] is True

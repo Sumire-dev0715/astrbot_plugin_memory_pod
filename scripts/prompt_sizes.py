@@ -7,7 +7,10 @@
   参数 description（模型实际收到的完整 schema）；
 - 开头块外壳与召回块外壳（块首数据声明、标题与标记，不含具体记忆正文）。
 
-`chat_total` = 记忆规范 + 工具完整 schema，验收线 2000 字。
+`chat_total` = 记忆规范 + 工具完整 schema（口径与 3.7.6 相同，验收线
+2000 字）。3.8.8 把开头块里的说明也算进聊天侧，所以另给
+`chat_side_total` = chat_total + 开头块外壳 + 召回块外壳，同样不超过
+2000 字；`within_limit` 同时检查两者，任何一个超出都会让脚本返回 1。
 
 用法：
     python scripts/prompt_sizes.py --json
@@ -134,6 +137,8 @@ def collect_sizes() -> dict:
     recall_shell = _recall_shell(recall, injection, prompts)
 
     chat_total = len(guidance) + tool_schema_total
+    # 3.8.8 的聊天侧还包括开头块里的说明（两块外壳），单独给一个合计
+    chat_side_total = chat_total + index_shell + recall_shell
     return {
         "guidance": len(guidance),
         "tools": tools,
@@ -142,7 +147,9 @@ def collect_sizes() -> dict:
         "index_shell": index_shell,
         "recall_shell": recall_shell,
         "chat_total": chat_total,
-        "within_limit": chat_total <= CHAT_LIMIT,
+        "chat_side_total": chat_side_total,
+        "within_limit": chat_total <= CHAT_LIMIT
+        and chat_side_total <= CHAT_LIMIT,
         "limit": CHAT_LIMIT,
     }
 
@@ -167,7 +174,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"召回块外壳：{sizes['recall_shell']} 字")
         print(
             f"聊天侧合计 chat_total：{sizes['chat_total']} 字"
-            f"（上限 {sizes['limit']}，{'通过' if sizes['within_limit'] else '超出'}）"
+            f"（上限 {sizes['limit']}）"
+        )
+        print(
+            f"加上开头块与召回块外壳 chat_side_total："
+            f"{sizes['chat_side_total']} 字"
+            f"（{'通过' if sizes['within_limit'] else '超出'}）"
         )
     return 0 if sizes["within_limit"] else 1
 

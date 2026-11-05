@@ -1,8 +1,8 @@
 """记忆写入的校验与落盘层：三层作用域的强制规则只在这里写一份。
 
-聊天模型的 memory_write / memory_edit / memory_delete（下一项）与留言板
-发布都经过这里，管理页的整理也复用同一套类型与长度口径。PLAN 3.8.3 的
-四条强制规则由代码执行，不靠模型自觉：
+聊天模型的 memory_write / memory_edit / memory_delete 与留言板发布都经过
+这里，管理页的整理也复用同一套类型与长度口径。PLAN 3.8.3 的四条强制
+规则由代码执行，不靠模型自觉：
 
 1. 悄悄话只能读写当前这段对话的：调用方只把本会话的 whisper store 放进
    `files_by_scope`，本模块没有按其他会话键解析作用域的入口；
@@ -82,6 +82,11 @@ class ApplyResult:
     skipped: list[str] = field(default_factory=list)
     # 实际写成功的 (scope, file, op)，供调用方作废开头块快照
     changes: list[tuple[str, str, str]] = field(default_factory=list)
+    # 落盘后的完整内容："scope/文件名" -> 内容；删除没有内容，不进这里。
+    # 调用方据此提示悬空链接与过长文件，不需要再读一遍磁盘。
+    written: dict[str, str] = field(default_factory=dict)
+    # 每条成功操作的落盘说明（含索引同步与体检提醒），顺序与 changes 一致
+    messages: list[str] = field(default_factory=list)
     message: str = ""
 
 
@@ -200,6 +205,9 @@ def validate_operations(
                     content=content,
                 )
             )
+            continue
+        if file == JOURNAL_TARGET:
+            skipped.append(f"{label}：日记只能通过 memory_edit 的 append 写入")
             continue
         file = normalize_file(file)
         problem = _file_problem(file)
@@ -359,6 +367,8 @@ async def apply_operations(
     applied = 0
     skipped: list[str] = []
     changes: list[tuple[str, str, str]] = []
+    written: dict[str, str] = {}
+    messages: list[str] = []
     for op in ops:
         try:
             report = await _apply_one(
@@ -369,7 +379,11 @@ async def apply_operations(
             report = memstore.WriteReport(False, f"写入失败（{type(exc).__name__}）")
         if report.ok:
             applied += 1
-            changes.append((op.scope, report.file or op.file, op.op))
+            actual = report.file or op.file
+            changes.append((op.scope, actual, op.op))
+            messages.append(report.message)
+            if report.content:
+                written[f"{op.scope}/{actual}"] = report.content
         else:
             skipped.append(f"{op.scope}/{op.file}：{report.message}")
     result = ApplyResult(
@@ -377,6 +391,8 @@ async def apply_operations(
         applied=applied,
         skipped=skipped,
         changes=changes,
+        written=written,
+        messages=messages,
         message=f"写入 {applied} / {len(ops)} 条操作",
     )
     if skipped:

@@ -148,6 +148,7 @@ pkg_memstore = importlib.import_module(f"{PACKAGE}.core.memstore")
 pkg_prompts = importlib.import_module(f"{PACKAGE}.core.prompts")
 pkg_recall = importlib.import_module(f"{PACKAGE}.core.recall")
 pkg_registry = importlib.import_module(f"{PACKAGE}.core.registry")
+pkg_reminder = importlib.import_module(f"{PACKAGE}.core.reminder")
 pkg_tidy = importlib.import_module(f"{PACKAGE}.core.tidy")
 pkg_writer = importlib.import_module(f"{PACKAGE}.core.writer")
 

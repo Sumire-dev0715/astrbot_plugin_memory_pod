@@ -17,12 +17,18 @@ from support import (
 )
 
 
-def test_only_read_tools_registered_this_round():
+def test_five_memory_tools_registered():
     names = {
         getattr(value, "__astrbot_llm_tool__", None)
         for value in vars(main.MemoryPodPlugin).values()
     }
-    assert {name for name in names if name} == {"memory_read", "memory_search"}
+    assert {name for name in names if name} == {
+        "memory_read",
+        "memory_search",
+        "memory_write",
+        "memory_edit",
+        "memory_delete",
+    }
 
 
 def test_board_readable_by_every_conversation(tmp_path):

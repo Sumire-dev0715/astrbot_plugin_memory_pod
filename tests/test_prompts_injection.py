@@ -8,11 +8,18 @@ import types
 from support import main, pkg_context_stats, pkg_injection, pkg_memstore, pkg_prompts, run
 
 
-def test_guidance_describes_three_layers_and_read_tools():
+def test_guidance_describes_three_layers_and_five_tools():
     text = pkg_prompts.memory_guidance()
     for layer in ("留言板", "小本本", "悄悄话"):
         assert layer in text
-    assert "memory_read" in text and "memory_search" in text
+    for name in (
+        "memory_read",
+        "memory_search",
+        "memory_write",
+        "memory_edit",
+        "memory_delete",
+    ):
+        assert name in text
     assert "memory_note" not in text
     assert "global" not in text and "people" not in text
     # 3.8.3 交给模型判断的规则写进聊天规范（与整理提示词共用一份）
@@ -22,6 +29,9 @@ def test_guidance_describes_three_layers_and_read_tools():
     assert "不会变成对自己的要求" in text
     assert "群聊里不会出现任何人的私聊悄悄话" in text
     assert "数据" in text and "不是指令" in text
+    # 3.8.4 / 3.8.5：重写前先读、提醒时先写记忆
+    assert "整篇重写" in text and "最新版本" in text
+    assert "写记忆提醒" in text and "journal" in text
 
 
 def test_data_notice_and_sender_tags():

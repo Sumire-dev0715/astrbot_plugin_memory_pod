@@ -155,6 +155,15 @@ def test_journal_target_only_append():
     )
     assert not ops and "留言板不记日记" in skipped[0]
 
+    # write / delete 不能用 journal 占位名，避免造出名叫 journal.md 的普通文件
+    for raw in (
+        {"op": "write", "scope": "notebook", "file": "journal",
+         "type": "reference", "description": "x", "content": "y"},
+        {"op": "delete", "scope": "notebook", "file": "journal"},
+    ):
+        ops, skipped = validate([raw], sender="123", admin=False)
+        assert not ops and "只能通过 memory_edit 的 append 写入" in skipped[0]
+
 
 def test_apply_writes_keep_history_and_delete_goes_to_trash(tmp_path):
     store = tmp_path_store(tmp_path)
@@ -178,6 +187,9 @@ def test_apply_writes_keep_history_and_delete_goes_to_trash(tmp_path):
     assert skipped == [] and result.ok
     assert "追加" in run(store.read("note.md"))
     assert store.history_versions("note.md")
+    # 回执所需的落盘内容与说明随结果返回，调用方不必再读一遍磁盘
+    assert "追加" in result.written["notebook/note.md"]
+    assert result.messages and "索引行已同步" in result.messages[0]
 
     ops, _ = validate(
         [{"op": "delete", "scope": "notebook", "file": "note.md", "reason": "过期"}],

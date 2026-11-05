@@ -176,13 +176,67 @@ def render_profiles(views: list[MemoryView], now: float | None = None) -> str:
 
 @dataclass(frozen=True)
 class BoardNotice:
-    """留言板的一条告示；全文注入时带署名。"""
+    """留言板的一条告示；全文注入时带署名。
+
+    digest 是这条告示在磁盘上的完整内容摘要（含 frontmatter）。开头块把
+    全文发给模型后，main.py 用它记"模型看过这一版"；整篇重写前据此判断
+    文件是否在看过之后被别处改过（PLAN 3.8.4）。
+    """
 
     file: str
     title: str
     body: str
     signature: str = ""
     written: float = 0.0
+    digest: str = ""
+
+
+def _split_board_notices(
+    notices: list[BoardNotice],
+    limit: int,
+) -> tuple[list[tuple[BoardNotice, str]], list[BoardNotice]]:
+    """把告示分成（能全文注入的, 只列标题的）；顺序从新到旧。
+
+    全文段一旦放不下，它和更旧的告示全部只列标题，不再让后面的短告示
+    插队——否则注入顺序会和新旧顺序不一致。
+    """
+    ordered = sorted(
+        notices, key=lambda item: (item.written, item.file), reverse=True
+    )
+    full: list[tuple[BoardNotice, str]] = []
+    overflow: list[BoardNotice] = []
+    # 标题行与块之间的空行也算进上限
+    used = len(BOARD_HEADING) + 2
+    overflow_started = False
+    for notice in ordered:
+        if overflow_started:
+            overflow.append(notice)
+            continue
+        title = notice.title or notice.file[: -len(memstore.MEMORY_FILE_SUFFIX)]
+        title_line = f"标题：{title}"
+        signature_line = f"署名：{notice.signature}" if notice.signature else ""
+        body = (notice.body or "").strip()
+        rendered = "\n".join(
+            part
+            for part in (f"### {notice.file}", title_line, signature_line, body)
+            if part
+        )
+        separator = 2 if full else 0
+        if used + separator + len(rendered) > limit:
+            overflow_started = True
+            overflow.append(notice)
+            continue
+        used += separator + len(rendered)
+        full.append((notice, rendered))
+    return full, overflow
+
+
+def board_full_notices(
+    notices: list[BoardNotice], limit: int = BOARD_LIMIT_CHARS
+) -> list[BoardNotice]:
+    """开头块里真正带全文的告示（PLAN 3.8.4 的"看过的全文"）。"""
+    full, _ = _split_board_notices(notices, limit)
+    return [notice for notice, _ in full]
 
 
 def render_board_notices(
@@ -197,37 +251,10 @@ def render_board_notices(
     """
     if not notices:
         return ""
-    ordered = sorted(
-        notices, key=lambda item: (item.written, item.file), reverse=True
-    )
-    full: list[str] = []
-    overflow: list[BoardNotice] = []
-    # 标题行与块之间的空行也算进 2000 字；全文段一旦放不下，更旧的告示
-    # 全部只列标题，不再让后面的短告示插队。
-    used = len(BOARD_HEADING) + 2
-    overflow_started = False
-    for notice in ordered:
-        if overflow_started:
-            overflow.append(notice)
-            continue
-        title = notice.title or notice.file[: -len(memstore.MEMORY_FILE_SUFFIX)]
-        block_parts = [f"### {notice.file}"]
-        title_line = f"标题：{title}"
-        signature_line = f"署名：{notice.signature}" if notice.signature else ""
-        body = (notice.body or "").strip()
-        rendered = "\n".join(
-            part for part in (block_parts[0], title_line, signature_line, body) if part
-        )
-        separator = 2 if full else 0
-        if used + separator + len(rendered) > limit:
-            overflow_started = True
-            overflow.append(notice)
-            continue
-        used += separator + len(rendered)
-        full.append(rendered)
+    full, overflow = _split_board_notices(notices, limit)
     lines = [BOARD_HEADING]
     if full:
-        lines.append("\n\n".join(full))
+        lines.append("\n\n".join(rendered for _, rendered in full))
     if overflow:
         if full:
             lines.append("其余告示只列标题，需要时用 memory_read 读取：")

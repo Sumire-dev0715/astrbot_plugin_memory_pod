@@ -55,8 +55,10 @@ from .core import (
     prompts,
     recall,
     registry,
+    reminder,
     tidy,
     tokens,
+    turns,
     writer,
 )
 from .web_api import MemoryDashboard
@@ -76,8 +78,11 @@ MAX_RUNTIME_SESSIONS = 256
 # 遗忘扫描：每个作用域目录至多每隔这么久扫一次（秒）；默认多久没用到算遗忘（天）
 FORGET_SWEEP_INTERVAL = 6 * 3600
 FORGET_DEFAULT_DAYS = 90
-# 召回块的 _no_save 数据声明；同一条请求被重复处理时据此避免重复追加。
+# 召回块与写记忆提醒的 _no_save 数据声明；同一条请求被重复处理时据此避免重复追加。
 RECALL_MARKER = recall.RECALL_BLOCK_OPEN
+REMINDER_MARKER = reminder.REMINDER_BLOCK_OPEN
+# 写记忆提醒的默认轮数间隔（配置 memory_reminder_turns）
+DEFAULT_REMINDER_TURNS = 10
 
 
 def _content_sha1(content: str) -> str:
@@ -124,6 +129,15 @@ class RuntimeSession:
     index_pinned: dict[str, str] = field(default_factory=dict)
     # 开头块索引里实际出现过的文件引用；指针行据此决定是否附描述
     index_refs: set[str] = field(default_factory=set)
+    # 构建本次开头块时真正带全文的文件：ref -> 内容 sha1
+    index_seen: dict[str, str] = field(default_factory=dict)
+    # 模型看过全文的记忆：ref -> 内容 sha1。整篇重写前必须命中当前内容
+    #（PLAN 3.8.4），换对话或重置时清空。
+    seen: dict[str, str] = field(default_factory=dict)
+    # 本会话经过的对话请求数；写记忆提醒按它判断"每 N 轮"
+    turn_count: int = 0
+    # 上下文触发的提醒已经发过；AstrBot 截断/压缩后或回到安全水位后复位
+    reminder_sent: bool = False
     # 构建快照时历史开头的指纹；None 表示当时还没有历史，下一轮补记
     history_head: str | None = None
     # 最近一次请求的估算分项、总额与提供商上报值（供 /mb_status 与面板）
@@ -138,6 +152,7 @@ class RuntimeSession:
         self.index_pin_key = ()
         self.index_pinned = {}
         self.index_refs = set()
+        self.index_seen = {}
         self.history_head = None
 
 
@@ -540,21 +555,25 @@ class MemoryPodPlugin(Star):
         # 只读地看一眼 AstrBot 交给我们的历史：插件不改写 req.contexts
         contexts = [m for m in (req.contexts or []) if isinstance(m, dict)]
 
-        # ---- 对话切换 / 重置：开头块快照作废，本轮从磁盘重读 ----
+        # ---- 对话切换 / 重置：开头块快照与"看过"记录作废，本轮从磁盘重读 ----
         cid = await self._conversation_id(event, req)
         if cid != rt.cid or not contexts:
             rt.cid = cid
             rt.clear_index()
+            # 新对话的模型没有上一段对话的记忆，整篇重写前要重新读
+            rt.seen.clear()
 
         # ---- AstrBot 截断或压缩改动了历史开头：快照同样作废 ----
         # 这时提示词缓存本来就已经失效，重建开头块不会额外损失缓存。
         head = context_stats.history_head(contexts)
+        truncated = False
         if rt.index_loaded:
             if rt.history_head is None:
                 # 建快照时还没有历史；第一段历史出现时补记锚点，不重建
                 if head:
                     rt.history_head = head
             elif head != rt.history_head:
+                truncated = True
                 logger.info(
                     LOG_PREFIX
                     + f"会话 {umo} 的历史开头被 AstrBot 截断或压缩改动，"
@@ -626,6 +645,57 @@ class MemoryPodPlugin(Star):
         )
         # 统计随状态落盘，重启/重载插件后 /mb_status 与面板仍能看到上一次的构成
         await self._save_stats(umo)
+
+        # ---- 写记忆提醒：每 N 轮一次，以及 AstrBot 截断/压缩之前一次 ----
+        if memory_on:
+            await self._maybe_remind(
+                req,
+                rt,
+                umo,
+                truncated=truncated,
+                estimate=rt.stats.estimate,
+            )
+
+    async def _maybe_remind(
+        self,
+        req: ProviderRequest,
+        rt: RuntimeSession,
+        umo: str,
+        *,
+        truncated: bool,
+        estimate: int,
+    ) -> None:
+        """按 PLAN 3.8.5 决定本轮要不要加写记忆提醒。
+
+        提醒与召回块放在同一位置（_no_save 附加内容），不进会话历史。
+        上下文触发的提醒发过一次后不再每轮重复；AstrBot 真的截断或压缩了
+        历史、或上下文回到安全水位后复位，下一次逼近时再提醒。
+        """
+        rt.turn_count += 1
+        if truncated:
+            rt.reminder_sent = False
+        every = max(0, self._int("memory_reminder_turns", DEFAULT_REMINDER_TURNS))
+        window, _ = await self._resolve_window_for(umo)
+        plan = reminder.plan_reminder(
+            turn_count=rt.turn_count,
+            every=every,
+            estimate=estimate,
+            window=window,
+            turns=turns.conversation_turns(req.contexts or []),
+            turn_limit=self._astrbot_turn_limit(umo),
+        )
+        if plan.context_reasons and rt.reminder_sent:
+            # 这次截断/压缩之前已经提醒过，只保留每 N 轮的提醒
+            plan = reminder.ReminderPlan(periodic=plan.periodic)
+        if not plan.context_reasons:
+            rt.reminder_sent = False
+        if not plan.wanted:
+            return
+        block = reminder.build_block(plan, every)
+        if block:
+            self._attach_temp_part(req, block, REMINDER_MARKER)
+        if plan.context_reasons:
+            rt.reminder_sent = True
 
     @staticmethod
     def _attach_temp_part(req: ProviderRequest, block: str, marker: str) -> None:
@@ -716,12 +786,15 @@ class MemoryPodPlugin(Star):
         pin_key = self._pin_profile_key(event)
         if rt.index_loaded and rt.index_pin_key == pin_key:
             if record_usage:
-                # 钉在开头块的档案与留言板每轮都真的发给了模型，使用统计也要记
+                # 钉在开头块的档案与留言板每轮都真的发给了模型，使用统计也要记；
+                # 模型也确实看过这些全文，整篇重写前不必再读一遍（PLAN 3.8.4）
                 await self._note_pinned_usage(rt, event)
                 await self._note_board_usage()
+                rt.seen.update(rt.index_seen)
             return rt.index_block
         umo = str(getattr(event, "unified_msg_origin", "") or "")
-        board_text = await self._board_text()
+        notices = await self._board_notices()
+        board_text = injection.render_board_notices(notices)
         notebook_snap = await self._notebook_scope(event).load_index()
         whisper_snap = await self._whisper_scope(umo).load_index()
         profiles: list[injection.MemoryView] = []
@@ -744,9 +817,21 @@ class MemoryPodPlugin(Star):
             f"{memstore.SCOPE_WHISPER}/{name}"
             for name in injection.indexed_names(whisper_snap.text)
         }
+        # 开头块里真正带全文的条目：模型看过这一版，整篇重写前不必再读。
+        # 只列标题、或正文被单条上限瘦身的条目不算。
+        seen: dict[str, str] = {}
+        for notice in injection.board_full_notices(notices):
+            if notice.digest:
+                seen[f"{memstore.SCOPE_BOARD}/{notice.file}"] = notice.digest
+        for view in profiles:
+            digest = pinned.get(view.ref, "")
+            if digest and not view.truncated:
+                seen[view.ref] = digest
+        rt.index_seen = seen
         if record_usage:
             await self._note_pinned_usage(rt, event)
             await self._note_board_usage()
+            rt.seen.update(seen)
         return rt.index_block
 
     async def _note_board_usage(self) -> None:
@@ -760,8 +845,8 @@ class MemoryPodPlugin(Star):
         if names:
             await asyncio.to_thread(store.note_used, names)
 
-    async def _board_text(self) -> str:
-        """留言板开头段：全部告示从新到旧全文注入，超出 2000 字只列标题。"""
+    async def _board_notices(self) -> list[injection.BoardNotice]:
+        """读全部留言板告示，带磁盘内容摘要供"看过"记录使用。"""
         store = self._board_scope()
         headers = await asyncio.to_thread(store.headers)
         notices: list[injection.BoardNotice] = []
@@ -777,9 +862,10 @@ class MemoryPodPlugin(Star):
                     body=doc.body,
                     signature=doc.signature,
                     written=header.updated,
+                    digest=_content_sha1(content),
                 )
             )
-        return injection.render_board_notices(notices)
+        return notices
 
     def _pin_profile_key(self, event: AstrMessageEvent) -> tuple:
         """私聊人物档案的快照签名；不是私聊时为空元组（不钉档案）。
@@ -920,6 +1006,14 @@ class MemoryPodPlugin(Star):
                 store = stores.get(scope)
                 if store is not None:
                     await asyncio.to_thread(store.note_used, [file])
+            if rt is not None:
+                # 本轮真正带全文的召回条目也算"模型看过这一版"；被单条上限
+                # 瘦身的条目只给了一部分，不能据此整篇重写（PLAN 3.8.4）
+                for section in plan.sections:
+                    if not section.truncated:
+                        rt.seen[section.item.ref] = _content_sha1(
+                            section.item.content
+                        )
             return plan.block
         except Exception:  # noqa: BLE001 - 召回是锦上添花，失败不影响本轮
             logger.warning(LOG_PREFIX + f"会话 {umo} 相关记忆召回失败", exc_info=True)
@@ -1315,7 +1409,7 @@ class MemoryPodPlugin(Star):
         """读取长期记忆文件的完整内容。
 
         Args:
-            scope(string): 作用域：board（留言板）、notebook（这台机器人的小本本）或 whisper（当前这段对话的悄悄话）
+            scope(string): 作用域：board（留言板）、notebook（小本本）或 whisper（当前对话的悄悄话）
             file(string): 记忆文件名，如 user-12345678.md；省略时读当前作用域的 MEMORY.md
         """
         if not self._bool("enable_memory", True):
@@ -1348,6 +1442,10 @@ class MemoryPodPlugin(Star):
         if not restored:
             # 恢复时已经记过一次使用
             await asyncio.to_thread(store.note_used, [file])
+        # 读过最新版本：整篇重写前校验用（PLAN 3.8.4）
+        umo = str(getattr(event, "unified_msg_origin", "") or "")
+        rt = await self._runtime(umo)
+        rt.seen[f"{scope}/{file}"] = _content_sha1(content)
         # 时效按 frontmatter 的 updated 戳算；老文件没有戳才退回 mtime
         written = memstore.parse_stamp(
             memstore.parse_memory(content).updated
@@ -1484,6 +1582,339 @@ class MemoryPodPlugin(Star):
         """已遗忘结果沿用原来的单行标注与片段格式。"""
         snippet = hit.snippets[0] if hit.snippets else "（正文匹配）"
         return f"[{label}·已遗忘] {hit.file}: {snippet}"
+
+    # ------------------------------------------------------------ 写工具
+
+    def _tool_disabled(self) -> str:
+        if not self._bool("enable_memory", True):
+            return "记忆功能已在插件配置中停用。"
+        return ""
+
+    @staticmethod
+    async def _tool_files(store: memstore.ScopeStore) -> set[str]:
+        """作用域里当前在册的文件名；写入层据此判断"新建"还是"已有"。"""
+        return set(await asyncio.to_thread(store.list_files))
+
+    @staticmethod
+    def _existing_name(files: set[str], name: str) -> str:
+        """在册文件里与 name 同名的那个；大小写不敏感文件系统上防止换个大小写绕过校验。"""
+        lowered = name.lower()
+        for item in files:
+            if item.lower() == lowered:
+                return item
+        return ""
+
+    async def _rewrite_problem(
+        self,
+        event: AstrMessageEvent,
+        store: memstore.ScopeStore,
+        scope: str,
+        name: str,
+        files: set[str],
+    ) -> str:
+        """整篇重写已有文件前必须读过它的最新版本（PLAN 3.8.4）。
+
+        按内容哈希判断：memory_read、开头块或召回块里真正带过全文都算
+        "看过"；文件在看过之后被别处改过就不匹配，同样拒绝。replace 与
+        append 是局部修改，不受这条限制。
+        """
+        existing = self._existing_name(files, name)
+        if not existing:
+            return ""
+        content = await store.read(existing)
+        if content is None:
+            return (
+                f"{scope}/{existing} 存在但读不出来，无法确认你读过最新版本；"
+                "请先用 memory_read 读取。"
+            )
+        umo = str(getattr(event, "unified_msg_origin", "") or "")
+        rt = await self._runtime(umo)
+        if rt.seen.get(f"{scope}/{existing}") != _content_sha1(content):
+            return (
+                f"整篇重写 {scope}/{existing} 前必须先读过它的最新版本："
+                f"请先调用 memory_read（scope={scope}，file={existing}）确认当前内容；"
+                "如果它在你读过之后被别处改过，也要先重读。"
+            )
+        return ""
+
+    def _bot_name(self, event: AstrMessageEvent) -> str:
+        """留言板代发署名里的机器人名：优先平台实例上的名称，取不到用平台名。"""
+        try:
+            getter = getattr(event, "get_platform_id", None)
+            platform_id = str(getter() if callable(getter) else "")
+        except Exception:  # noqa: BLE001
+            platform_id = ""
+        try:
+            for inst in self._platform_insts():
+                meta = inst.meta()
+                if str(getattr(meta, "id", "") or "") != platform_id:
+                    continue
+                for attr in ("bot_name", "self_name", "self_nickname"):
+                    value = str(getattr(inst, attr, "") or "").strip()
+                    if value:
+                        return value
+        except Exception:  # noqa: BLE001 - 平台实现不可控，取不到就退回平台名
+            pass
+        try:
+            name = str(event.get_platform_name() or "").strip()
+        except Exception:  # noqa: BLE001
+            name = ""
+        return name or "机器人"
+
+    async def _visible_files(self, event: AstrMessageEvent) -> set[str]:
+        """当前这条消息能看到的记忆文件：留言板、小本本与本对话悄悄话。"""
+        umo = str(getattr(event, "unified_msg_origin", "") or "")
+        stores = [self._board_scope(), self._notebook_scope(event)]
+        if umo:
+            stores.append(self._whisper_scope(umo))
+        names: set[str] = set()
+        for store in stores:
+            names.update(await asyncio.to_thread(store.list_files))
+            names.update(store.forgotten_files())
+        return names
+
+    async def _receipt_hints(
+        self, event: AstrMessageEvent, file: str, content: str
+    ) -> list[str]:
+        """写入回执的两条提醒：悬空的 [[链接]]、过长的文件（PLAN 3.8.4）。"""
+        hints: list[str] = []
+        doc = memstore.parse_memory(content)
+        missing = insights.dangling_links(
+            memstore.extract_links(doc.body), await self._visible_files(event)
+        )
+        if missing:
+            hints.append(
+                "提醒：正文里的 "
+                + "、".join(f"[[{name}]]" for name in missing)
+                + " 在可见记忆里没有对应文件，需要时补上或改成已有文件名。"
+            )
+        reasons = insights.long_file_reasons(
+            file, doc.type, doc.body, len(content.encode("utf-8"))
+        )
+        if reasons:
+            hints.append(
+                f"提醒：{file} 已经很长（{'，'.join(reasons)}），"
+                "建议按小节拆分或精简。"
+            )
+        return hints
+
+    @staticmethod
+    def _failed_receipt(result: writer.ApplyResult) -> str:
+        return "写入失败：" + ("；".join(result.skipped) or "未知原因")
+
+    @filter.llm_tool(name="memory_write")
+    async def memory_write(
+        self,
+        event: AstrMessageEvent,
+        scope: str,
+        file: str,
+        type: str,
+        description: str,
+        content: str,
+    ) -> str:
+        """新建记忆文件，或整篇重写已有文件；frontmatter 与索引由插件生成。
+
+        整篇重写已有文件前，必须先读过它的最新版本（memory_read 或开头块、
+        召回块里带的全文）；留言板只有管理员能写，署名由插件自动生成。
+
+        Args:
+            scope(string): 作用域：board（留言板）、notebook（小本本）或 whisper（当前对话的悄悄话）
+            file(string): 记忆文件名，如 project-alpha.md；可省略 .md
+            type(string): 类型：user、feedback、project 或 reference
+            description(string): 一句话摘要，写清什么时候该读全文
+            content(string): 完整正文，不含 frontmatter
+        """
+        disabled = self._tool_disabled()
+        if disabled:
+            return disabled
+        store, scope, refused = self._tool_store(event, scope)
+        if store is None:
+            return refused
+        raw_file = (file or "").strip()
+        if raw_file.lower() == writer.JOURNAL_TARGET:
+            return (
+                "写日记请用 memory_edit（scope=notebook 或 whisper，"
+                "file=journal，mode=append），具体写到哪一篇由插件决定。"
+            )
+        name = writer.normalize_file(raw_file)
+        files = await self._tool_files(store)
+        problem = await self._rewrite_problem(event, store, scope, name, files)
+        if problem:
+            return problem
+        sender_id, sender_name = self._sender_identity(event)
+        op = {
+            "op": writer.OP_WRITE,
+            "scope": scope,
+            "file": name,
+            "type": type,
+            "description": description,
+            "content": content,
+        }
+        if scope == memstore.SCOPE_BOARD:
+            # 留言板告示必须带署名：机器人代发时由插件生成（PLAN 3.8.3）
+            op["signature"] = writer.delegated_signature(
+                sender_name, self._bot_name(event)
+            )
+        ops, skipped = writer.validate_operations(
+            [op],
+            files_by_scope={scope: files},
+            sender=sender_id,
+            admin=self._is_admin_event(event),
+        )
+        if not ops:
+            return skipped[0] if skipped else "写入未通过校验。"
+        result = await writer.apply_operations(
+            {scope: store},
+            ops,
+            actor=self._event_actor(event),
+            source=sender_id,
+        )
+        if not result.ok:
+            return self._failed_receipt(result)
+        actual = result.changes[0][1]
+        new_file = not self._existing_name(files, name)
+        head = f"已写入 {scope}/{actual}（{'新建' if new_file else '整篇重写'}）"
+        detail = result.messages[0] if result.messages else result.message
+        lines = [head + "。" + detail]
+        lines.extend(
+            await self._receipt_hints(
+                event, actual, result.written.get(f"{scope}/{actual}", "")
+            )
+        )
+        return "\n".join(lines)
+
+    @filter.llm_tool(name="memory_edit")
+    async def memory_edit(
+        self,
+        event: AstrMessageEvent,
+        scope: str,
+        file: str,
+        mode: str = "append",
+        old_text: str = "",
+        new_text: str = "",
+        description: str = "",
+    ) -> str:
+        """局部修改已有记忆：精确替换、追加，或替换某个小节的正文。
+
+        replace 的 old_text 必须在文件里恰好出现一次；append 追加到末尾，
+        或 old_text 指定的小节末尾；section 用 new_text 替换 old_text 指定
+        小节的正文。file 填 journal 表示当前这一篇日记（只能 append），
+        具体文件由插件决定。
+
+        Args:
+            scope(string): 作用域：board（留言板）、notebook（小本本）或 whisper（当前对话的悄悄话）
+            file(string): 记忆文件名，可省略 .md；填 journal 表示当前这一篇日记
+            mode(string): replace / append / section，默认 append
+            old_text(string): replace 的原文；append、section 的小节标题（append 可空）
+            new_text(string): 新内容；append 与日记是追加的正文
+            description(string): 可选，同时更新一句话摘要
+        """
+        disabled = self._tool_disabled()
+        if disabled:
+            return disabled
+        store, scope, refused = self._tool_store(event, scope)
+        if store is None:
+            return refused
+        raw_file = (file or "").strip()
+        is_journal = raw_file.lower() == writer.JOURNAL_TARGET
+        name = writer.JOURNAL_TARGET if is_journal else writer.normalize_file(raw_file)
+        files = await self._tool_files(store)
+        op = {
+            "op": writer.OP_EDIT,
+            "scope": scope,
+            "file": name,
+            "mode": mode,
+            "old": old_text,
+            "new": new_text,
+            "description": description,
+        }
+        if is_journal:
+            # 写入层按 content 收日记正文；模型给的参数是 new_text
+            op["content"] = new_text
+        sender_id, _ = self._sender_identity(event)
+        ops, skipped = writer.validate_operations(
+            [op],
+            files_by_scope={scope: files},
+            sender=sender_id,
+            admin=self._is_admin_event(event),
+        )
+        if not ops:
+            return skipped[0] if skipped else "修改未通过校验。"
+        result = await writer.apply_operations(
+            {scope: store},
+            ops,
+            actor=self._event_actor(event),
+            source=sender_id,
+        )
+        if not result.ok:
+            return self._failed_receipt(result)
+        actual = result.changes[0][1]
+        head = f"已写日记 {scope}/{actual}" if is_journal else f"已修改 {scope}/{actual}"
+        detail = result.messages[0] if result.messages else result.message
+        lines = [head + "。" + detail]
+        lines.extend(
+            await self._receipt_hints(
+                event, actual, result.written.get(f"{scope}/{actual}", "")
+            )
+        )
+        return "\n".join(lines)
+
+    @filter.llm_tool(name="memory_delete")
+    async def memory_delete(
+        self,
+        event: AstrMessageEvent,
+        scope: str,
+        file: str,
+        reason: str = "",
+    ) -> str:
+        """删除记忆文件：文件移入回收站，原因记进审计。
+
+        Args:
+            scope(string): 作用域：board（留言板）、notebook（小本本）或 whisper（当前对话的悄悄话）
+            file(string): 要删除的记忆文件名，可省略 .md
+            reason(string): 删除原因，写进审计记录
+        """
+        disabled = self._tool_disabled()
+        if disabled:
+            return disabled
+        store, scope, refused = self._tool_store(event, scope)
+        if store is None:
+            return refused
+        name = writer.normalize_file((file or "").strip())
+        files = await self._tool_files(store)
+        sender_id, _ = self._sender_identity(event)
+        ops, skipped = writer.validate_operations(
+            [
+                {
+                    "op": writer.OP_DELETE,
+                    "scope": scope,
+                    "file": name,
+                    "reason": reason,
+                }
+            ],
+            files_by_scope={scope: files},
+            sender=sender_id,
+            admin=self._is_admin_event(event),
+        )
+        if not ops:
+            return skipped[0] if skipped else "删除未通过校验。"
+        result = await writer.apply_operations(
+            {scope: store},
+            ops,
+            actor=self._event_actor(event),
+            source=sender_id,
+        )
+        if not result.ok:
+            return self._failed_receipt(result)
+        actual = result.changes[0][1]
+        lines = [
+            f"已删除 {scope}/{actual}，已移入回收站，可恢复；"
+            "对应索引行已同步移除。"
+        ]
+        reason = " ".join((reason or "").split())
+        if reason:
+            lines.append(f"原因：{reason}")
+        return "\n".join(lines)
 
     # ============================================================ 管理指令
 

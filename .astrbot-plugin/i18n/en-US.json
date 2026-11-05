@@ -7,7 +7,7 @@
   "config": {
     "enable_memory": {
       "description": "Enable long-term memory",
-      "hint": "Injects the memory opening block and gives the chat model memory_read / memory_search to read the three layers (write tools follow in the next step). Memories have three layers: the notice board (visible to every chat, written by admins), the notebook (shared by every group and private chat of this bot), and whispers (only the current conversation). When turned off, saved memories stay on disk; the bot just stops reading and writing them."
+      "hint": "Injects the memory opening block and gives the chat model memory_read / memory_search to read and memory_write / memory_edit / memory_delete to write the three layers. Memories have three layers: the notice board (visible to every chat, written by admins), the notebook (shared by every group and private chat of this bot), and whispers (only the current conversation). When turned off, saved memories stay on disk; the bot just stops reading and writing them."
     },
     "recall_max_files": {
       "description": "Max memories recalled per turn",
@@ -16,6 +16,10 @@
     "recall_full_files": {
       "description": "Recalled files attached in full per turn",
       "hint": "Each turn, the most relevant few non-identity recalled files are attached in full; the rest are collapsed into a single pointer line to read with memory_read when needed. Identity files (the sender, people mentioned with @, and so on) in the notebook are always attached in full, do not use these slots, and still count against the per-file 3,000-character and 9,000-character total budgets. Set it to at least \"Max memories recalled per turn\" to attach every recalled file in full. Default 2."
+    },
+    "memory_reminder_turns": {
+      "description": "Remind the model to write memory every N turns",
+      "hint": "Every this many turns, remind the model in the request to review the recent conversation and write down what is worth keeping long-term. Default 10; 0 turns it off. One extra reminder is added right before AstrBot truncates or compresses the context (at most once per truncation or compression)."
     },
     "history_keep_days": {
       "description": "History retention (days)",

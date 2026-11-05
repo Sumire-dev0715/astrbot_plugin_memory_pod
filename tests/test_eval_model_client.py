@@ -73,7 +73,7 @@ def _reply(tool_call: bool = False) -> dict:
                     "id": "call_1",
                     "type": "function",
                     "function": {
-                        "name": "memory_note",
+                        "name": "memory_write",
                         "arguments": json.dumps({"content": "记住"}, ensure_ascii=False),
                     },
                 }
@@ -115,7 +115,7 @@ def test_client_retries_5xx_and_parses_tool_calls():
     assert server.paths == ["/v1/chat/completions", "/v1/chat/completions"]
     assert server.auth_headers[0] == "Bearer sk-local-secret"
     assert reply.content == ""
-    assert reply.tool_calls[0].name == "memory_note"
+    assert reply.tool_calls[0].name == "memory_write"
     assert reply.tool_calls[0].arguments == {"content": "记住"}
     assert reply.prompt_tokens == 12
 
