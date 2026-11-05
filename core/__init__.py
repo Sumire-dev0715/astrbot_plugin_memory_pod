@@ -8,6 +8,5 @@
     insights.py      —— 小节替换、搜索排序与片段、悬空链接与长文件提醒
     prompts.py       —— 注入块、system prompt 规范
     injection.py     —— 注入视图：去 frontmatter、头尾瘦身、标题与档案区
-    pending.py       —— 待整理记录：每轮对话的临时缓冲与上限
-    writer.py        —— 后台整理：共享写入规则、操作校验、写入与日志分段
+    writer.py        —— 写入层：三层作用域的强制规则、操作校验与落盘
 """

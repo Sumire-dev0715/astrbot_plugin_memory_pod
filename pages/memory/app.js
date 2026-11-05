@@ -5,18 +5,15 @@
   const I18N_PREFIX = "pages.memory.";
   const SVG_NS = "http://www.w3.org/2000/svg";
   const TYPES = ["user", "feedback", "project", "reference", "journal"];
-  const PARTS = ["system", "tools", "history", "prompt", "recall"];
-  const FILE_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,120}\.md$/;
-  const FRONT_RE = /^---\s*\n([\s\S]*?)\n---\s*\n?/;
-  const LINK_RE = /\[\[([^\[\]\n]{1,120})\]\]/g;
-  const KIND_ICON = { group: "group", private: "user", other: "chat" };
-  // 与 core/sharing.SHARED_KEY 一致：共享人物空间的保留目录名
-  const SHARED_KEY = "_shared";
+  const PARTS = ["system", "plugin", "tools", "history", "prompt", "recall"];
+  const SCOPES = ["board", "notebook", "whisper"];
+  // "记住上次填的署名"的本地存储键
+  const SIGNATURE_KEY = "memoryPod.boardSignature";
 
   // 简体中文文案；其他语言由 .astrbot-plugin/i18n 提供，缺失时回落到这里
   const ZH = {
     title: "记忆管理",
-    subtitle: "查看与编辑机器人记住的内容",
+    subtitle: "留言板、小本本与悄悄话",
     refresh: "刷新",
     filterPlaceholder: "搜索会话名称、ID、备注",
     filterAll: "全部",
@@ -24,69 +21,64 @@
     kindGroup: "群聊",
     kindPrivate: "私聊",
     kindOther: "其他",
-    selfMemory: "机器人自身",
-    globalTitle: "全局记忆",
-    globalSub: "所有会话共享",
-    peopleLabel: "人物记忆",
-    peopleTitle: "人物记忆 · {platform}",
-    peopleSub: "同一平台所有会话共享，一人一个文件",
-    peopleSharedTitle: "共享人物记忆",
-    peopleSharedSub: "多个机器人共用同一个目录，一人一个文件",
-    peopleSharedOff: "共享未启用",
-    peopleSharedMembers: "成员：{list}",
-    peopleSharedEmpty: "共享人物空间已启用，还没有配置成员",
-    peopleSharedNotice: "这是多个机器人共用的共享人物记忆：每个成员都能读到这里的文件，写入受各自权限限制。",
-    peopleSharedOffNotice: "共享人物空间未启用：这些文件目前没有机器人会读写，启用后成员会共用这个目录。",
-    peopleMemberLine: "{platform}（{permission}）",
-    peopleUnused: "未使用（已并入共享人物记忆）",
-    peopleUnusedShort: "未使用",
-    peopleUnusedNotice: "这个目录已经不再使用：该机器人已加入共享人物空间，人物记忆的读写都走「共享人物记忆」。目录里的旧文件仍保留在磁盘上。",
-    permission_edit: "可编辑",
-    permission_append: "仅追加",
-    permission_read: "只读",
-    peopleNone: "还没有人物记忆：机器人记下某个人之后会按平台出现在这里",
-    sessionsLabel: "会话 · {n}",
+    boardTitle: "留言板",
+    boardSub: "所有会话可见，管理员发布",
+    notebookLabel: "小本本",
+    notebookTitle: "小本本 · {platform}",
+    notebookSub: "这台机器人的所有群聊和私聊共享",
+    notebookNone: "这台机器人还没有小本本",
+    whisperLabel: "悄悄话 · {n}",
+    whisperTitle: "悄悄话 · {name}",
+    whisperSub: "只有这段对话能读写",
+    whisperNone: "还没有会话",
     noSessions: "没有符合条件的会话",
     noBridge: "请在 AstrBot 管理面板的「插件页面」中打开此页面。",
     loadFailed: "加载失败",
     retry: "重试",
     requestFailed: "请求失败",
-    welcomeTitle: "选择一个会话",
-    welcomeHint: "从左侧选择会话，查看和编辑机器人在那里记住的内容。",
-    statSessions: "已登记会话",
-    statWithMemory: "有记忆的会话",
-    statFiles: "会话记忆文件",
-    statGlobal: "全局记忆",
+    welcomeTitle: "三层记忆",
+    welcomeHint: "留言板给所有会话看，小本本是这台机器人的记忆，悄悄话只有当前这段对话能读写。",
+    statBoard: "留言板",
+    statNotebooks: "小本本",
+    statWhispers: "悄悄话会话",
+    statFiles: "记忆文件",
     fileCount: "{n} 条记忆",
-    enabled: "已启用",
-    disabled: "未启用",
     back: "返回",
     firstSeen: "首次出现 {time}",
     lastActive: "最近活跃 {time}",
     remark: "备注",
     consolidate: "整理记忆",
+    consolidateAll: "整理全部记忆",
     purge: "清除数据",
     memoryOffNotice: "长期记忆已在插件配置中关闭：机器人不会读写记忆，这里只是保留在磁盘上的内容。",
     contextReadonlyNotice: "这个面板只读。上下文的截断与摘要由 AstrBot 自己的上下文设置处理，本插件不再改动对话历史。",
     userIdentifierNotice: "AstrBot 的「用户识别」开着：本插件也会标注发送者，模型会看到两次。可以关掉 AstrBot 的「用户识别」，由本插件接管。",
-    globalOffNotice: "全局记忆未启用：机器人当前不会读取或写入这里的内容。如需使用，请在插件配置中开启「启用全局记忆」。",
     tabMemories: "记忆",
     tabIndex: "索引",
     tabContext: "上下文",
-    contextWindow: "上下文窗口",
+    tabForgotten: "已遗忘",
+    tabTrash: "回收站",
+    tabRuns: "整理记录",
     searchPlaceholder: "全文搜索记忆",
     newMemory: "新建记忆",
+    publishNotice: "发布告示",
+    publishTitle: "发布留言板告示",
+    publishHint: "留言板的每条告示都会带署名，所有机器人的所有会话都能看到。",
+    fieldSignature: "署名",
+    fieldSignatureHint: "会记到 frontmatter 里；下次发布自动填上次的署名",
+    signatureRequired: "请填写署名",
+    published: "已发布",
     typeAll: "全部",
     typeOther: "未分类",
     type_user: "人物",
     type_feedback: "指导",
     type_project: "事项",
     type_reference: "资料",
-    type_journal: "日志",
+    type_journal: "日记",
     typeHint_user: "某个人是谁：身份、偏好、专长",
     typeHint_feedback: "对机器人做事方式的指导：纠正过的错误、确认过的做法",
     typeHint_project: "进行中的事、目标与约束",
-    typeHint_reference: "外部资源在哪里：链接、公告、文档",
+    typeHint_reference: "外部资源、资料与告示",
     typeHint_journal: "每日流水账：不占单独索引行，不参与自动召回与查重",
     typeMissing: "无类型",
     noDescription: "（没有描述）",
@@ -126,7 +118,7 @@
     badFileName: "文件名只能包含字母、数字、点、下划线、连字符，并以 .md 结尾",
     needDescription: "请填写描述",
     deleteTitle: "删除记忆",
-    deleteMessage: "确定删除 {file} 吗？索引里对应的行会一并移除，文件会先移入回收站，保留期内可以恢复。",
+    deleteMessage: "确定删除 {file} 吗？索引里对应的行会一并移除，删除后可以在回收站里找回。",
     discardTitle: "放弃未保存的修改？",
     discardMessage: "正在编辑的内容还没有保存，离开后修改会丢失。",
     discard: "放弃修改",
@@ -152,20 +144,18 @@
     tokens: "{n} tokens",
     partsTitle: "上下文构成（最近一次请求，估算）",
     noEstimate: "还没有请求记录",
-    part_system: "系统提示词",
     part_tools: "工具声明",
-    part_history: "历史",
-    part_prompt: "本轮输入",
     part_recall: "召回记忆",
+    part_history: "历史原文",
+    part_prompt: "本轮输入",
+    part_system: "系统提示词",
     part_plugin: "插件开头块",
-    openingBlockSub: "索引与私聊人物档案，每轮附加",
-    summaryTitle: "AstrBot 压缩后的摘要",
-    noSummary: "AstrBot 还没有压缩过这段对话。",
     liveTag: "实时",
     liveHint: "插件内存中的当前状态",
     diskTag: "磁盘记录",
-    diskHint: "插件启动后这个会话还没有新消息，显示的是上次保存的状态",
-    tabForgotten: "已遗忘",
+    diskHint: "插件启动后这段对话还没有新消息，显示的是上次保存的状态",
+    summaryTitle: "AstrBot 压缩摘要",
+    noSummary: "AstrBot 还没有压缩过这段对话",
     forgottenTitle: "已遗忘的记忆",
     forgottenHint: "长期没被召回或读取的记忆会移到这里：不进索引、不参与召回，文件保留。这个人再出现、或机器人主动读它时会自动恢复。",
     forgottenOffHint: "记忆遗忘当前未启用，这里只是之前遗忘下来的文件，不会再自动遗忘或恢复；可以手动恢复或彻底删除。",
@@ -181,191 +171,108 @@
     forgetTitle: "遗忘记忆",
     forgetMessage: "把 {file} 移入已遗忘：它会退出索引与召回，文件保留，随时可以恢复。",
     forgotten: "已遗忘",
-    forgetDeleteTitle: "删除已遗忘的记忆",
-    forgetDeleteMessage: "确定删除已遗忘的 {file} 吗？文件会先移入回收站，保留期内可以恢复；要永久删除，请先恢复，再在文件详情里「彻底删除（含历史）」。",
-    tabTrash: "回收站",
+    forgetDeleteTitle: "彻底删除",
+    forgetDeleteMessage: "确定永久删除已遗忘的 {file} 吗？删除后无法恢复。",
     trashTitle: "回收站",
     trashHint: "被删除的记忆会先放在这里，保留期内可以查看、恢复或彻底删除。",
     noTrashTitle: "回收站是空的",
-    noTrashHint: "删除记忆时文件会先移到这里，之后可以恢复。",
-    trashDeletedAt: "{time} 删除",
-    trashRestoreTitle: "从回收站恢复",
-    trashRestoreMessage: "恢复 {file}（{time} 删除的版本）。如果现在有同名文件，会先把当前内容存进历史再覆盖。",
-    trashDeleteTitle: "彻底删除回收站条目",
-    trashDeleteMessage: "确定永久删除回收站里的 {file}（{time} 删除）吗？这条回收站记录删除后无法恢复；历史版本和已遗忘副本不受影响。要连同这个文件的全部备份一起清除，请点同一行的「彻底删除（含历史）」（文件还在册时去文件详情里操作）。",
-    trashPurgeTitle: "彻底删除文件（含历史）",
-    trashPurgeMessage: "确定彻底删除 {file} 吗？它已经不在册（只剩回收站、已遗忘副本或历史版本）；当前作用域里这个文件的全部历史版本、已遗忘副本和回收站条目都会删除，无法恢复。",
-    historyVersions: "历史版本",
-    historyHint: "覆盖或修改前自动保存的旧内容；恢复时会先把当前版本存进历史。",
+    noTrashHint: "删除记忆后旧版本会在这里保留 {days} 天。",
+    restoreTrash: "恢复",
+    deleteTrash: "彻底删除",
+    purgeFile: "彻底删除（含历史）",
+    trashPurgeTitle: "彻底删除这个文件？",
+    trashPurgeMessage: "会删除 {file} 的全部历史、回收站条目与整理记录里的副本，删除后无法恢复。",
+    purged: "已彻底删除",
+    historyTitle: "历史版本",
+    historyHint: "每次覆盖或修改前的旧内容都会留在这里，可以恢复。",
     noHistoryTitle: "还没有历史版本",
-    noHistoryHint: "这个文件第一次被覆盖或修改后，旧内容会出现在这里。",
-    historyRestoreTitle: "恢复历史版本",
-    historyRestoreMessage: "用 {time} 的版本覆盖 {file} 吗？当前内容会先存进历史，尚未保存的修改会丢失。",
-    historyActor: "操作者：{actor}",
-    historySource: "来源 {source}",
-    actorUnknown: "未知",
-    action_write: "覆盖",
+    noHistoryHint: "第一次修改这个文件时，旧内容会出现在这里。",
+    historyVersion: "版本 {version}",
+    restoreVersion: "恢复这一版",
+    versionRestored: "已恢复这个版本",
+    action_write: "写入",
     action_edit: "修改",
     action_delete: "删除",
     action_import: "导入",
     action_restore: "恢复",
     action_forget: "遗忘",
-    action_discard_forgotten: "替换遗忘副本",
-    action_delete_forgotten: "删除遗忘文件",
-    action_delete_trash: "彻底删除",
-    action_purge_file: "彻底删除文件",
-    action_purge_scope: "清除作用域",
     action_rename: "改名",
-    purgeFile: "彻底删除（含历史）",
-    purgeFileTitle: "彻底删除文件",
-    purgeFileMessage: "确定彻底删除 {file} 吗？当前作用域里的在册文件、已遗忘副本、全部历史版本和回收站条目都会删除，无法恢复；其他作用域（包括迁移后保留的旧平台人物目录）里的同名文件不受影响。",
-    purgeFileConfirm: "彻底删除",
-    remarkTitle: "会话备注",
-    remarkHint: "备注只在管理页显示，方便认出这个会话。留空则显示群名或昵称。",
-    purgeTitle: "清除会话数据",
-    purgeMessage: "「只删记忆」把该会话的记忆目录移入 memories/.trash-scopes 归档（在回收站保留期内可人工取回）；「删除全部」还会立即删除上下文统计和会话登记。平台上的聊天记录不受影响。",
-    purgeMemories: "只删记忆",
-    purgeAll: "删除全部",
-    consolidateTitle: "整理记忆",
-    consolidateRunning: "正在让模型复盘这里的全部记忆…",
-    consolidateRunningHint: "通常需要几十秒。模型只给出修改方案，你确认后才会生效。",
-    consolidateNothingTitle: "不需要整理",
-    consolidateNothingHint: "模型认为这里的记忆已经很整齐了。",
-    consolidateReview: "模型给出了下面的修改方案。勾选要应用的项目：写入会整文件覆盖，删除会同时移除索引行；应用时先写后删。",
-    consolidateSkipped: "记忆太多，有 {n} 个文件没有参与这次整理。",
-    consolidateAll: "整理全部记忆",
-    consolidateAllHint: "让模型逐个复盘每个会话和全局的记忆，方案汇总在一处，由你勾选确认后才写入。",
-    consolidateAllTitle: "整理全部记忆",
-    consolidateAllNone: "还没有可整理的记忆",
-    consolidateAllIntro: "下面 {n} 处有记忆。会逐个让模型复盘，每处通常要几十秒，同时最多跑 2 处；模型只给出修改方案，跑完后由你勾选确认，确认前不会改动任何文件。",
-    start: "开始",
-    batchWaiting: "等待",
-    batchRunning: "复盘中…",
-    batchNothing: "无需整理",
-    batchFailed: "失败",
-    batchSkipped: "未跑",
-    batchProposed: "{n} 项方案",
-    consolidateAllStop: "停止，先看已有方案",
-    consolidateAllProgress: "已完成 {done} / {total}",
-    consolidateAllReview: "{n} 处有修改方案，{clean} 处无需整理。勾选要应用的项目：写入会整文件覆盖，删除会同时移除索引行；每处先写后删。",
-    consolidateAllFailed: "{n} 处复盘失败，这次没有方案：",
-    consolidateAllNothingTitle: "没有要改的",
-    consolidateAllNothingHint: "模型认为这些记忆都已经很整齐了。",
-    consolidateAllApplying: "正在应用：{name}",
-    consolidateAllDone: "整理完成：应用 {ok} 项，失败 {failed} 项。",
-    batchApplied: "应用 {n} 项",
-    batchPartial: "应用 {ok} 项，失败 {failed} 项",
-    opCreate: "新建",
-    opRewrite: "改写",
-    opDelete: "删除",
-    previewContent: "查看新内容",
-    selectedCount: "已选 {n} / {total} 项",
-    applySelected: "应用所选",
-    justNow: "刚刚",
-    minutesAgo: "{n} 分钟前",
-    hoursAgo: "{n} 小时前",
-    daysAgo: "{n} 天前",
-    seconds: "{n} 秒",
-    minutes: "{n} 分钟",
-    tidyAskTitle: "要不要定期自动整理记忆？",
-    tidyAskHint: "开启后，插件会隔一段时间（默认 24 小时）看一眼：上次整理之后新攒了至少 {n} 条记忆，才让模型在后台复盘一遍，合并重复的、删掉过时的。模型觉得不用改就什么都不动。只在有人聊天时检查。",
-    tidyModeConfirm: "整理前问我",
-    tidyModeConfirmHint: "有修改方案时先留着，你在这里确认后才写入",
-    tidyModeAuto: "直接整理",
-    tidyModeAutoHint: "有方案就直接写入，之后可以在「整理记录」里撤销",
-    tidyModeOff: "暂不开启",
-    tidyModeOffHint: "以后可以在这里或插件配置里打开",
-    tidyModeOffLabel: "关闭",
-    recommended: "推荐",
-    tidyTitle: "定期整理",
-    tidyStatusOff: "未开启：记忆只在你点「整理记忆」时整理。",
-    tidyStatusOn: "至少隔 {hours} 小时，且新增至少 {n} 条记忆才整理",
-    change: "更改",
-    tidyHours: "最短间隔（小时）",
-    tidyHoursHint: "1 – 720",
-    tidyPendingTitle: "等你确认的整理方案",
-    tidyPendingNotice: "{time}，定期整理给出了 {n} 项修改方案，确认后才会写入。",
-    tidyPendingBadge: "有待确认的整理方案",
-    viewPlan: "查看方案",
-    dismiss: "放弃",
-    dismissTitle: "放弃这份方案？",
-    dismissMessage: "方案会被丢弃，记忆保持不变；下次定期整理时会重新复盘。",
-    dismissed: "已放弃",
-    planTitle: "定期整理的方案",
+    action_purge_file: "彻底删除",
     tidyHistory: "整理记录",
-    historyLast: "上次整理：{time}，{result}",
-    outcome_nothing: "模型认为不需要整理",
-    outcome_pending: "方案等你确认",
-    outcome_applied: "应用了修改",
-    outcome_failed: "失败（{message}）",
     historyEmptyTitle: "还没有整理记录",
     historyEmptyHint: "整理应用修改后会在这里留下记录，最近 {n} 次可以撤销。",
     trigger_manual: "手动整理",
-    trigger_auto: "定期整理",
-    trigger_confirmed: "定期整理 · 已确认",
-    runOps: "{n} 项修改",
+    runOps: "查看改动",
     undo: "撤销",
     undone: "已撤销",
     undoTitle: "撤销这次整理？",
     undoMessage: "被删除的记忆会写回，被改写的恢复原文，新建的删掉。整理之后又改过的文件不会动。",
-    undoDone: "已撤销 {ok} / {total} 项",
-    migrate: "迁移与备份",
-    migrateHint: "导出记忆做备份、从备份恢复，或在机器人换了平台 ID 后把记忆搬过去。",
-    open: "打开",
-    tabExport: "导出备份",
-    tabImport: "导入备份",
+    undoDone: "撤销完成",
+    consolidateTitle: "整理记忆",
+    consolidateHint: "让默认对话模型复盘「{label}」里的全部记忆：合并重复、修正过时、规范格式。先在预览里勾选要应用的修改。",
+    consolidateAllTitle: "整理全部记忆",
+    consolidateAllHint: "依次让默认对话模型复盘每一处有记忆的地方；可以只应用其中一部分。",
+    consolidateNothingTitle: "不需要整理",
+    consolidateNothingHint: "模型认为这里没有需要修改的地方。",
+    consolidateSkipped: "有 {n} 个文件因超出预算没有参与这次整理。",
+    consolidateReview: "{n} 项修改。勾选要应用的项目：写入会整文件覆盖，删除会同时移除索引行；每处先写后删。",
+    applySelected: "应用选中的修改",
+    consolidateDone: "整理完成：应用 {ok} 项，失败 {failed} 项。",
+    consolidateAllNone: "还没有可整理的记忆",
+    opCreate: "新建",
+    opRewrite: "改写",
+    opDelete: "删除",
+    previewContent: "正文预览",
+    migrate: "备份与迁移",
+    migrateHint: "备份是记忆原文与索引，不含对话历史；导入与迁移都是管理员操作。",
+    tabExport: "导出",
+    tabImport: "导入",
+    tabScope: "迁移",
     tabPlatform: "平台改名",
-    exportHint: "把记忆原文连同写入时间、使用次数存成一个文件。上下文统计不在备份里。",
-    exportScopes: "要导出的地方",
-    includeForgotten: "包含已遗忘的记忆",
-    exportButton: "导出",
-    exportNone: "还没有可导出的记忆",
-    exported: "已导出 {n} 条记忆",
-    importHint: "选择之前导出的备份文件。会先列出每处会新增、覆盖多少条，勾选后才写入。",
+    exportHint: "选择要备份的作用域；已遗忘的文件也可以一起导出。",
+    includeForgotten: "包含已遗忘的文件",
+    exportButton: "生成备份",
+    exportNone: "选中的地方都还没有记忆",
+    exported: "备份已生成",
+    importHint: "选择之前导出的 JSON 备份，先预览再导入。",
     chooseFile: "选择备份文件",
-    badBackup: "读不了这个文件：{message}",
-    policy: "遇到同名记忆",
-    policy_newer: "保留较新的",
-    policy_skip: "保留现有的",
-    policy_overwrite: "用迁入的覆盖",
-    importButton: "导入所选",
-    imported: "导入完成：写入 {n} 条记忆",
-    importNothing: "没有写入：所选记忆和现有的一样，或按同名处理方式保留了现有的。",
-    cnt_added: "新增 {n}",
-    cnt_replaced: "覆盖 {n}",
-    cnt_same: "相同 {n}",
-    cnt_kept: "保留现有 {n}",
-    cnt_invalid: "不合法 {n}",
-    cntNone: "没有要写入的",
-    forgottenIncluded: "含已遗忘 {n}",
-    issuesCount: "{n} 条不会写入",
-    platformHint: "在 AstrBot 里删掉重建了机器人、或改了它的 ID 之后，会话标识的第一段会变，原来的记忆就对不上了。这里把旧 ID 下所有会话的记忆和备注一起搬到新 ID 下。",
+    badBackup: "这个文件不是有效的记忆备份",
+    policy: "同名冲突",
+    policy_newer: "留较新的",
+    policy_skip: "留现有的",
+    policy_overwrite: "用备份覆盖",
+    importButton: "导入选中的作用域",
+    imported: "导入完成",
+    importNothing: "备份里没有记忆",
+    cntAdded: "新增 {n}",
+    cntReplaced: "覆盖 {n}",
+    cntSame: "相同 {n}",
+    cntKept: "保留 {n}",
+    cntInvalid: "无效 {n}",
+    forgottenIncluded: "含 {n} 条已遗忘",
+    issuesCount: "有 {n} 个文件没有导入",
+    platformHint: "AstrBot 里删掉重建适配器或改了 ID 后，把旧平台 ID 下的小本本与悄悄话搬到新 ID 下。",
     platformFrom: "旧平台 ID",
     platformTo: "新平台 ID",
-    platformToHint: "可以从当前启用的机器人里选",
-    platformSessions: "{n} 个会话",
-    platformNone: "还没有可迁移的平台",
+    includeNotebook: "同时迁移小本本",
+    platformSessions: "{n} 段会话",
     modeLabel: "方式",
     modeMove: "移动",
     modeCopy: "复制",
-    moveHint: "移动时只删掉成功写到目标的记忆；因同名冲突没写过去的仍留在原处。",
-    includePeople: "连人物记忆一起迁移",
-    preview: "预览",
     runMigrate: "开始迁移",
-    migratePreview: "将迁移 {n} 处：",
-    migrateSkipped: "{n} 个会话缺少完整的会话标识，换算不出新会话，会留在原处：",
-    migrated: "迁移完成：写入 {n} 条记忆",
-    migrateNothing: "没有要迁移的记忆",
-    migrateTo: "迁移到…",
-    migrateScopeHint: "把这里的记忆复制或移动到另一处，写入时间和使用次数原样保留。",
-    targetLabel: "目标",
-    targetNewSession: "新的会话（填写会话标识）",
-    targetNewPeople: "其他平台的人物记忆（填写平台 ID）",
+    migratePreview: "预览结果",
+    migrateSkipped: "{n} 段会话缺少完整标识，已跳过",
+    migrateNothing: "没有可迁移的记忆",
+    migrated: "迁移完成",
+    migrateTo: "目标",
+    migrateScopeHint: "把一处记忆复制或移动到另一处。",
+    targetLabel: "目标作用域",
+    targetNewSession: "新的悄悄话会话",
     targetUmo: "会话标识",
-    targetUmoHint: "平台ID:GroupMessage:群号，或 平台ID:FriendMessage:用户ID",
-    targetPlatform: "平台 ID",
-    filesLabel: "要迁移的记忆",
-    selectedFiles: "已选 {n} / {total} 条",
+    targetUmoHint: "格式：平台ID:消息类型:会话ID",
+    search: "搜索",
+    plus: "新建",
+    refreshIcon: "刷新",
   };
 
   const ICONS = {
@@ -491,72 +398,24 @@
     return fmtTime(ts).slice(0, 10);
   }
 
+  ZH.justNow = "刚刚";
+  ZH.minutesAgo = "{n} 分钟前";
+  ZH.hoursAgo = "{n} 小时前";
+  ZH.daysAgo = "{n} 天前";
+
   function fmtNum(n) {
     return Number(n || 0).toLocaleString();
-  }
-
-  function fmtBytes(n) {
-    n = Number(n || 0);
-    return n < 1024 ? n + " B" : (n / 1024).toFixed(1) + " KB";
   }
 
   function stem(file) {
     return file.slice(-3) === ".md" ? file.slice(0, -3) : file;
   }
 
-  function composeMemory(name, description, type, body) {
-    const desc = String(description || "").replace(/\s+/g, " ").trim();
-    return (
-      "---\nname: " + String(name || "").trim() +
-      "\ndescription: " + desc +
-      "\nmetadata:\n  type: " + String(type || "").trim() +
-      "\n---\n\n" + String(body || "").trim() + "\n"
-    );
-  }
-
-  function parseMemory(content) {
-    content = content || "";
-    const match = FRONT_RE.exec(content);
-    const fields = {};
-    let nested = "";
-    if (match) {
-      let inMeta = false;
-      match[1].split("\n").forEach(function (line) {
-        if (!line.trim()) {
-          return;
-        }
-        const idx = line.indexOf(":");
-        if (idx < 0) {
-          return;
-        }
-        const key = line.slice(0, idx).trim().toLowerCase();
-        const value = line.slice(idx + 1).trim().replace(/^['"]+|['"]+$/g, "");
-        if (/^[ \t]/.test(line)) {
-          if (inMeta && key === "type") {
-            nested = value;
-          }
-          return;
-        }
-        inMeta = key === "metadata" && !value;
-        if ((key === "name" || key === "description" || key === "type") && !(key in fields)) {
-          fields[key] = value;
-        }
-      });
-    }
-    const body = match ? content.slice(match[0].length) : content;
-    return {
-      description: fields.description || "",
-      type: (nested || fields.type || "").toLowerCase(),
-      body: body.replace(/^\n+|\n+$/g, ""),
-      hasFrontmatter: Boolean(match),
-    };
-  }
-
   function extractLinks(text) {
     const found = [];
+    const re = /\[\[([^\[\]\n]{1,120})\]\]/g;
     let match;
-    LINK_RE.lastIndex = 0;
-    while ((match = LINK_RE.exec(text || ""))) {
+    while ((match = re.exec(text || ""))) {
       const target = match[1].trim();
       if (target && found.indexOf(target) < 0) {
         found.push(target);
@@ -565,19 +424,49 @@
     return found;
   }
 
-  function escapeRegExp(text) {
-    return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  function typeTag(type) {
+    if (TYPES.indexOf(type) >= 0) {
+      return h("span", { class: "tag " + type, title: t("typeHint_" + type) }, t("type_" + type));
+    }
+    return type ? h("span", { class: "tag" }, type) : h("span", { class: "tag warn" }, t("typeMissing"));
   }
 
-  function highlight(text, query) {
-    const terms = query.split(/\s+/).filter(Boolean).map(escapeRegExp);
-    if (!terms.length) {
-      return text;
-    }
-    const re = new RegExp("(" + terms.join("|") + ")", "ig");
-    return String(text).split(re).map(function (part, i) {
-      return i % 2 === 1 ? h("mark", null, part) : part;
-    });
+  function stat(label, value, sub) {
+    return h(
+      "div",
+      { class: "stat" },
+      h("div", { class: "stat-label" }, label),
+      h("div", { class: "stat-value" }, value),
+      sub ? h("div", { class: "stat-sub" }, sub) : null
+    );
+  }
+
+  function emptyState(iconName, title, hint) {
+    return h("div", { class: "empty" }, icon(iconName), h("strong", null, title), hint ? h("span", null, hint) : null);
+  }
+
+  function spinnerBlock() {
+    return h("div", { class: "center-state" }, h("div", { class: "spinner" }));
+  }
+
+  function notice(kind, content) {
+    return h(
+      "div",
+      { class: "notice" + (kind === "info" ? " info" : "") },
+      icon(kind === "info" ? "info" : "warn"),
+      h("div", null, content)
+    );
+  }
+
+  function errorBlock(message, retry) {
+    return h(
+      "div",
+      { class: "empty" },
+      icon("warn"),
+      h("strong", null, t("loadFailed")),
+      h("span", null, message),
+      retry ? h("button", { class: "btn", onclick: retry }, t("retry")) : null
+    );
   }
 
   // ------------------------------------------------------------ 接口
@@ -630,8 +519,13 @@
     const ctrl = {
       busy: false,
       done: done,
-      isOpen: function () {
-        return overlay.isConnected;
+      close: function (value) {
+        if (!overlay.isConnected) {
+          return;
+        }
+        overlay.remove();
+        document.removeEventListener("keydown", onKey);
+        resolveDone(value);
       },
       setBody: function (node) {
         body.replaceChildren();
@@ -640,14 +534,6 @@
       setFoot: function (nodes) {
         foot.replaceChildren();
         append(foot, nodes);
-      },
-      close: function (value) {
-        if (!overlay.isConnected) {
-          return;
-        }
-        overlay.remove();
-        document.removeEventListener("keydown", onKey);
-        resolveDone(value);
       },
     };
     function onKey(event) {
@@ -696,47 +582,12 @@
       h("button", { class: "btn", onclick: function () { ctrl.close(false); } }, t("cancel")),
       h(
         "button",
-        {
-          class: "btn " + (opts.danger ? "danger" : "primary"),
-          onclick: function () {
-            ctrl.close(true);
-          },
-        },
+        { class: "btn " + (opts.danger ? "danger" : "primary"), onclick: function () { ctrl.close(true); } },
         opts.confirm || t("confirm")
       ),
     ]);
     return ctrl.done.then(function (value) {
       return value === true;
-    });
-  }
-
-  function promptDialog(opts) {
-    const input = h("input", {
-      class: "input",
-      value: opts.value || "",
-      maxlength: opts.maxLength || 64,
-    });
-    const ctrl = openDialog({
-      title: opts.title,
-      body: [opts.message ? h("p", null, opts.message) : null, input],
-    });
-    function submit() {
-      ctrl.close(input.value);
-    }
-    input.addEventListener("keydown", function (event) {
-      if (event.key === "Enter") {
-        submit();
-      }
-    });
-    ctrl.setFoot([
-      h("button", { class: "btn", onclick: function () { ctrl.close(null); } }, t("cancel")),
-      h("button", { class: "btn primary", onclick: submit }, t("save")),
-    ]);
-    setTimeout(function () {
-      input.focus();
-    }, 0);
-    return ctrl.done.then(function (value) {
-      return typeof value === "string" ? value : null;
     });
   }
 
@@ -753,61 +604,12 @@
     }
   }
 
-  // ------------------------------------------------------------ 通用块
-
-  function emptyState(iconName, title, hint) {
-    return h("div", { class: "empty" }, icon(iconName), h("strong", null, title), hint ? h("span", null, hint) : null);
-  }
-
-  function spinnerBlock() {
-    return h("div", { class: "center-state" }, h("div", { class: "spinner" }));
-  }
-
-  function notice(kind, content) {
-    return h(
-      "div",
-      { class: "notice" + (kind === "info" ? " info" : "") },
-      icon(kind === "info" ? "info" : "warn"),
-      h("div", null, content)
-    );
-  }
-
-  function errorBlock(message, retry) {
-    return h(
-      "div",
-      { class: "empty" },
-      icon("warn"),
-      h("strong", null, t("loadFailed")),
-      h("span", null, message),
-      retry ? h("button", { class: "btn", onclick: retry }, t("retry")) : null
-    );
-  }
-
-  function typeTag(type) {
-    if (TYPES.indexOf(type) >= 0) {
-      return h("span", { class: "tag " + type, title: t("typeHint_" + type) }, t("type_" + type));
-    }
-    return type ? h("span", { class: "tag" }, type) : h("span", { class: "tag warn" }, t("typeMissing"));
-  }
-
-  function stat(label, value, sub, extra) {
-    return h(
-      "div",
-      { class: "stat" },
-      h("div", { class: "stat-label" }, label),
-      h("div", { class: "stat-value" }, value),
-      sub ? h("div", { class: "stat-sub" }, sub) : null,
-      extra || null
-    );
-  }
-
   // ------------------------------------------------------------ 状态
 
   const state = {
     overview: null,
     overviewError: "",
     filterText: "",
-    filterKind: "all",
     selected: null,
     detail: null,
     detailError: "",
@@ -822,14 +624,12 @@
     history: null,
     trash: null,
     trashLoading: false,
+    runs: null,
   };
   const els = {};
-  let searchTimer = 0;
   let detailToken = 0;
   let trashToken = 0;
 
-  // 作用域详情一变（删除、改名、整理、导入等），缓存下来的回收站列表就作废；
-  // 飞在半路的旧请求也会因为 token 对不上而被丢弃。
   function invalidateTrash() {
     trashToken += 1;
     state.trash = null;
@@ -840,12 +640,12 @@
     return { scope: state.selected.scope, key: state.selected.key || "" };
   }
 
+  function sameScope(a, b) {
+    return Boolean(a && b && a.scope === b.scope && (a.key || "") === (b.key || ""));
+  }
+
   function isSelected(sel) {
-    return Boolean(
-      state.selected && sel &&
-      state.selected.scope === sel.scope &&
-      (state.selected.key || "") === (sel.key || "")
-    );
+    return sameScope(state.selected, sel);
   }
 
   function resetDetailState() {
@@ -860,6 +660,7 @@
     state.context = null;
     state.contextLoading = false;
     state.history = null;
+    state.runs = null;
     invalidateTrash();
   }
 
@@ -910,30 +711,30 @@
     return bits.filter(Boolean).join(" · ");
   }
 
-  function peopleScopeTitle(platform, key) {
-    return key === SHARED_KEY
-      ? t("peopleSharedTitle")
-      : t("peopleTitle", { platform: platform || key });
-  }
-
-  function permissionLabel(permission) {
-    return t("permission_" + permission);
-  }
-
-  function peopleMemberSummary(members) {
-    if (!members || !members.length) {
-      return t("peopleSharedEmpty");
+  function scopeTitle(sel) {
+    if (!sel) {
+      return "";
     }
-    return t("peopleSharedMembers", {
-      list: members
-        .map(function (m) {
-          return t("peopleMemberLine", {
-            platform: m.platform,
-            permission: permissionLabel(m.permission),
-          });
-        })
-        .join("、"),
-    });
+    if (sel.scope === "board") {
+      return t("boardTitle");
+    }
+    if (sel.scope === "notebook") {
+      return t("notebookTitle", { platform: sel.platform || sel.key });
+    }
+    return t("whisperTitle", { name: sessionTitle(sel.session || sel) });
+  }
+
+  function scopeSub(sel) {
+    if (!sel) {
+      return "";
+    }
+    if (sel.scope === "board") {
+      return t("boardSub");
+    }
+    if (sel.scope === "notebook") {
+      return t("notebookSub");
+    }
+    return sessionSub(sel.session || sel);
   }
 
   // ------------------------------------------------------------ 加载
@@ -943,294 +744,182 @@
       state.overview = await apiGet("overview");
       state.overviewError = "";
     } catch (err) {
-      if (quiet && state.overview) {
-        toast(err.message, "error");
-        return;
-      }
       state.overviewError = err.message;
+      if (!quiet) {
+        toast(err.message, "error");
+      }
     }
-    renderSessionList();
-    if (!state.selected) {
-      renderMain();
-    }
+    render();
   }
 
   async function loadDetail() {
-    const sel = state.selected;
-    if (!sel) {
+    if (!state.selected) {
       return;
     }
-    detailToken += 1;
-    const token = detailToken;
+    const token = ++detailToken;
+    state.detailError = "";
     try {
       const data = await apiGet("scope", scopeParams());
       if (token !== detailToken) {
         return;
       }
       state.detail = data;
-      state.detailError = "";
+      state.indexDraft = null;
+      state.searchResults = null;
       invalidateTrash();
     } catch (err) {
-      if (token !== detailToken) {
-        return;
+      if (token === detailToken) {
+        state.detailError = err.message;
       }
-      state.detailError = err.message;
     }
-    renderMain();
+    render();
   }
 
   async function refreshAll() {
-    if (!(await confirmDiscard())) {
-      return;
-    }
-    state.context = null;
-    state.history = null;
-    invalidateTrash();
-    state.searchResults = null;
-    state.fileQuery = "";
-    if (state.editor && !state.editor.isNew) {
-      const file = state.editor.oldFile;
-      state.editor = null;
-      await Promise.all([loadOverview(true), loadDetail()]);
-      if (state.detail && state.detail.files.some(function (f) { return f.file === file; })) {
-        await openFile(file);
-      }
-      return;
-    }
-    state.editor = null;
-    await Promise.all([loadOverview(true), loadDetail()]);
+    await loadOverview(true);
+    await loadDetail();
   }
 
   async function selectScope(sel) {
-    if (isSelected(sel) && state.detail) {
-      els.app.classList.add("show-detail");
-      return;
-    }
     if (!(await confirmDiscard())) {
       return;
     }
     state.selected = sel;
     resetDetailState();
-    els.app.classList.add("show-detail");
-    renderSessionList();
-    renderMain();
+    state.detail = null;
+    render();
     await loadDetail();
   }
 
   function backToList() {
-    els.app.classList.remove("show-detail");
+    state.selected = null;
+    resetDetailState();
+    render();
   }
 
-  // ------------------------------------------------------------ 外壳与会话列表
+  // ------------------------------------------------------------ 外壳
 
   function buildShell() {
-    const app = document.getElementById("app");
-    app.replaceChildren();
-    els.app = app;
-    document.title = t("title");
-    els.filterInput = h("input", {
-      class: "input",
-      type: "search",
+    const root = document.getElementById("app");
+    root.replaceChildren();
+    const brand = h(
+      "div",
+      { class: "brand" },
+      h("div", null, h("h1", null, t("title")), h("p", null, t("subtitle"))),
+      h(
+        "div",
+        { class: "brand-actions" },
+        h("button", { class: "btn ghost icon-only", title: t("refresh"), onclick: function () { refreshAll(); } }, icon("refresh"))
+      )
+    );
+    const filter = h("input", {
+      class: "input search-box",
       placeholder: t("filterPlaceholder"),
       value: state.filterText,
       oninput: function (event) {
         state.filterText = event.target.value;
-        renderSessionList();
+        renderSidebar();
       },
     });
-    els.filterChips = h("div", { class: "chips" });
-    els.sessionList = h("div", { class: "session-list" });
-    els.main = h("main", { class: "main" });
-    els.sidebar = h(
-      "aside",
-      { class: "sidebar" },
-      h(
-        "div",
-        { class: "sidebar-head" },
-        h(
-          "div",
-          { class: "brand" },
-          h("div", null, h("h1", null, t("title")), h("p", null, t("subtitle"))),
-          h(
-            "div",
-            { class: "brand-actions" },
-            h("button", { class: "btn ghost icon-only", title: t("consolidateAll"), onclick: consolidateAll }, icon("sparkles")),
-            h("button", { class: "btn ghost icon-only", title: t("migrate"), onclick: function () { openMigration("export"); } }, icon("transfer")),
-            h("button", { class: "btn ghost icon-only", title: t("refresh"), onclick: refreshAll }, icon("refresh"))
-          )
-        ),
-        h("div", { class: "search-box" }, icon("search"), els.filterInput),
-        els.filterChips
-      ),
-      els.sessionList
-    );
-    app.append(els.sidebar, els.main);
-    if (state.selected) {
-      app.classList.add("show-detail");
-    }
-    renderFilterChips();
-    renderSessionList();
+    const list = h("div", { class: "session-list" });
+    els.sidebar = h("div", { class: "sidebar" }, h("div", { class: "sidebar-head" }, brand, filter), list);
+    els.sessionList = list;
+    els.main = h("div", { class: "main" });
+    root.append(els.sidebar, els.main);
+    renderSidebar();
     renderMain();
   }
 
-  function renderFilterChips() {
-    const items = [
-      ["all", "filterAll"],
-      ["group", "kindGroup"],
-      ["private", "kindPrivate"],
-      ["memory", "filterHasMemory"],
-    ];
-    els.filterChips.replaceChildren();
-    items.forEach(function (item) {
-      els.filterChips.append(
-        h(
-          "button",
-          {
-            class: "chip" + (state.filterKind === item[0] ? " active" : ""),
-            onclick: function () {
-              state.filterKind = item[0];
-              renderFilterChips();
-              renderSessionList();
-            },
-          },
-          t(item[1])
-        )
-      );
+  function filteredList(items, labelFn) {
+    const text = state.filterText.trim().toLowerCase();
+    if (!text) {
+      return items;
+    }
+    return items.filter(function (item) {
+      return labelFn(item).toLowerCase().indexOf(text) >= 0;
     });
   }
 
-  function filteredSessions() {
-    if (!state.overview) {
-      return [];
+  function renderSidebar() {
+    if (!els.sessionList) {
+      return;
     }
-    const query = state.filterText.trim().toLowerCase();
-    return state.overview.sessions
-      .filter(function (s) {
-        if (state.filterKind === "group" && s.kind !== "group") {
-          return false;
-        }
-        if (state.filterKind === "private" && s.kind !== "private") {
-          return false;
-        }
-        if (state.filterKind === "memory" && !s.fileCount) {
-          return false;
-        }
-        if (!query) {
-          return true;
-        }
-        return [s.remark, s.name, s.target, s.platform, s.umo, s.key].some(function (v) {
-          return String(v || "").toLowerCase().indexOf(query) >= 0;
-        });
-      })
-      .sort(function (a, b) {
-        return Math.max(b.lastActive, b.updatedAt) - Math.max(a.lastActive, a.updatedAt);
-      });
-  }
-
-  function renderSessionList() {
     const list = els.sessionList;
-    if (!list) {
-      return;
-    }
     list.replaceChildren();
-    if (!state.overview) {
-      list.append(
-        state.overviewError
-          ? errorBlock(state.overviewError, function () { loadOverview(false); })
-          : spinnerBlock()
-      );
+    const ov = state.overview;
+    if (!ov) {
+      list.append(spinnerBlock());
       return;
     }
-    const g = state.overview.global;
-    const globalActive = isSelected({ scope: "global", key: "" });
-    list.append(h("div", { class: "list-label" }, t("selfMemory")));
+    if (state.overviewError) {
+      list.append(errorBlock(state.overviewError, function () { loadOverview(); }));
+      return;
+    }
+    const board = ov.board || { fileCount: 0 };
     list.append(
       h(
-        "button",
+        "div",
         {
-          class: "session-item" + (globalActive ? " active" : ""),
-          onclick: function () {
-            selectScope({ scope: "global", key: "" });
-          },
+          class: "session-item" + (isSelected({ scope: "board" }) ? " active" : ""),
+          onclick: function () { selectScope({ scope: "board", key: "" }); },
         },
-        h("div", { class: "avatar global" }, icon("bot")),
+        h("div", { class: "avatar board" }, icon("inbox")),
         h(
           "div",
           { class: "session-text" },
-          h("div", { class: "session-name" }, t("globalTitle")),
-          h("div", { class: "session-sub" }, g.enabled ? t("globalSub") : t("disabled"))
+          h("div", { class: "session-name" }, t("boardTitle")),
+          h("div", { class: "session-sub" }, t("boardSub"))
         ),
-        pendingDot(g.tidyPending),
-        h("span", { class: "count" }, g.fileCount)
+        h("span", { class: "count" }, fmtNum(board.fileCount))
       )
     );
-    const people = state.overview.people || { platforms: [] };
-    list.append(h("div", { class: "list-label" }, t("peopleLabel")));
-    if (!people.platforms.length) {
-      list.append(h("div", { class: "empty", style: "padding:12px" }, h("span", null, t("peopleNone"))));
+    const notebooks = filteredList(ov.notebooks || [], function (item) { return item.key; });
+    list.append(h("div", { class: "list-label" }, t("notebookLabel")));
+    if (!notebooks.length) {
+      list.append(h("div", { class: "empty", style: "padding:12px" }, h("span", null, t("notebookNone"))));
     }
-    people.platforms.forEach(function (p) {
-      const active = isSelected({ scope: "people", key: p.key });
-      const shared = p.key === SHARED_KEY;
-      const name = peopleScopeTitle(p.platform, p.key);
-      let sub;
-      if (shared && p.members && p.members.length) {
-        sub = peopleMemberSummary(p.members);
-      } else if (shared) {
-        sub = p.active ? t("peopleSharedSub") : t("peopleSharedOff");
-      } else if (p.unused) {
-        sub = t("peopleUnused");
-      } else {
-        sub = t("peopleSub");
-      }
+    notebooks.forEach(function (item) {
       list.append(
         h(
-          "button",
+          "div",
           {
-            class: "session-item" + (active ? " active" : ""),
-            title: shared ? t("peopleSharedTitle") : p.platform,
-            onclick: function () {
-              selectScope({ scope: "people", key: p.key });
-            },
+            class: "session-item" + (isSelected({ scope: "notebook", key: item.key }) ? " active" : ""),
+            onclick: function () { selectScope({ scope: "notebook", key: item.key, platform: item.platform }); },
           },
-          h("div", { class: "avatar people" }, icon("user")),
+          h("div", { class: "avatar notebook" }, icon("bot")),
           h(
             "div",
             { class: "session-text" },
-            h("div", { class: "session-name" }, name),
-            h("div", { class: "session-sub" }, sub)
+            h("div", { class: "session-name" }, t("notebookTitle", { platform: item.platform || item.key })),
+            h("div", { class: "session-sub" }, t("notebookSub"))
           ),
-          pendingDot(p.tidyPending),
-          h("span", { class: "count" }, p.fileCount)
+          h("span", { class: "count" }, fmtNum(item.fileCount))
         )
       );
     });
-    const sessions = filteredSessions();
-    list.append(h("div", { class: "list-label" }, t("sessionsLabel", { n: sessions.length })));
-    if (!sessions.length) {
-      list.append(h("div", { class: "empty", style: "padding:24px 12px" }, h("span", null, t("noSessions"))));
+    const whispers = filteredList(ov.whispers || [], function (item) { return sessionTitle(item); });
+    list.append(h("div", { class: "list-label" }, t("whisperLabel", { n: whispers.length })));
+    if (!whispers.length) {
+      list.append(h("div", { class: "empty", style: "padding:12px" }, h("span", null, t("whisperNone"))));
     }
-    sessions.forEach(function (s) {
-      const active = isSelected({ scope: "session", key: s.key });
+    whispers.forEach(function (s) {
+      const sel = { scope: "whisper", key: s.key, session: s };
       list.append(
         h(
-          "button",
+          "div",
           {
-            class: "session-item" + (active ? " active" : ""),
+            class: "session-item" + (isSelected(sel) ? " active" : ""),
             title: s.umo || s.key,
-            onclick: function () {
-              selectScope({ scope: "session", key: s.key });
-            },
+            onclick: function () { selectScope(sel); },
           },
-          h("div", { class: "avatar " + s.kind }, icon(KIND_ICON[s.kind] || "chat")),
+          h("div", { class: "avatar " + (s.kind === "group" ? "group" : "private") }, icon(s.kind === "group" ? "group" : "user")),
           h(
             "div",
             { class: "session-text" },
             h("div", { class: "session-name" }, sessionTitle(s)),
             h("div", { class: "session-sub" }, sessionSub(s))
           ),
-          pendingDot(s.tidyPending),
-          h("span", { class: "count" }, s.fileCount)
+          h("span", { class: "count" }, fmtNum(s.fileCount))
         )
       );
     });
@@ -1239,27 +928,17 @@
   // ------------------------------------------------------------ 主区域
 
   function renderMain() {
-    const main = els.main;
-    if (!main) {
+    if (!els.main) {
       return;
     }
+    const main = els.main;
     main.replaceChildren();
-    els.tabBody = null;
-    els.fileList = null;
-    els.editor = null;
     if (!state.selected) {
       main.append(renderWelcome());
       return;
     }
     if (state.detailError) {
-      main.append(
-        h(
-          "div",
-          { class: "detail" },
-          h("button", { class: "btn ghost mobile-only", onclick: backToList }, icon("back"), t("back")),
-          errorBlock(state.detailError, loadDetail)
-        )
-      );
+      main.append(errorBlock(state.detailError, function () { loadDetail(); }));
       return;
     }
     if (!state.detail) {
@@ -1270,228 +949,99 @@
   }
 
   function renderWelcome() {
-    const ov = state.overview;
-    const box = h("div", { class: "detail" });
-    if (ov) {
-      const withMemory = ov.sessions.filter(function (s) { return s.fileCount > 0; });
-      const files = ov.sessions.reduce(function (sum, s) { return sum + (s.fileCount || 0); }, 0);
-      box.append(
-        h(
-          "div",
-          { class: "stats", style: "margin-bottom:24px" },
-          stat(t("statSessions"), fmtNum(ov.sessions.length)),
-          stat(t("statWithMemory"), fmtNum(withMemory.length)),
-          stat(t("statFiles"), fmtNum(files)),
-          stat(t("statGlobal"), ov.global.enabled ? t("enabled") : t("disabled"), t("fileCount", { n: fmtNum(ov.global.fileCount) }))
-        )
-      );
-      if (!ov.memoryEnabled) {
-        box.append(notice("warn", t("memoryOffNotice")));
-      }
-      const cs = ov.context || {};
-      if (cs.userIdentifier) {
-        box.append(notice("info", t("userIdentifierNotice")));
-      }
-      append(box, [renderTidyCard(ov), renderPendingPanel(ov)]);
-      box.append(
-        h(
-          "div",
-          { class: "panel action-panel" },
-          h("div", { class: "action-text" }, h("strong", null, t("consolidateAll")), h("span", null, t("consolidateAllHint"))),
-          h(
-            "button",
-            { class: "btn primary", onclick: consolidateAll, disabled: !consolidateTargets().length },
-            icon("sparkles"),
-            t("consolidateAll")
-          )
-        ),
-        h(
-          "div",
-          { class: "panel action-panel" },
-          h("div", { class: "action-text" }, h("strong", null, t("migrate")), h("span", null, t("migrateHint"))),
-          h("button", { class: "btn", onclick: function () { openMigration("export"); } }, icon("transfer"), t("open"))
-        )
-      );
+    const ov = state.overview || {};
+    const notebooks = ov.notebooks || [];
+    const whispers = ov.whispers || [];
+    const files =
+      (ov.board ? ov.board.fileCount : 0) +
+      notebooks.reduce(function (sum, item) { return sum + (item.fileCount || 0); }, 0) +
+      whispers.reduce(function (sum, item) { return sum + (item.fileCount || 0); }, 0);
+    const stats = h(
+      "div",
+      { class: "stats" },
+      stat(t("statBoard"), fmtNum(ov.board ? ov.board.fileCount : 0)),
+      stat(t("statNotebooks"), fmtNum(notebooks.length), t("statFiles") + " " + fmtNum(files)),
+      stat(t("statWhispers"), fmtNum(whispers.length))
+    );
+    const box = h(
+      "div",
+      { class: "stack" },
+      h("div", { class: "detail-head" }, h("div", { class: "detail-title" }, t("welcomeTitle"))),
+      h("p", { class: "hint-line" }, t("welcomeHint")),
+      stats,
+      h(
+        "div",
+        { class: "actions" },
+        h("button", { class: "btn", onclick: function () { openMigration("export"); } }, icon("archive"), t("migrate")),
+        h("button", { class: "btn primary", onclick: consolidateAll }, icon("sparkles"), t("consolidateAll"))
+      )
+    );
+    if (ov.memoryEnabled === false) {
+      box.prepend(notice("warn", t("memoryOffNotice")));
     }
-    box.append(h("div", { class: "panel", style: "margin-top:16px" }, emptyState("inbox", t("welcomeTitle"), t("welcomeHint"))));
+    if (ov.context && ov.context.userIdentifier) {
+      box.append(notice("info", t("userIdentifierNotice")));
+    }
     return box;
   }
 
   function renderDetail() {
     const d = state.detail;
-    const isGlobal = d.scope === "global";
-    const isPeople = d.scope === "people";
-    const isSession = !isGlobal && !isPeople;
-    const s = d.session || {};
-    const people = d.people || {};
-    const peopleShared = isPeople && !!people.shared;
-    const peopleUnused = isPeople && !!people.unused;
-    const meta = [];
-    if (isGlobal || isPeople) {
-      meta.push(
-        h(
-          "span",
-          null,
-          isGlobal ? t("globalSub") : peopleShared ? t("peopleSharedSub") : t("peopleSub")
-        )
-      );
-      if (peopleUnused) {
-        meta.push(h("span", { class: "tag warn" }, t("peopleUnusedShort")));
-      }
-      if (isGlobal) {
-        meta.push(h("span", { class: "tag " + (d.enabled ? "ok" : "warn") }, d.enabled ? t("enabled") : t("disabled")));
-      }
-      if (peopleShared && people.members && people.members.length) {
-        meta.push(h("span", null, peopleMemberSummary(people.members)));
-      }
-    } else {
-      meta.push(h("span", null, kindLabel(s.kind)));
-      if (s.platform) {
-        meta.push(h("span", null, s.platform));
-      }
-      if (s.target) {
-        meta.push(h("span", null, "ID ", h("code", null, s.target)));
-      }
-      if (s.lastActive) {
-        meta.push(h("span", { title: fmtTime(s.lastActive) }, t("lastActive", { time: relTime(s.lastActive) })));
-      }
-      if (s.firstSeen) {
-        meta.push(h("span", { title: fmtTime(s.firstSeen) }, t("firstSeen", { time: fmtTime(s.firstSeen).slice(0, 10) })));
-      }
-    }
-
-    const actions = [];
-    if (isSession) {
-      actions.push(h("button", { class: "btn", onclick: editRemark }, icon("edit"), t("remark")));
-    }
-    actions.push(
-      h(
-        "button",
-        { class: "btn", onclick: consolidateScope, disabled: !d.files.length },
-        icon("sparkles"),
-        t("consolidate")
-      )
-    );
-    actions.push(h("button", { class: "btn", onclick: showHistory }, icon("history"), t("tidyHistory")));
-    actions.push(
-      h(
-        "button",
-        { class: "btn", onclick: migrateScope, disabled: !d.files.length && !(d.forgotten || []).length },
-        icon("transfer"),
-        t("migrateTo")
-      )
-    );
-    if (isSession) {
-      actions.push(h("button", { class: "btn danger", onclick: purgeSession }, icon("trash"), t("purge")));
-    }
-
-    const title = isGlobal
-      ? t("globalTitle")
-      : isPeople
-        ? peopleScopeTitle(people.platform, d.key)
-        : sessionTitle(s);
-    const avatarKind = isGlobal ? "global" : isPeople ? "people" : s.kind;
-    const avatarIcon = isGlobal ? "bot" : isPeople ? "user" : KIND_ICON[s.kind] || "chat";
+    const sel = state.selected;
+    const title = scopeTitle(sel);
+    const sub = scopeSub(sel);
     const head = h(
       "div",
       { class: "detail-head" },
+      h("button", { class: "btn ghost icon-only mobile-only", onclick: backToList }, icon("back")),
+      h("div", null, h("div", { class: "detail-title" }, title), h("div", { class: "session-sub" }, sub)),
       h(
         "div",
-        { class: "detail-title" },
-        h("button", { class: "btn ghost icon-only mobile-only", title: t("back"), onclick: backToList }, icon("back")),
-        h("div", { class: "avatar " + avatarKind }, icon(avatarIcon)),
-        h(
-          "div",
-          { style: "min-width:0" },
-          h("h2", { title: isSession ? s.umo || s.key : "" }, title),
-          h("div", { class: "meta-row" }, meta)
-        )
-      ),
-      h("div", { class: "actions" }, actions)
+        { class: "brand-actions" },
+        d.scope !== "board"
+          ? h(
+              "button",
+              { class: "btn", onclick: function () { consolidateScope(sel); } },
+              icon("sparkles"),
+              t("consolidate")
+            )
+          : null,
+        h("button", { class: "btn", onclick: function () { refreshAll(); } }, icon("refresh"), t("refresh"))
+      )
     );
-
-    const notices = [];
-    if (state.overview && !state.overview.memoryEnabled) {
-      notices.push(notice("warn", t("memoryOffNotice")));
+    const tabs = h("div", { class: "tabs" });
+    const tabDefs = [
+      ["memories", "tabMemories"],
+      ["index", "tabIndex"],
+      ["forgotten", "tabForgotten"],
+      ["trash", "tabTrash"],
+      ["runs", "tabRuns"],
+    ];
+    if (d.scope === "whisper") {
+      tabDefs.splice(2, 0, ["context", "tabContext"]);
     }
-    if (isGlobal && !d.enabled) {
-      notices.push(notice("warn", t("globalOffNotice")));
-    }
-    if (peopleShared) {
-      notices.push(
-        notice(
-          people.active ? "info" : "warn",
-          people.active ? t("peopleSharedNotice") : t("peopleSharedOffNotice")
-        )
-      );
-    }
-    if (peopleUnused) {
-      notices.push(notice("warn", t("peopleUnusedNotice")));
-    }
-    const tidy = d.tidy || {};
-    if (tidy.pendingCount && tidy.plan) {
-      notices.push(
-        notice("info", [
-          t("tidyPendingNotice", { n: tidy.pendingCount, time: relTime(tidy.pendingAt) }),
-          h(
-            "div",
-            { class: "notice-actions" },
-            h("button", { class: "btn small primary", onclick: reviewPending }, t("viewPlan")),
-            h("button", { class: "btn small", onclick: dismissPending }, t("dismiss"))
-          ),
-        ])
-      );
-    }
-
-    const tabs = [["memories", "tabMemories", d.files.length], ["index", "tabIndex", null]];
-    if (isSession) {
-      tabs.push(["context", "tabContext", null]);
-    }
-    const forgotten = d.forgotten || [];
-    if (d.forgettingEnabled || forgotten.length) {
-      tabs.push(["forgotten", "tabForgotten", forgotten.length]);
-    }
-    tabs.push(["trash", "tabTrash", d.trashCount || 0]);
-    const tabBar = h("div", { class: "tabs", role: "tablist" });
-    tabs.forEach(function (tab) {
-      tabBar.append(
+    tabDefs.forEach(function (item) {
+      tabs.append(
         h(
           "button",
           {
-            class: "tab" + (state.tab === tab[0] ? " active" : ""),
-            role: "tab",
-            onclick: function () {
-              if (state.tab === tab[0]) {
+            class: "tab" + (state.tab === item[0] ? " active" : ""),
+            onclick: async function () {
+              if (!(await confirmDiscard())) {
                 return;
               }
-              state.tab = tab[0];
-              tabBar.querySelectorAll(".tab").forEach(function (el, i) {
-                el.classList.toggle("active", tabs[i][0] === state.tab);
-              });
-              renderTab();
+              state.tab = item[0];
+              render();
+              activateTab();
             },
           },
-          t(tab[1]),
-          tab[2] === null ? null : h("span", { class: "count" }, tab[2])
+          t(item[1])
         )
       );
     });
-
-    els.tabBody = h("div");
-    renderTab();
-    return h("div", { class: "detail" }, head, notices, tabBar, els.tabBody);
-  }
-
-  function renderTab() {
-    const body = els.tabBody;
-    if (!body) {
-      return;
-    }
-    body.replaceChildren();
-    els.fileList = null;
-    els.editor = null;
+    const body = h("div", { class: "panel-body" });
     if (state.tab === "memories") {
-      body.append(renderMemoryTab());
+      body.append(renderMemoriesTab());
     } else if (state.tab === "index") {
       body.append(renderIndexTab());
     } else if (state.tab === "context") {
@@ -1500,352 +1050,358 @@
       body.append(renderForgottenTab());
     } else if (state.tab === "trash") {
       body.append(renderTrashTab());
+    } else if (state.tab === "runs") {
+      body.append(renderRunsTab());
+    }
+    return h("div", { class: "stack" }, head, tabs, h("div", { class: "panel" }, body));
+  }
+
+  function activateTab() {
+    if (state.tab === "context" && !state.contextLoading && !state.context) {
+      loadContext();
+    }
+    if (state.tab === "trash" && !state.trashLoading) {
+      loadTrash();
+    }
+    if (state.tab === "runs" && !state.runs) {
+      loadRuns();
     }
   }
 
-  // ------------------------------------------------------------ 记忆标签页
+  // ------------------------------------------------------------ 记忆列表与编辑器
 
-  function renderMemoryTab() {
-    els.fileList = h("div", { class: "file-list" });
-    els.typeChips = h("div", { class: "chips" });
-    const search = h("input", {
-      class: "input",
-      type: "search",
-      placeholder: t("searchPlaceholder"),
-      value: state.fileQuery,
-      oninput: onFileQuery,
-    });
-    const pane = h(
-      "section",
-      { class: "panel file-pane" },
-      h(
-        "div",
-        { class: "file-tools" },
+  function renderMemoriesTab() {
+    const d = state.detail;
+    const box = h("div", { class: "mem-layout" });
+    const listPane = h("div", { class: "list-pane" });
+    const filePane = h("div", { class: "file-pane" });
+    if (d.scope === "board") {
+      listPane.append(
         h(
           "div",
-          { class: "row" },
-          h("div", { class: "search-box" }, icon("search"), search),
-          h("button", { class: "btn primary", onclick: newMemory }, icon("plus"), t("newMemory"))
-        ),
-        els.typeChips
-      ),
-      els.fileList
-    );
-    els.editor = h("section", { class: "panel editor" });
-    renderTypeChips();
-    renderFileList();
-    renderEditor();
-    return h("div", { class: "mem-layout" }, pane, els.editor);
-  }
-
-  function renderTypeChips() {
-    const files = state.detail.files;
-    const counts = { all: files.length, other: 0 };
-    TYPES.forEach(function (type) {
-      counts[type] = 0;
-    });
-    files.forEach(function (f) {
-      if (TYPES.indexOf(f.type) >= 0) {
-        counts[f.type] += 1;
-      } else {
-        counts.other += 1;
-      }
-    });
-    const items = [["all", t("typeAll")]].concat(
-      TYPES.map(function (type) { return [type, t("type_" + type)]; })
-    );
-    if (counts.other) {
-      items.push(["other", t("typeOther")]);
+          { class: "action-panel" },
+          h(
+            "div",
+            { class: "action-text" },
+            h("strong", null, t("publishTitle")),
+            h("span", null, t("publishHint"))
+          ),
+          h("button", { class: "btn primary", onclick: publishNotice }, icon("plus"), t("publishNotice"))
+        )
+      );
     }
-    els.typeChips.replaceChildren();
-    items.forEach(function (item) {
-      els.typeChips.append(
+    const tools = h(
+      "div",
+      { class: "file-tools" },
+      h("input", {
+        class: "input search-box",
+        placeholder: t("searchPlaceholder"),
+        value: state.fileQuery,
+        oninput: function (event) {
+          state.fileQuery = event.target.value;
+          state.searchResults = null;
+          renderMemoriesTabInto(listPane, filePane);
+        },
+        onkeydown: function (event) {
+          if (event.key === "Enter") {
+            runSearch();
+          }
+        },
+      }),
+      h("button", { class: "btn ghost", onclick: runSearch }, icon("search"), t("search")),
+      h("button", { class: "btn", onclick: newMemory }, icon("plus"), t("newMemory"))
+    );
+    listPane.append(tools);
+    const chips = h("div", { class: "chips" });
+    ["all"].concat(TYPES).forEach(function (type) {
+      chips.append(
         h(
           "button",
           {
-            class: "chip" + (state.typeFilter === item[0] ? " active" : ""),
-            title: TYPES.indexOf(item[0]) >= 0 ? t("typeHint_" + item[0]) : null,
+            class: "chip" + (state.typeFilter === type ? " active" : ""),
             onclick: function () {
-              state.typeFilter = item[0];
-              renderTypeChips();
-              renderFileList();
+              state.typeFilter = type;
+              renderMemoriesTabInto(listPane, filePane);
             },
           },
-          item[1] + " " + counts[item[0]]
+          type === "all" ? t("typeAll") : t(type === "journal" ? "type_journal" : "type_" + type)
+        )
+      );
+    });
+    listPane.append(chips);
+    const list = h("div", { class: "file-list" });
+    listPane.append(list);
+    filePane.append(renderEditor());
+    box.append(listPane, filePane);
+    renderFileList(list);
+    return box;
+  }
+
+  function renderMemoriesTabInto(listPane, filePane) {
+    // 简单重绘整个记忆页，避免维护两套局部刷新逻辑
+    const main = els.main;
+    if (!main) {
+      return;
+    }
+    const panel = main.querySelector(".panel-body");
+    if (!panel) {
+      return;
+    }
+    panel.replaceChildren(renderMemoriesTab());
+  }
+
+  function visibleFiles() {
+    const files = (state.detail && state.detail.files) || [];
+    if (state.searchResults) {
+      return state.searchResults;
+    }
+    const query = state.fileQuery.trim().toLowerCase();
+    return files.filter(function (file) {
+      if (state.typeFilter !== "all" && file.type !== state.typeFilter) {
+        return false;
+      }
+      if (!query) {
+        return true;
+      }
+      return (
+        file.file.toLowerCase().indexOf(query) >= 0 ||
+        (file.description || "").toLowerCase().indexOf(query) >= 0
+      );
+    });
+  }
+
+  function renderFileList(list) {
+    const files = visibleFiles();
+    if (!files.length) {
+      list.append(
+        emptyState(
+          "file",
+          state.searchResults ? t("noSearchResults") : t("noMemoriesTitle"),
+          t("noMemoriesHint")
+        )
+      );
+      return;
+    }
+    files.forEach(function (file) {
+      const active = state.editor && state.editor.file === file.file && state.editor.scope === state.detail.scope;
+      list.append(
+        h(
+          "div",
+          { class: "file-item" + (active ? " active" : ""), onclick: function () { openFile(file.file); } },
+          h(
+            "div",
+            { class: "file-item-top" },
+            h("span", { class: "file-name" }, file.file),
+            typeTag(file.type)
+          ),
+          h("div", { class: "file-desc" }, file.description || t("noDescription")),
+          h(
+            "div",
+            { class: "file-age" },
+            relTime(file.updated),
+            file.forgottenAt ? h("span", { class: "tag warn" }, t("forgotten")) : null,
+            (file.dangling || []).length ? h("span", { class: "tag warn" }, t("fileDangling")) : null,
+            (file.long || []).length ? h("span", { class: "tag" }, t("fileLong")) : null
+          )
         )
       );
     });
   }
 
-  function fileItem(f, excerpt) {
-    const ed = state.editor;
-    const active = ed && !ed.isNew && ed.oldFile === f.file;
-    return h(
-      "button",
-      {
-        class: "file-item" + (active ? " active" : ""),
-        onclick: function () {
-          openFile(f.file);
-        },
-      },
-      h(
-        "div",
-        { class: "file-item-top" },
-        h("span", { class: "file-name" }, f.file),
-        typeTag(f.type),
-        (f.long && f.long.length) ? h("span", { class: "file-age", title: f.long.join("；") }, t("fileLong")) : null,
-        (f.dangling && f.dangling.length) ? h("span", { class: "file-age", title: f.dangling.join("、") }, t("fileDangling")) : null,
-        h("span", { class: "file-age", title: fmtTime(f.updated || f.mtime) }, relTime(f.updated || f.mtime))
-      ),
-      h(
-        "div",
-        { class: "file-desc" },
-        excerpt ? highlight(excerpt, state.fileQuery) : f.description || t("noDescription")
-      )
-    );
-  }
-
-  function renderFileList() {
-    const list = els.fileList;
-    if (!list) {
+  async function openFile(file) {
+    if (!(await confirmDiscard())) {
       return;
     }
-    list.replaceChildren();
-    const files = state.detail.files;
-    if (state.fileQuery.trim()) {
-      if (!state.searchResults) {
-        list.append(h("div", { class: "empty" }, h("div", { class: "spinner" })));
-        return;
-      }
-      if (!state.searchResults.length) {
-        list.append(h("div", { class: "empty" }, h("span", null, t("noSearchResults"))));
-      }
-      state.searchResults.forEach(function (r) {
-        const header = files.find(function (f) { return f.file === r.file; }) || { file: r.file };
-        list.append(fileItem(header, r.excerpt));
-      });
-      return;
-    }
-    if (!files.length) {
-      list.append(emptyState("inbox", t("noMemoriesTitle"), t("noMemoriesHint")));
-      return;
-    }
-    const shown = files
-      .filter(function (f) {
-        if (state.typeFilter === "all") {
-          return true;
-        }
-        if (state.typeFilter === "other") {
-          return TYPES.indexOf(f.type) < 0;
-        }
-        return f.type === state.typeFilter;
-      })
-      .sort(function (a, b) {
-        return (b.updated || b.mtime) - (a.updated || a.mtime);
-      });
-    if (!shown.length) {
-      list.append(h("div", { class: "empty" }, h("span", null, t("noTypeMatch"))));
-    }
-    shown.forEach(function (f) {
-      list.append(fileItem(f));
-    });
-  }
-
-  function onFileQuery(event) {
-    state.fileQuery = event.target.value;
-    clearTimeout(searchTimer);
-    state.searchResults = null;
-    if (!state.fileQuery.trim()) {
-      renderFileList();
-      return;
-    }
-    renderFileList();
-    searchTimer = setTimeout(runSearch, 300);
-  }
-
-  async function runSearch() {
-    const query = state.fileQuery.trim();
-    const sel = state.selected;
-    if (!query) {
-      return;
-    }
-    let results = [];
     try {
-      const res = await apiGet("search", Object.assign(scopeParams(), { q: query }));
-      results = res.results || [];
+      const data = await apiGet("file", Object.assign(scopeParams(), { file: file }));
+      state.editor = {
+        scope: state.detail.scope,
+        mode: "form",
+        file: data.file,
+        originalFile: data.file,
+        type: data.type || "reference",
+        description: data.description || "",
+        body: data.body || "",
+        signature: data.signature || "",
+        raw: data.content || "",
+        hasFrontmatter: data.hasFrontmatter,
+        baseMtime: data.mtime || 0,
+        dirty: false,
+        isNew: false,
+      };
+      state.tab = "memories";
+      render();
+      activateTab();
     } catch (err) {
       toast(err.message, "error");
-      return;
     }
-    if (!isSelected(sel) || query !== state.fileQuery.trim()) {
-      return;
-    }
-    state.searchResults = results;
-    renderFileList();
+  }
+
+  function newMemory() {
+    state.editor = {
+      scope: state.detail.scope,
+      mode: "form",
+      file: "",
+      originalFile: "",
+      type: "reference",
+      description: "",
+      body: "",
+      signature: "",
+      raw: "",
+      hasFrontmatter: true,
+      baseMtime: 0,
+      dirty: false,
+      isNew: true,
+    };
+    render();
   }
 
   function editorTitle() {
     const ed = state.editor;
-    return [
-      ed.dirty ? h("span", { class: "dirty-dot", title: t("unsaved") }) : null,
-      ed.isNew ? t("newMemory") : ed.oldFile,
-    ];
+    if (ed.isNew) {
+      return t("newMemory");
+    }
+    return ed.file || t("editorEmptyTitle");
   }
 
   function markDirty() {
-    const ed = state.editor;
-    if (ed && !ed.dirty) {
-      ed.dirty = true;
-      if (els.editorTitle) {
-        els.editorTitle.replaceChildren();
-        append(els.editorTitle, editorTitle());
+    if (state.editor) {
+      state.editor.dirty = true;
+      const badge = document.querySelector(".dirty-dot");
+      if (badge) {
+        badge.classList.add("show");
       }
     }
   }
 
   function field(label, hint, control) {
-    return h("div", { class: "field" }, h("label", null, h("span", null, label), hint ? h("small", null, hint) : null), control);
-  }
-
-  function typeSegment() {
-    const seg = h("div", { class: "segmented" });
-    function draw() {
-      seg.replaceChildren();
-      TYPES.forEach(function (type) {
-        seg.append(
-          h(
-            "button",
-            {
-              type: "button",
-              class: state.editor.type === type ? "active" : "",
-              title: t("typeHint_" + type),
-              onclick: function () {
-                if (state.editor.type !== type) {
-                  state.editor.type = type;
-                  markDirty();
-                  draw();
-                }
-              },
-            },
-            t("type_" + type)
-          )
-        );
-      });
-    }
-    draw();
-    return seg;
-  }
-
-  function switchMode(mode) {
-    const ed = state.editor;
-    if (ed.mode === mode) {
-      return;
-    }
-    if (mode === "raw") {
-      ed.content = composeMemory(stem(ed.file.trim()), ed.description, ed.type, ed.body);
-    } else {
-      const doc = parseMemory(ed.content);
-      ed.description = doc.description;
-      ed.type = TYPES.indexOf(doc.type) >= 0 ? doc.type : ed.type || "user";
-      ed.body = doc.hasFrontmatter ? doc.body : ed.content.trim();
-    }
-    ed.mode = mode;
-    renderEditor();
-  }
-
-  function linkChip(name) {
-    const file = name.slice(-3) === ".md" ? name : name + ".md";
-    const exists = state.detail.files.some(function (f) { return f.file === file; });
     return h(
-      "button",
-      {
-        class: "link-chip" + (exists ? "" : " missing"),
-        title: exists ? t("openLink") : t("linkMissing"),
-        disabled: !exists,
-        onclick: function () {
-          openFile(file);
-        },
-      },
-      name
+      "div",
+      { class: "field" },
+      h("label", null, label, hint ? h("small", null, hint) : null),
+      control
     );
   }
 
   function renderEditor() {
-    const box = els.editor;
-    if (!box) {
-      return;
-    }
-    box.replaceChildren();
-    els.editorTitle = null;
     const ed = state.editor;
     if (!ed) {
-      box.append(emptyState("file", t("editorEmptyTitle"), t("editorEmptyHint")));
-      return;
+      return emptyState("edit", t("editorEmptyTitle"), t("editorEmptyHint"));
     }
-    if (ed.loading) {
-      box.append(spinnerBlock());
-      return;
-    }
-    els.editorTitle = h("h3", { class: "file-name", style: "flex:1" }, editorTitle());
-    const modes = h("div", { class: "segmented" });
-    [["fields", t("modeForm")], ["raw", t("modeRaw")]].forEach(function (item) {
-      modes.append(
-        h(
-          "button",
-          {
-            type: "button",
-            class: ed.mode === item[0] ? "active" : "",
-            onclick: function () {
-              switchMode(item[0]);
+    const box = h("div", { class: "editor" });
+    const head = h(
+      "div",
+      { class: "editor-head" },
+      h("div", { class: "editor-title" }, editorTitle()),
+      ed.dirty ? h("span", { class: "dirty-dot show" }, t("unsaved")) : null
+    );
+    box.append(head);
+    const modeSwitch = h(
+      "div",
+      { class: "segmented" },
+      h(
+        "button",
+        { class: "segment" + (ed.mode === "form" ? " active" : ""), onclick: function () { ed.mode = "form"; render(); } },
+        t("modeForm")
+      ),
+      h(
+        "button",
+        { class: "segment" + (ed.mode === "raw" ? " active" : ""), onclick: function () { ed.mode = "raw"; render(); } },
+        t("modeRaw")
+      )
+    );
+    box.append(modeSwitch);
+    if (ed.mode === "raw") {
+      box.append(
+        field(
+          t("fieldRaw"),
+          t("fieldRawHint"),
+          h("textarea", {
+            class: "textarea raw",
+            value: ed.raw,
+            oninput: function (event) {
+              ed.raw = event.target.value;
+              markDirty();
             },
-          },
-          item[1]
+          })
         )
       );
-    });
-    const fileInput = h("input", {
-      class: "input",
-      value: ed.file,
-      placeholder: "user-123456789.md",
-      spellcheck: "false",
-      autocomplete: "off",
-      oninput: function (event) {
-        ed.file = event.target.value;
-        markDirty();
-      },
-    });
-    const body = h("div", { class: "panel-body" });
-    if (ed.mode === "fields") {
-      if (!ed.isNew && !ed.hasFrontmatter) {
-        body.append(notice("info", t("noFrontmatterNotice")));
+    } else {
+      if (!ed.hasFrontmatter) {
+        box.append(notice("info", t("noFrontmatterNotice")));
       }
-      body.append(
-        h(
-          "div",
-          { class: "field-row" },
-          field(t("fieldFile"), t("fieldFileHint"), fileInput),
-          field(t("fieldType"), null, typeSegment())
-        ),
+      box.append(
+        field(
+          t("fieldFile"),
+          t("fieldFileHint"),
+          h("input", {
+            class: "input",
+            value: ed.file,
+            disabled: !ed.isNew,
+            oninput: function (event) {
+              ed.file = event.target.value;
+              markDirty();
+            },
+          })
+        )
+      );
+      const typeOptions = TYPES.map(function (type) {
+        return h("option", { value: type, selected: ed.type === type }, t("type_" + type));
+      });
+      box.append(
+        field(
+          t("fieldType"),
+          null,
+          h(
+            "select",
+            {
+              class: "input",
+              onchange: function (event) {
+                ed.type = event.target.value;
+                markDirty();
+              },
+            },
+            typeOptions
+          )
+        )
+      );
+      box.append(
         field(
           t("fieldDescription"),
           t("fieldDescriptionHint"),
           h("input", {
             class: "input",
             value: ed.description,
-            maxlength: 300,
             oninput: function (event) {
               ed.description = event.target.value;
               markDirty();
             },
           })
-        ),
+        )
+      );
+      if (ed.scope === "board") {
+        box.append(
+          field(
+            t("fieldSignature"),
+            t("fieldSignatureHint"),
+            h("input", {
+              class: "input",
+              value: ed.signature,
+              oninput: function (event) {
+                ed.signature = event.target.value;
+                markDirty();
+              },
+            })
+          )
+        );
+      }
+      box.append(
         field(
           t("fieldBody"),
           t("fieldBodyHint"),
           h("textarea", {
             class: "textarea",
             value: ed.body,
-            spellcheck: "false",
             oninput: function (event) {
               ed.body = event.target.value;
               markDirty();
@@ -1853,213 +1409,110 @@
           })
         )
       );
-    } else {
-      body.append(
-        field(t("fieldFile"), t("fieldFileHint"), fileInput),
-        field(
-          t("fieldRaw"),
-          t("fieldRawHint"),
-          h("textarea", {
-            class: "textarea",
-            style: "min-height:380px",
-            value: ed.content,
-            spellcheck: "false",
-            oninput: function (event) {
-              ed.content = event.target.value;
-              markDirty();
-            },
+    }
+    const links = extractLinks(ed.body || ed.raw);
+    if (links.length) {
+      box.append(
+        h(
+          "div",
+          { class: "links" },
+          h("span", { class: "hint-line" }, t("linksLabel")),
+          links.map(function (name) {
+            return h(
+              "button",
+              {
+                class: "link-chip",
+                onclick: function () {
+                  openFile(name.endsWith(".md") ? name : name + ".md");
+                },
+              },
+              icon("link"),
+              name
+            );
           })
         )
       );
     }
-    const links = extractLinks(ed.mode === "fields" ? ed.body : ed.content);
-    if (links.length) {
-      body.append(h("div", { class: "links" }, icon("link"), t("linksLabel"), links.map(linkChip)));
-    }
-    const saveBtn = h("button", { class: "btn primary", onclick: function () { saveFile(saveBtn); } }, icon("check"), t("save"));
     const foot = h(
       "div",
       { class: "editor-foot" },
-      h("span", { class: "hint" }, editorStampLine(ed)),
       h(
-        "div",
-        { class: "actions" },
-        ed.isNew
-          ? null
-          : h(
-              "button",
-              { class: "btn", onclick: toggleHistory, title: t("historyHint") },
-              icon("history"),
-              t("historyVersions")
-            ),
-        ed.isNew || !state.detail.forgettingEnabled
-          ? null
-          : h("button", { class: "btn", onclick: forgetFile, title: t("forgottenHint") }, icon("archive"), t("forget")),
-        ed.isNew ? null : h("button", { class: "btn danger", onclick: deleteFile }, icon("trash"), t("delete")),
-        ed.isNew
-          ? null
-          : h(
-              "button",
-              { class: "btn danger", onclick: purgeFile, title: t("purgeFileTitle") },
-              icon("warn"),
-              t("purgeFile")
-            ),
-        h("button", { class: "btn", onclick: cancelEdit }, t("cancel")),
-        saveBtn
-      )
+        "button",
+        {
+          class: "btn primary",
+          onclick: function (event) {
+            saveFile(event.currentTarget);
+          },
+        },
+        t("save")
+      ),
+      !ed.isNew
+        ? h("button", { class: "btn danger", onclick: deleteFile }, t("delete"))
+        : null,
+      !ed.isNew
+        ? h("button", { class: "btn ghost", onclick: forgetFile }, t("forget"))
+        : null,
+      h("button", { class: "btn ghost", onclick: function () { state.editor = null; render(); } }, t("cancel"))
     );
-    const historyPanel =
-      !ed.isNew && state.history && state.history.open && state.history.file === ed.oldFile
-        ? renderHistoryPanel()
-        : null;
-    box.append(h("div", { class: "panel-head" }, els.editorTitle, modes), body, historyPanel, foot);
-  }
-
-  // 编辑器底部的一行：首次记于 / 最近更新 / 来源 ID；老文件没有戳时退回 mtime
-  function editorStampLine(ed) {
-    if (ed.isNew) {
-      return t("newHint");
-    }
-    if (!ed.created && !ed.updated) {
-      return t("savedAt", { time: fmtTime(ed.baseMtime) });
-    }
-    let line = t("stampLine", { created: ed.created || "?", updated: ed.updated || "?" });
-    if (ed.source) {
-      line += " · " + t("sourceLine", { ids: ed.source });
-    }
-    line += " · " + usageText(ed.lastUsed, ed.uses);
-    return line;
-  }
-
-  function usageText(lastUsed, uses) {
-    if (!lastUsed) {
-      return t("neverUsed");
-    }
-    return t("usageLine", { time: relTime(lastUsed), n: uses || 0 });
-  }
-
-  function editorFromFile(data) {
-    return {
-      isNew: false,
-      oldFile: data.file,
-      file: data.file,
-      mode: data.hasFrontmatter ? "fields" : "raw",
-      type: TYPES.indexOf(data.type) >= 0 ? data.type : "user",
-      description: data.description || "",
-      body: data.hasFrontmatter ? data.body || "" : String(data.content || "").trim(),
-      content: data.content || "",
-      baseMtime: data.mtime || 0,
-      created: data.created || "",
-      updated: data.updated || "",
-      source: data.source || "",
-      lastUsed: data.lastUsed || 0,
-      uses: data.uses || 0,
-      hasFrontmatter: Boolean(data.hasFrontmatter),
-      dirty: false,
-    };
-  }
-
-  function revealEditor() {
-    if (els.editor && window.innerWidth <= 1100) {
-      els.editor.scrollIntoView({ block: "start", behavior: "smooth" });
-    }
-  }
-
-  async function openFile(file) {
-    if (!(await confirmDiscard())) {
-      return;
-    }
-    const sel = state.selected;
-    state.history = null;
-    state.editor = { loading: true, isNew: false, oldFile: file };
-    renderFileList();
-    renderEditor();
-    revealEditor();
-    try {
-      const data = await apiGet("file", Object.assign(scopeParams(), { file: file }));
-      if (!isSelected(sel) || !state.editor || state.editor.oldFile !== file) {
-        return;
+    box.append(foot);
+    if (!ed.isNew) {
+      box.append(
+        h(
+          "div",
+          { class: "meta-row" },
+          h("span", null, t("savedAt", { time: fmtTime(ed.baseMtime) })),
+          h(
+            "button",
+            { class: "btn ghost", onclick: toggleHistory },
+            icon("history"),
+            t("historyTitle")
+          )
+        )
+      );
+      if (state.history && state.history.open) {
+        box.append(renderHistoryPanel());
       }
-      state.editor = editorFromFile(data);
-    } catch (err) {
-      // 期间已切会话、或编辑器已换成别的文件 / 新建草稿：不能把它清掉
-      if (!isSelected(sel) || !state.editor || !state.editor.loading || state.editor.oldFile !== file) {
-        return;
-      }
-      state.editor = null;
-      toast(err.message, "error");
     }
-    renderFileList();
-    renderEditor();
-  }
-
-  async function newMemory() {
-    if (!(await confirmDiscard())) {
-      return;
-    }
-    state.history = null;
-    state.editor = {
-      isNew: true,
-      oldFile: "",
-      file: "",
-      mode: "fields",
-      type: "user",
-      description: "",
-      body: "",
-      content: "",
-      baseMtime: 0,
-      hasFrontmatter: true,
-      dirty: false,
-    };
-    renderFileList();
-    renderEditor();
-    revealEditor();
-  }
-
-  async function cancelEdit() {
-    if (!(await confirmDiscard())) {
-      return;
-    }
-    state.editor = null;
-    state.history = null;
-    renderFileList();
-    renderEditor();
+    return box;
   }
 
   async function saveFile(button) {
     const ed = state.editor;
-    if (!ed || ed.loading) {
+    if (!ed) {
       return;
     }
-    let file = ed.file.trim();
-    if (file && file.slice(-3) !== ".md") {
-      file += ".md";
-    }
-    if (!FILE_RE.test(file) || file === "MEMORY.md") {
-      toast(t("badFileName"), "error");
-      return;
-    }
-    if (ed.mode === "fields" && !ed.description.trim()) {
-      toast(t("needDescription"), "error");
-      return;
-    }
-    const payload = Object.assign(scopeParams(), {
-      file: file,
-      oldFile: ed.isNew ? "" : ed.oldFile,
+    const body = {
+      scope: ed.scope,
+      key: (state.selected && state.selected.key) || "",
+      file: ed.file,
+      oldFile: ed.originalFile,
       mode: ed.mode,
       type: ed.type,
       description: ed.description,
       body: ed.body,
-      content: ed.content,
-      baseMtime: ed.isNew ? null : ed.baseMtime,
-    });
+      signature: ed.signature,
+      content: ed.raw,
+      baseMtime: ed.baseMtime,
+    };
+    if (ed.mode === "form" && !String(ed.file || "").trim()) {
+      toast(t("badFileName"), "error");
+      return;
+    }
+    if (ed.mode === "form" && !String(ed.description || "").trim()) {
+      toast(t("needDescription"), "error");
+      return;
+    }
+    if (ed.scope === "board" && !String(ed.signature || "").trim()) {
+      toast(t("signatureRequired"), "error");
+      return;
+    }
     await withBusy(button, async function () {
       try {
-        const res = await apiPost("file/save", payload);
+        const res = await apiPost("file/save", body);
         ed.dirty = false;
         toast(res.message || t("saved"));
-        await Promise.all([loadDetail(), loadOverview(true)]);
-        await openFile(res.file || file);
+        await refreshAll();
+        await openFile(res.file);
       } catch (err) {
         toast(err.message, "error");
       }
@@ -2068,9 +1521,12 @@
 
   async function deleteFile() {
     const ed = state.editor;
+    if (!ed) {
+      return;
+    }
     const ok = await confirmDialog({
       title: t("deleteTitle"),
-      message: t("deleteMessage", { file: ed.oldFile }),
+      message: t("deleteMessage", { file: ed.file }),
       confirm: t("delete"),
       danger: true,
     });
@@ -2078,11 +1534,10 @@
       return;
     }
     try {
-      const res = await apiPost("file/delete", Object.assign(scopeParams(), { file: ed.oldFile }));
+      await apiPost("file/delete", Object.assign(scopeParams(), { file: ed.file }));
       state.editor = null;
-      state.history = null;
-      toast(res.message || t("deleted"));
-      await Promise.all([loadDetail(), loadOverview(true)]);
+      toast(t("deleted"));
+      await refreshAll();
     } catch (err) {
       toast(err.message, "error");
     }
@@ -2090,271 +1545,415 @@
 
   async function forgetFile() {
     const ed = state.editor;
+    if (!ed) {
+      return;
+    }
     const ok = await confirmDialog({
       title: t("forgetTitle"),
-      message: t("forgetMessage", { file: ed.oldFile }),
+      message: t("forgetMessage", { file: ed.file }),
       confirm: t("forget"),
     });
     if (!ok) {
       return;
     }
     try {
-      const res = await apiPost("file/forget", Object.assign(scopeParams(), { file: ed.oldFile }));
+      await apiPost("file/forget", Object.assign(scopeParams(), { file: ed.file }));
       state.editor = null;
-      state.history = null;
-      toast(res.message || t("forgotten"));
-      await Promise.all([loadDetail(), loadOverview(true)]);
+      toast(t("forgotten"));
+      await refreshAll();
     } catch (err) {
       toast(err.message, "error");
     }
   }
 
-  // ------------------------------------------------------------ 历史版本
+  // ------------------------------------------------------------ 留言板发布
 
-  const KNOWN_ACTIONS = [
-    "write",
-    "edit",
-    "delete",
-    "import",
-    "restore",
-    "forget",
-    "discard-forgotten",
-    "delete-forgotten",
-    "delete-trash",
-    "purge-file",
-    "purge-scope",
-    "rename",
-  ];
-
-  function actionLabel(action) {
-    return KNOWN_ACTIONS.indexOf(action) >= 0 ? t("action_" + action) : action || "—";
+  function savedSignature() {
+    try {
+      return window.localStorage.getItem(SIGNATURE_KEY) || "";
+    } catch (err) {
+      return "";
+    }
   }
+
+  function rememberSignature(value) {
+    try {
+      window.localStorage.setItem(SIGNATURE_KEY, value);
+    } catch (err) {
+      // 隐私模式等禁用 localStorage 时仍然可以发布，只是不记住
+    }
+  }
+
+  function publishNotice() {
+    const signature = h("input", {
+      class: "input",
+      value: savedSignature(),
+      placeholder: t("fieldSignature"),
+    });
+    const title = h("input", { class: "input", placeholder: t("fieldDescription") });
+    const body = h("textarea", { class: "textarea", placeholder: t("fieldBody") });
+    const ctrl = openDialog({
+      title: t("publishTitle"),
+      wide: true,
+      body: h(
+        "div",
+        { class: "stack" },
+        h("p", { class: "hint-line" }, t("publishHint")),
+        field(t("fieldSignature"), t("fieldSignatureHint"), signature),
+        field(t("fieldDescription"), t("fieldDescriptionHint"), title),
+        field(t("fieldBody"), t("fieldBodyHint"), body)
+      ),
+    });
+    async function submit() {
+      const signatureText = signature.value.trim();
+      if (!signatureText) {
+        toast(t("signatureRequired"), "error");
+        return;
+      }
+      if (!title.value.trim() || !body.value.trim()) {
+        toast(t("needDescription"), "error");
+        return;
+      }
+      ctrl.busy = true;
+      try {
+        const res = await apiPost("board/publish", {
+          signature: signatureText,
+          description: title.value.trim(),
+          body: body.value,
+        });
+        rememberSignature(signatureText);
+        ctrl.busy = false;
+        ctrl.close(true);
+        toast(res.message || t("published"));
+        await refreshAll();
+      } catch (err) {
+        ctrl.busy = false;
+        toast(err.message, "error");
+      }
+    }
+    ctrl.setFoot([
+      h("button", { class: "btn", onclick: function () { ctrl.close(null); } }, t("cancel")),
+      h("button", { class: "btn primary", onclick: submit }, t("publishNotice")),
+    ]);
+  }
+
+  // ------------------------------------------------------------ 搜索
+
+  async function runSearch() {
+    const query = state.fileQuery.trim();
+    if (!query) {
+      state.searchResults = null;
+      render();
+      return;
+    }
+    try {
+      const data = await apiGet("search", Object.assign(scopeParams(), { q: query }));
+      const byFile = {};
+      (state.detail.files || []).forEach(function (file) {
+        byFile[file.file] = file;
+      });
+      state.searchResults = (data.results || []).map(function (item) {
+        return Object.assign({}, byFile[item.file] || { file: item.file, type: "", description: item.excerpt }, item);
+      });
+      render();
+    } catch (err) {
+      toast(err.message, "error");
+    }
+  }
+
+  // ------------------------------------------------------------ 历史
 
   function toggleHistory() {
-    const ed = state.editor;
-    if (!ed || ed.isNew) {
-      return;
-    }
-    if (state.history && state.history.file === ed.oldFile && state.history.open) {
+    if (state.history && state.history.open) {
       state.history = null;
-      renderEditor();
+      render();
       return;
     }
-    state.history = { file: ed.oldFile, open: true, loading: true, items: [], error: "" };
-    renderEditor();
-    loadHistory(ed.oldFile);
+    loadHistory();
   }
 
-  async function loadHistory(file) {
-    const sel = state.selected;
-    let result;
-    try {
-      const res = await apiGet("history/versions", Object.assign(scopeParams(), { file: file }));
-      result = { items: res.versions || [], error: "" };
-    } catch (err) {
-      result = { items: [], error: err.message };
-    }
-    if (!isSelected(sel) || !state.history || state.history.file !== file) {
+  async function loadHistory() {
+    const ed = state.editor;
+    if (!ed) {
       return;
     }
-    state.history.loading = false;
-    state.history.items = result.items;
-    state.history.error = result.error;
-    if (state.tab === "memories" && state.editor && state.editor.oldFile === file) {
-      renderEditor();
+    try {
+      const data = await apiGet("history/versions", Object.assign(scopeParams(), { file: ed.file }));
+      state.history = { open: true, file: ed.file, versions: data.versions || [] };
+      render();
+    } catch (err) {
+      toast(err.message, "error");
     }
   }
 
   function renderHistoryPanel() {
-    const hs = state.history;
-    const panel = h("section", { class: "history-panel" });
-    panel.append(
-      h(
-        "div",
-        { class: "panel-head" },
-        h("h3", null, t("historyVersions")),
-        h("span", { style: "color:var(--text-3);font-size:12.5px" }, t("historyHint"))
-      )
-    );
-    if (hs.loading) {
-      panel.append(spinnerBlock());
-      return panel;
+    const box = h("div", { class: "history-panel" });
+    if (!state.history.versions.length) {
+      box.append(emptyState("history", t("noHistoryTitle"), t("noHistoryHint")));
+      return box;
     }
-    if (hs.error) {
-      panel.append(notice("warn", hs.error));
-      return panel;
-    }
-    if (!hs.items.length) {
-      panel.append(emptyState("history", t("noHistoryTitle"), t("noHistoryHint")));
-      return panel;
-    }
-    hs.items.forEach(function (item) {
-      const meta = [t("historyActor", { actor: item.actor || t("actorUnknown") })];
-      if (item.source) {
-        meta.push(t("historySource", { source: item.source }));
-      }
-      meta.push(item.version);
-      panel.append(
+    state.history.versions.forEach(function (version) {
+      box.append(
         h(
           "div",
-          { class: "forgotten-item" },
+          { class: "row-wrap" },
+          h("span", null, t("historyVersion", { version: version.version })),
+          h("span", { class: "hint-line" }, fmtTime(version.ts) + " · " + (t("action_" + version.action) || version.action)),
           h(
-            "div",
-            { class: "grow" },
-            h(
-              "div",
-              { class: "file-item-top" },
-              h("strong", { class: "history-time" }, fmtTime(item.ts)),
-              h("span", { class: "tag" }, actionLabel(item.action)),
-              h("span", { class: "file-age" }, fmtBytes(item.size))
-            ),
-            h("div", { class: "session-sub" }, meta.join(" · "))
-          ),
-          h(
-            "div",
-            { class: "actions" },
-            h("button", { class: "btn small", onclick: function () { viewHistory(item); } }, t("view")),
-            h("button", { class: "btn small primary", onclick: function () { restoreHistoryVersion(item); } }, t("restore"))
+            "button",
+            {
+              class: "btn ghost",
+              onclick: async function () {
+                try {
+                  await apiPost("history/restore", Object.assign(scopeParams(), { file: state.history.file, version: version.version }));
+                  toast(t("versionRestored"));
+                  await refreshAll();
+                  await openFile(state.history.file);
+                } catch (err) {
+                  toast(err.message, "error");
+                }
+              },
+            },
+            t("restoreVersion")
           )
         )
       );
     });
-    return panel;
+    return box;
   }
 
-  async function viewHistory(item) {
-    const ed = state.editor;
-    if (!ed) {
-      return;
+  // ------------------------------------------------------------ 索引
+
+  function renderIndexTab() {
+    const d = state.detail;
+    const idx = d.index || {};
+    if (state.indexDraft === null) {
+      state.indexDraft = idx.content || "";
     }
-    try {
-      const data = await apiGet(
-        "history/file",
-        Object.assign(scopeParams(), { file: ed.oldFile, version: item.version })
-      );
-      openDialog({
-        title: fmtTime(item.ts) + " · " + ed.oldFile,
-        body: h("pre", { class: "pre" }, data.content || ""),
-        wide: true,
-      });
-    } catch (err) {
-      toast(err.message, "error");
+    const box = h("div", { class: "stack" });
+    if (idx.truncated) {
+      box.append(notice("warn", t("indexTruncated")));
     }
+    if ((idx.missing || []).length) {
+      box.append(notice("warn", t("indexMissing", { n: idx.missing.length }) + " " + idx.missing.join("、")));
+    }
+    if ((idx.dangling || []).length) {
+      box.append(notice("warn", t("indexDangling", { n: idx.dangling.length }) + " " + idx.dangling.join("、")));
+    }
+    if (!idx.truncated && !(idx.missing || []).length && !(idx.dangling || []).length) {
+      box.append(notice("info", t("indexHealthy")));
+    }
+    box.append(
+      h(
+        "div",
+        { class: "stats" },
+        stat(t("indexLines"), fmtNum(idx.lines), null),
+        stat(t("indexSize"), fmtBytes(idx.size), t("chars", { n: idx.size }))
+      )
+    );
+    box.append(
+      h("textarea", {
+        class: "textarea index",
+        value: state.indexDraft,
+        oninput: function (event) {
+          state.indexDraft = event.target.value;
+        },
+      })
+    );
+    box.append(
+      h(
+        "div",
+        { class: "actions" },
+        h("button", { class: "btn primary", onclick: saveIndex }, t("save")),
+        h("button", { class: "btn", onclick: rebuildIndex }, t("rebuildIndex"))
+      )
+    );
+    box.append(h("p", { class: "hint-line" }, t("indexEditorHint")));
+    return box;
   }
 
-  async function restoreHistoryVersion(item) {
-    const ed = state.editor;
-    if (!ed) {
-      return;
-    }
-    const file = ed.oldFile;
-    const ok = await confirmDialog({
-      title: t("historyRestoreTitle"),
-      message: t("historyRestoreMessage", { file: file, time: fmtTime(item.ts) }),
-      confirm: t("restore"),
-      danger: true,
-    });
-    if (!ok) {
-      return;
-    }
-    try {
-      const res = await apiPost(
-        "history/restore",
-        Object.assign(scopeParams(), { file: file, version: item.version })
-      );
-      toast(res.message || t("restored"));
-      if (state.editor) {
-        state.editor.dirty = false;
+  async function saveIndex(button) {
+    await withBusy(button, async function () {
+      try {
+        await apiPost("index/save", Object.assign(scopeParams(), { content: state.indexDraft }));
+        toast(t("saved"));
+        state.indexDraft = null;
+        await loadDetail();
+      } catch (err) {
+        toast(err.message, "error");
       }
-      state.history = null;
-      await Promise.all([loadDetail(), loadOverview(true)]);
-      await openFile(file);
+    });
+  }
+
+  async function rebuildIndex(button) {
+    await withBusy(button, async function () {
+      try {
+        const res = await apiPost("index/rebuild", scopeParams());
+        toast(res.message || t("saved"));
+        state.indexDraft = null;
+        await loadDetail();
+      } catch (err) {
+        toast(err.message, "error");
+      }
+    });
+  }
+
+  // ------------------------------------------------------------ 上下文
+
+  async function loadContext() {
+    if (!state.selected || state.selected.scope !== "whisper") {
+      return;
+    }
+    state.contextLoading = true;
+    try {
+      state.context = await apiGet("whisper/context", { key: state.selected.key });
+    } catch (err) {
+      toast(err.message, "error");
+    }
+    state.contextLoading = false;
+    render();
+  }
+
+  function renderContextTab() {
+    if (state.contextLoading) {
+      return spinnerBlock();
+    }
+    if (!state.context) {
+      return emptyState("clock", t("lastEstimate"), t("noEstimate"));
+    }
+    const data = state.context;
+    const box = h("div", { class: "stack" });
+    box.append(notice("info", t("contextReadonlyNotice")));
+    box.append(
+      h(
+        "div",
+        { class: "stats" },
+        stat(t("lastEstimate"), data.estimate ? t("tokens", { n: data.estimate }) : "—", data.live ? t("liveTag") + " · " + t("liveHint") : t("diskTag") + " · " + t("diskHint")),
+        stat(t("lastActual"), data.actual > 0 ? t("tokens", { n: data.actual }) : t("notReported"), t("lastActualSub")),
+        stat(t("cacheHit"), data.cacheHit >= 0 ? t("tokens", { n: data.cacheHit }) : t("notReported"), t("cacheHitSub"))
+      )
+    );
+    if (data.context) {
+      box.append(
+        h(
+          "div",
+          { class: "kv-list" },
+          h("div", null, "上下文窗口：" + (data.context.window || "—") + "（" + (data.context.windowNote || "") + "）"),
+          h("div", null, "AstrBot 轮数上限：" + (data.context.turnLimit > 0 ? data.context.turnLimit : "未设置"))
+        )
+      );
+    }
+    const parts = data.parts || {};
+    const rows = PARTS.filter(function (key) { return parts[key] !== undefined; }).map(function (key) {
+      return h("div", { class: "row-wrap" }, h("span", null, t("part_" + key) || key), h("span", null, fmtNum(parts[key])));
+    });
+    if (rows.length) {
+      box.append(h("div", { class: "kv-list" }, h("strong", null, t("partsTitle")), rows));
+    }
+    box.append(
+      h(
+        "div",
+        { class: "kv-list" },
+        h("strong", null, t("summaryTitle")),
+        h("div", { class: data.hasSummary ? "pre" : "hint-line" }, data.hasSummary ? data.summary : t("noSummary"))
+      )
+    );
+    if (state.selected.scope === "whisper") {
+      box.append(
+        h(
+          "div",
+          { class: "actions" },
+          h("button", { class: "btn", onclick: editRemark }, t("remark")),
+          h("button", { class: "btn danger", onclick: purgeWhisper }, t("purge"))
+        )
+      );
+    }
+    return box;
+  }
+
+  async function editRemark() {
+    const sel = state.selected;
+    if (!sel || sel.scope !== "whisper") {
+      return;
+    }
+    const value = window.prompt(t("remark"), (sel.session && sel.session.remark) || "");
+    if (value === null) {
+      return;
+    }
+    try {
+      await apiPost("whisper/remark", { key: sel.key, remark: value });
+      toast(t("saved"));
+      await refreshAll();
     } catch (err) {
       toast(err.message, "error");
     }
   }
 
-  async function purgeFile() {
-    const ed = state.editor;
-    if (!ed || ed.isNew) {
+  async function purgeWhisper() {
+    const sel = state.selected;
+    if (!sel || sel.scope !== "whisper") {
       return;
     }
     const ok = await confirmDialog({
-      title: t("purgeFileTitle"),
-      message: t("purgeFileMessage", { file: ed.oldFile }),
-      confirm: t("purgeFileConfirm"),
+      title: t("purge"),
+      message: "确定清除这段对话的全部悄悄话吗？文件会移入作用域归档，无法在页面里恢复。",
+      confirm: t("purge"),
       danger: true,
     });
     if (!ok) {
       return;
     }
     try {
-      const res = await apiPost("file/purge", Object.assign(scopeParams(), { file: ed.oldFile }));
-      state.editor = null;
-      state.history = null;
+      const res = await apiPost("whisper/purge", { key: sel.key, target: "all" });
       toast(res.message || t("deleted"));
-      await Promise.all([loadDetail(), loadOverview(true)]);
+      backToList();
+      await refreshAll();
     } catch (err) {
       toast(err.message, "error");
     }
   }
 
-  // ------------------------------------------------------------ 已遗忘标签页
+  // ------------------------------------------------------------ 已遗忘
 
   function renderForgottenTab() {
     const d = state.detail;
-    const items = (d.forgotten || []).slice().sort(function (a, b) {
-      return (b.forgottenAt || 0) - (a.forgottenAt || 0);
-    });
-    const panel = h(
-      "section",
-      { class: "panel" },
-      h(
-        "div",
-        { class: "panel-head" },
-        h("h3", null, t("forgottenTitle")),
-        h("span", { style: "color:var(--text-3);font-size:12.5px" }, d.forgettingEnabled ? t("forgottenHint") : t("forgottenOffHint"))
-      )
+    const box = h("div", { class: "stack" });
+    box.append(
+      d.forgettingEnabled
+        ? h("p", { class: "hint-line" }, t("forgottenHint"))
+        : notice("info", t("forgottenOffHint"))
     );
-    if (!items.length) {
-      panel.append(emptyState("archive", t("noForgottenTitle"), t("noForgottenHint", { days: d.forgetAfterDays || 0 })));
-      return panel;
+    if (!(d.forgotten || []).length) {
+      box.append(
+        emptyState(
+          "archive",
+          t("noForgottenTitle"),
+          t("noForgottenHint", { days: d.forgetAfterDays || 90 })
+        )
+      );
+      return box;
     }
-    items.forEach(function (f) {
-      panel.append(
+    d.forgotten.forEach(function (file) {
+      box.append(
         h(
           "div",
           { class: "forgotten-item" },
-          h(
-            "div",
-            { class: "grow" },
-            h(
-              "div",
-              { class: "file-item-top" },
-              h("span", { class: "file-name" }, f.file),
-              typeTag(f.type),
-              h("span", { class: "file-age", title: fmtTime(f.forgottenAt) }, t("forgottenAt", { time: relTime(f.forgottenAt) }))
-            ),
-            h("div", { class: "file-desc" }, f.description || t("noDescription")),
-            h("div", { class: "session-sub" }, usageText(f.lastUsed, f.uses))
-          ),
-          h(
-            "div",
-            { class: "actions" },
-            h("button", { class: "btn small", onclick: function () { viewForgotten(f.file); } }, t("view")),
-            h("button", { class: "btn small primary", onclick: function () { restoreForgotten(f.file); } }, t("restore")),
-            h("button", { class: "btn small danger", onclick: function () { deleteForgotten(f.file); } }, t("delete"))
-          )
+          h("div", null, h("div", { class: "file-name" }, file.file), h("div", { class: "file-desc" }, file.description || t("noDescription"))),
+          h("span", { class: "hint-line" }, t("forgottenAt", { time: fmtTime(file.forgottenAt) })),
+          h("button", { class: "btn ghost", onclick: function () { viewForgotten(file.file); } }, t("view")),
+          h("button", { class: "btn", onclick: function () { restoreForgotten(file.file); } }, t("restore")),
+          h("button", { class: "btn danger", onclick: function () { deleteForgotten(file.file); } }, t("delete"))
         )
       );
     });
-    return panel;
+    return box;
   }
 
   async function viewForgotten(file) {
     try {
       const data = await apiGet("forgotten/file", Object.assign(scopeParams(), { file: file }));
-      openDialog({ title: file, body: h("pre", { class: "pre" }, data.content || ""), wide: true });
+      const ctrl = openDialog({ title: file, wide: true, body: h("pre", { class: "pre" }, data.content || "") });
+      ctrl.setFoot([h("button", { class: "btn", onclick: function () { ctrl.close(null); } }, t("close"))]);
     } catch (err) {
       toast(err.message, "error");
     }
@@ -2362,9 +1961,9 @@
 
   async function restoreForgotten(file) {
     try {
-      const res = await apiPost("forgotten/restore", Object.assign(scopeParams(), { file: file }));
-      toast(res.message || t("restored"));
-      await Promise.all([loadDetail(), loadOverview(true)]);
+      await apiPost("forgotten/restore", Object.assign(scopeParams(), { file: file }));
+      toast(t("restored"));
+      await refreshAll();
     } catch (err) {
       toast(err.message, "error");
     }
@@ -2381,160 +1980,80 @@
       return;
     }
     try {
-      const res = await apiPost("forgotten/delete", Object.assign(scopeParams(), { file: file }));
-      toast(res.message || t("deleted"));
-      await loadDetail();
+      await apiPost("forgotten/delete", Object.assign(scopeParams(), { file: file }));
+      toast(t("deleted"));
+      await refreshAll();
     } catch (err) {
       toast(err.message, "error");
     }
   }
 
-  // ------------------------------------------------------------ 回收站标签页
+  // ------------------------------------------------------------ 回收站
 
   async function loadTrash() {
-    if (state.trashLoading) {
-      return;
-    }
-    const sel = state.selected;
-    const token = trashToken;
+    const token = ++trashToken;
     state.trashLoading = true;
-    let result;
     try {
-      const res = await apiGet("trash", scopeParams());
-      result = { items: res.entries || [] };
+      const data = await apiGet("trash", scopeParams());
+      if (token !== trashToken) {
+        return;
+      }
+      state.trash = data.entries || [];
     } catch (err) {
-      result = { error: err.message };
-    }
-    if (!isSelected(sel) || token !== trashToken) {
-      return;
+      toast(err.message, "error");
     }
     state.trashLoading = false;
-    state.trash = result;
-    if (state.tab === "trash") {
-      renderTab();
-    }
+    render();
   }
 
   function trashMeta(item) {
-    const bits = [fmtTime(item.ts), fmtBytes(item.size), actionLabel(item.action)];
-    if (item.actor) {
-      bits.push(t("historyActor", { actor: item.actor }));
-    }
-    if (item.source) {
-      bits.push(t("historySource", { source: item.source }));
-    }
-    return bits.filter(Boolean).join(" · ");
+    return [fmtTime(item.ts), item.action, t("action_" + item.action) || item.action, item.size + " B"].filter(Boolean).join(" · ");
   }
 
   function renderTrashTab() {
-    const data = state.trash;
-    if (!data) {
-      loadTrash();
-      return spinnerBlock();
+    const box = h("div", { class: "stack" });
+    box.append(h("p", { class: "hint-line" }, t("trashHint")));
+    if (state.trashLoading || !state.trash) {
+      box.append(spinnerBlock());
+      return box;
     }
-    if (data.error) {
-      return errorBlock(data.error, function () {
-        state.trash = null;
-        renderTab();
-      });
+    if (!state.trash.length) {
+      box.append(emptyState("trash", t("noTrashTitle"), t("noTrashHint", { days: 90 })));
+      return box;
     }
-    const items = data.items || [];
-    const panel = h(
-      "section",
-      { class: "panel" },
-      h(
+    const active = new Set(((state.detail && state.detail.files) || []).map(function (file) { return file.file; }));
+    state.trash.forEach(function (item) {
+      const row = h(
         "div",
-        { class: "panel-head" },
-        h("h3", null, t("trashTitle")),
-        h("span", { style: "color:var(--text-3);font-size:12.5px" }, t("trashHint"))
-      )
-    );
-    if (!items.length) {
-      panel.append(emptyState("trash", t("noTrashTitle"), t("noTrashHint")));
-      return panel;
-    }
-    const active = new Set(
-      ((state.detail && state.detail.files) || []).map(function (f) {
-        return f.file;
-      })
-    );
-    items.forEach(function (item) {
-      panel.append(
-        h(
-          "div",
-          { class: "forgotten-item" },
-          h(
-            "div",
-            { class: "grow" },
-            h(
-              "div",
-              { class: "file-item-top" },
-              h("span", { class: "file-name" }, item.file),
-              h(
-                "span",
-                { class: "file-age", title: fmtTime(item.ts) },
-                t("trashDeletedAt", { time: relTime(item.ts) })
-              )
-            ),
-            h("div", { class: "session-sub" }, trashMeta(item))
-          ),
-          h(
-            "div",
-            { class: "actions" },
-            h("button", { class: "btn small", onclick: function () { viewTrashEntry(item); } }, t("view")),
-            h(
-              "button",
-              { class: "btn small primary", onclick: function () { restoreTrashEntry(item); } },
-              t("restore")
-            ),
-            h(
-              "button",
-              { class: "btn small danger", onclick: function () { deleteTrashEntry(item); } },
-              t("delete")
-            ),
-            // 在册文件已经不存在（只剩回收站、已遗忘副本或历史版本）时，
-            // 编辑器打不开它，这里给一个按文件名彻底清除的入口
-            active.has(item.file)
-              ? null
-              : h(
-                  "button",
-                  { class: "btn small danger", onclick: function () { purgeTrashFile(item); } },
-                  t("purgeFile")
-                )
-          )
-        )
+        { class: "row-wrap" },
+        h("div", null, h("div", { class: "file-name" }, item.file), h("div", { class: "hint-line" }, trashMeta(item))),
+        h("button", { class: "btn ghost", onclick: function () { viewTrashEntry(item); } }, t("view")),
+        h("button", { class: "btn", onclick: function () { restoreTrashEntry(item); } }, t("restoreTrash")),
+        h("button", { class: "btn danger", onclick: function () { deleteTrashEntry(item); } }, t("deleteTrash"))
       );
+      if (!active.has(item.file)) {
+        row.append(h("button", { class: "btn danger", onclick: function () { purgeTrashFile(item); } }, t("purgeFile")));
+      }
+      box.append(row);
     });
-    return panel;
+    return box;
   }
 
   async function viewTrashEntry(item) {
     try {
       const data = await apiGet("trash/file", Object.assign(scopeParams(), { entry: item.entry }));
-      openDialog({
-        title: item.file + " · " + fmtTime(item.ts),
-        body: h("pre", { class: "pre" }, data.content || ""),
-        wide: true,
-      });
+      const ctrl = openDialog({ title: item.file, wide: true, body: h("pre", { class: "pre" }, data.content || "") });
+      ctrl.setFoot([h("button", { class: "btn", onclick: function () { ctrl.close(null); } }, t("close"))]);
     } catch (err) {
       toast(err.message, "error");
     }
   }
 
   async function restoreTrashEntry(item) {
-    const ok = await confirmDialog({
-      title: t("trashRestoreTitle"),
-      message: t("trashRestoreMessage", { file: item.file, time: fmtTime(item.ts) }),
-      confirm: t("restore"),
-    });
-    if (!ok) {
-      return;
-    }
     try {
-      const res = await apiPost("trash/restore", Object.assign(scopeParams(), { entry: item.entry }));
-      toast(res.message || t("restored"));
-      state.trash = null;
-      await Promise.all([loadDetail(), loadOverview(true)]);
+      await apiPost("trash/restore", Object.assign(scopeParams(), { entry: item.entry }));
+      toast(t("restored"));
+      await loadDetail();
     } catch (err) {
       toast(err.message, "error");
     }
@@ -2542,18 +2061,17 @@
 
   async function deleteTrashEntry(item) {
     const ok = await confirmDialog({
-      title: t("trashDeleteTitle"),
-      message: t("trashDeleteMessage", { file: item.file, time: fmtTime(item.ts) }),
-      confirm: t("delete"),
+      title: t("deleteTrash"),
+      message: t("forgetDeleteMessage", { file: item.file }),
+      confirm: t("deleteTrash"),
       danger: true,
     });
     if (!ok) {
       return;
     }
     try {
-      const res = await apiPost("trash/delete", Object.assign(scopeParams(), { entry: item.entry }));
-      toast(res.message || t("deleted"));
-      state.trash = null;
+      await apiPost("trash/delete", Object.assign(scopeParams(), { entry: item.entry }));
+      toast(t("deleted"));
       await loadDetail();
     } catch (err) {
       toast(err.message, "error");
@@ -2564,1840 +2082,594 @@
     const ok = await confirmDialog({
       title: t("trashPurgeTitle"),
       message: t("trashPurgeMessage", { file: item.file }),
-      confirm: t("purgeFileConfirm"),
+      confirm: t("purgeFile"),
       danger: true,
     });
     if (!ok) {
       return;
     }
     try {
-      const res = await apiPost("file/purge", Object.assign(scopeParams(), { file: item.file }));
-      toast(res.message || t("deleted"));
-      state.trash = null;
-      await Promise.all([loadDetail(), loadOverview(true)]);
-    } catch (err) {
-      toast(err.message, "error");
-    }
-  }
-
-  // ------------------------------------------------------------ 索引标签页
-
-  function meterStat(label, value, ratio) {
-    const level = ratio > 1 ? " danger" : ratio > 0.8 ? " warn" : "";
-    return stat(
-      label,
-      value,
-      null,
-      h("div", { class: "meter" + level }, h("span", { style: "width:" + Math.min(100, ratio * 100).toFixed(1) + "%" }))
-    );
-  }
-
-  function renderIndexTab() {
-    const idx = state.detail.index;
-    const draft = state.indexDraft !== null ? state.indexDraft : idx.content;
-    const rebuildBtn = h(
-      "button",
-      { class: "btn small", onclick: function () { rebuildIndex(rebuildBtn); } },
-      icon("refresh"),
-      t("rebuildIndex")
-    );
-    const issues = [];
-    if (idx.truncated) {
-      issues.push(notice("warn", t("indexTruncated")));
-    }
-    if (idx.missing.length) {
-      issues.push(
-        notice("warn", [
-          t("indexMissing", { n: idx.missing.length }),
-          h("ul", { class: "kv-list" }, idx.missing.map(function (f) { return h("li", null, f); })),
-        ])
-      );
-    }
-    if (idx.dangling.length) {
-      issues.push(
-        notice("warn", [
-          t("indexDangling", { n: idx.dangling.length }),
-          h("ul", { class: "kv-list" }, idx.dangling.map(function (f) { return h("li", null, f); })),
-        ])
-      );
-    }
-    if (!issues.length) {
-      issues.push(notice("info", t("indexHealthy")));
-    }
-    const health = h(
-      "section",
-      { class: "panel" },
-      h("div", { class: "panel-head" }, h("h3", null, t("indexHealth")), rebuildBtn),
-      h(
-        "div",
-        { class: "panel-body" },
-        h(
-          "div",
-          { class: "stats" },
-          meterStat(t("indexLines"), idx.lines + " / " + idx.maxLines, idx.lines / idx.maxLines),
-          meterStat(t("indexSize"), fmtBytes(idx.size) + " / " + fmtBytes(idx.maxBytes), idx.size / idx.maxBytes)
-        ),
-        issues
-      )
-    );
-    const saveBtn = h(
-      "button",
-      { class: "btn primary small", disabled: draft === idx.content, onclick: function () { saveIndex(saveBtn); } },
-      icon("check"),
-      t("save")
-    );
-    const textarea = h("textarea", {
-      class: "textarea",
-      style: "min-height:380px",
-      value: draft,
-      spellcheck: "false",
-      oninput: function (event) {
-        state.indexDraft = event.target.value;
-        saveBtn.disabled = state.indexDraft === idx.content;
-      },
-    });
-    const editor = h(
-      "section",
-      { class: "panel" },
-      h("div", { class: "panel-head" }, h("h3", { class: "file-name" }, "MEMORY.md"), saveBtn),
-      h("div", { class: "panel-body" }, h("p", { style: "margin:0 0 10px;color:var(--text-3);font-size:12.5px" }, t("indexEditorHint")), textarea)
-    );
-    return h("div", { class: "stack" }, health, editor);
-  }
-
-  async function saveIndex(button) {
-    if (state.indexDraft === null) {
-      return;
-    }
-    await withBusy(button, async function () {
-      try {
-        const res = await apiPost("index/save", Object.assign(scopeParams(), { content: state.indexDraft }));
-        state.indexDraft = null;
-        toast(res.message || t("saved"));
-        await loadDetail();
-      } catch (err) {
-        toast(err.message, "error");
-      }
-    });
-  }
-
-  async function rebuildIndex(button) {
-    if (state.indexDraft !== null && state.indexDraft !== state.detail.index.content) {
-      if (!(await confirmDiscard())) {
-        return;
-      }
-    }
-    await withBusy(button, async function () {
-      try {
-        const res = await apiPost("index/rebuild", scopeParams());
-        state.indexDraft = null;
-        toast(res.message || t("saved"));
-        await loadDetail();
-      } catch (err) {
-        toast(err.message, "error");
-      }
-    });
-  }
-
-  // ------------------------------------------------------------ 上下文标签页
-
-  async function loadContext() {
-    if (state.contextLoading) {
-      return;
-    }
-    const sel = state.selected;
-    state.contextLoading = true;
-    let result;
-    try {
-      result = await apiGet("session/context", { key: sel.key });
-    } catch (err) {
-      result = { error: err.message };
-    }
-    if (!isSelected(sel)) {
-      // 已切到别的会话：那边的加载标记归它自己管
-      return;
-    }
-    state.contextLoading = false;
-    state.context = result;
-    if (state.tab === "context") {
-      renderTab();
-    }
-  }
-
-  function renderContextTab() {
-    const c = state.context;
-    if (!c) {
-      loadContext();
-      return spinnerBlock();
-    }
-    if (c.error) {
-      return errorBlock(c.error, function () {
-        state.context = null;
-        renderTab();
-      });
-    }
-    const parts = c.parts || {};
-    const info = c.context || {};
-    const total = PARTS.reduce(function (sum, key) { return sum + (parts[key] || 0); }, 0);
-    const partsBody = [];
-    if (total > 0) {
-      partsBody.push(
-        h(
-          "div",
-          { class: "bar" },
-          PARTS.map(function (key) {
-            return parts[key]
-              ? h("span", {
-                  style: "width:" + ((parts[key] / total) * 100).toFixed(2) + "%;background:var(--p-" + key + ")",
-                  title: t("part_" + key) + " " + fmtNum(parts[key]),
-                })
-              : null
-          })
-        ),
-        h(
-          "div",
-          { class: "legend" },
-          PARTS.map(function (key) {
-            return h("span", null, h("i", { style: "background:var(--p-" + key + ")" }), t("part_" + key), h("b", null, fmtNum(parts[key] || 0)));
-          })
-        )
-      );
-    } else {
-      partsBody.push(h("span", { style: "color:var(--text-3)" }, t("noEstimate")));
-    }
-
-    const refreshBtn = h(
-      "button",
-      {
-        class: "btn small",
-        onclick: function () {
-          state.context = null;
-          renderTab();
-        },
-      },
-      icon("refresh"),
-      t("refresh")
-    );
-    return h(
-      "div",
-      { class: "stack" },
-      h(
-        "div",
-        { class: "actions", style: "justify-content:space-between;align-items:center" },
-        h(
-          "span",
-          { class: "tag " + (c.live ? "ok" : ""), title: c.live ? t("liveHint") : t("diskHint") },
-          c.live ? t("liveTag") : t("diskTag")
-        ),
-        h("div", { class: "actions" }, refreshBtn)
-      ),
-      notice("info", t("contextReadonlyNotice")),
-      h(
-        "div",
-        { class: "stats" },
-        stat(t("lastEstimate"), t("tokens", { n: fmtNum(c.estimate) }), t("lastRequest")),
-        stat(t("part_system"), t("tokens", { n: fmtNum(parts.system || 0) }), ""),
-        stat(
-          t("part_plugin"),
-          t("tokens", { n: fmtNum(parts.plugin || 0) }),
-          t("openingBlockSub")
-        ),
-        stat(t("lastActual"), c.actual > 0 ? t("tokens", { n: fmtNum(c.actual) }) : "—", t("lastActualSub")),
-        stat(t("cacheHit"), c.cacheHit >= 0 ? t("tokens", { n: fmtNum(c.cacheHit) }) : t("notReported"), t("cacheHitSub")),
-        stat(
-          t("lastRequest"),
-          c.requestAt ? relTime(c.requestAt) : "—",
-          c.requestAt ? fmtTime(c.requestAt) : ""
-        ),
-        stat(
-          t("contextWindow"),
-          info.window > 0 ? t("tokens", { n: fmtNum(info.window) }) : "—",
-          info.windowNote || ""
-        )
-      ),
-      h(
-        "section",
-        { class: "panel" },
-        h("div", { class: "panel-head" }, h("h3", null, t("partsTitle"))),
-        h("div", { class: "panel-body" }, partsBody)
-      ),
-      h(
-        "section",
-        { class: "panel" },
-        h("div", { class: "panel-head" }, h("h3", null, t("summaryTitle"))),
-        h("div", { class: "panel-body" }, c.hasSummary ? h("pre", { class: "pre" }, c.summary) : emptyState("inbox", t("noSummary")))
-      )
-    );
-  }
-
-  // ------------------------------------------------------------ 会话操作
-
-  async function editRemark() {
-    const s = state.detail.session || {};
-    const sel = state.selected;
-    const value = await promptDialog({
-      title: t("remarkTitle"),
-      message: t("remarkHint"),
-      value: s.remark || "",
-    });
-    if (value === null || !isSelected(sel)) {
-      return;
-    }
-    try {
-      const res = await apiPost("session/remark", { key: sel.key, remark: value });
-      toast(res.message || t("saved"));
-      if (!isSelected(sel) || !state.detail) {
-        await loadOverview(true);
-        return;
-      }
-      state.detail.session = res;
-      renderMain();
+      await apiPost("file/purge", Object.assign(scopeParams(), { file: item.file }));
+      toast(t("purged"));
+      await loadDetail();
       await loadOverview(true);
     } catch (err) {
       toast(err.message, "error");
     }
   }
 
-  async function purgeSession() {
-    const sel = state.selected;
-    const ctrl = openDialog({ title: t("purgeTitle"), body: h("p", null, t("purgeMessage")) });
-    ctrl.setFoot([
-      h("button", { class: "btn", onclick: function () { ctrl.close(null); } }, t("cancel")),
-      h("button", { class: "btn danger", onclick: function () { ctrl.close("memories"); } }, t("purgeMemories")),
-      h("button", { class: "btn danger", onclick: function () { ctrl.close("all"); } }, t("purgeAll")),
-    ]);
-    const target = await ctrl.done;
-    if (!target || !isSelected(sel)) {
-      return;
-    }
-    try {
-      const res = await apiPost("session/purge", { key: sel.key, target: target });
-      toast(res.message || t("deleted"));
-      if (state.editor) {
-        state.editor.dirty = false;
-      }
-      state.indexDraft = null;
-      if (target === "all") {
-        detailToken += 1;
-        state.selected = null;
-        resetDetailState();
-        backToList();
-        renderMain();
-        await loadOverview(true);
-        return;
-      }
-      resetDetailState();
-      await Promise.all([loadDetail(), loadOverview(true)]);
-    } catch (err) {
-      toast(err.message, "error");
-    }
-  }
+  // ------------------------------------------------------------ 整理
 
-  async function consolidateScope() {
-    if (!(await confirmDiscard())) {
-      return;
-    }
-    const sel = state.selected;
-    const existing = new Set(state.detail.files.map(function (f) { return f.file; }));
-    const ctrl = openDialog({ title: t("consolidateTitle"), wide: true });
-    ctrl.setBody(
-      h("div", { class: "empty" }, h("div", { class: "spinner" }), h("strong", null, t("consolidateRunning")), h("span", null, t("consolidateRunningHint")))
-    );
-    ctrl.setFoot(h("button", { class: "btn", onclick: function () { ctrl.close(null); } }, t("cancel")));
-    let res;
-    try {
-      res = await apiPost("consolidate/preview", { scope: sel.scope, key: sel.key || "" });
-    } catch (err) {
-      if (ctrl.isOpen()) {
-        ctrl.setBody(notice("warn", err.message));
-        ctrl.setFoot(h("button", { class: "btn", onclick: function () { ctrl.close(null); } }, t("close")));
-      }
-      return;
-    }
-    if (!ctrl.isOpen()) {
-      return;
-    }
-    const ops = res.operations || [];
-    if (!ops.length) {
-      ctrl.setBody(emptyState("check", t("consolidateNothingTitle"), t("consolidateNothingHint")));
-      ctrl.setFoot(h("button", { class: "btn primary", onclick: function () { ctrl.close(null); } }, t("close")));
-      return;
-    }
-    showPlan(ctrl, sel, res, existing, false);
-  }
-
-  // 列出修改方案供勾选；fromPending 表示这是定期整理留下待确认的方案
-  function showPlan(ctrl, sel, plan, existing, fromPending) {
-    const ops = plan.operations || [];
-    const checks = ops.map(function () { return true; });
-    const counter = h("span", { class: "grow" });
-    const applyBtn = h("button", { class: "btn primary" }, t("applySelected"));
-    function updateCounter() {
-      const n = checks.filter(Boolean).length;
-      counter.textContent = t("selectedCount", { n: n, total: ops.length });
-      applyBtn.disabled = n === 0;
-    }
-    const rows = ops.map(function (op, i) {
-      return opRow(op, existing, function (checked) {
-        checks[i] = checked;
-        updateCounter();
-      });
-    });
-    ctrl.setBody([
-      h("p", null, t("consolidateReview")),
-      plan.skipped && plan.skipped.length ? notice("warn", t("consolidateSkipped", { n: plan.skipped.length })) : null,
-      h("div", null, rows),
-    ]);
-    applyBtn.addEventListener("click", async function () {
-      const chosen = ops.filter(function (op, i) { return checks[i]; });
-      ctrl.busy = true;
-      applyBtn.disabled = true;
-      try {
-        const result = await apiPost("consolidate/apply", {
-          scope: sel.scope,
-          key: sel.key || "",
-          operations: chosen,
-          fromPending: fromPending,
-        });
-        ctrl.busy = false;
-        ctrl.close(true);
-        const items = result.results || [];
-        toast(t("consolidateAllDone", {
-          ok: items.filter(function (item) { return item.ok; }).length,
-          failed: items.filter(function (item) { return !item.ok; }).length,
-        }));
-        items.forEach(function (item) {
-          if (!item.ok) {
-            toast(item.file + "：" + item.message, "error");
-          }
-        });
-        await reloadAfterChange(sel);
-      } catch (err) {
-        ctrl.busy = false;
-        applyBtn.disabled = false;
-        toast(err.message, "error");
-      }
-    });
-    const foot = [counter];
-    if (fromPending) {
-      foot.push(
-        h("button", { class: "btn danger", onclick: function () { ctrl.close(null); dismissPending(); } }, t("dismiss"))
-      );
-    }
-    foot.push(h("button", { class: "btn", onclick: function () { ctrl.close(null); } }, t("cancel")), applyBtn);
-    ctrl.setFoot(foot);
-    updateCounter();
-  }
-
-  async function reloadAfterChange(sel) {
-    if (sel && isSelected(sel)) {
-      state.editor = null;
-      state.fileQuery = "";
-      state.searchResults = null;
-      await Promise.all([loadDetail(), loadOverview(true)]);
-    } else {
-      await loadOverview(true);
-    }
-  }
-
-  function opRow(op, existing, onToggle) {
-    const kind =
-      op.op === "delete"
-        ? ["danger", t("opDelete")]
-        : existing.has(op.file)
-          ? ["warn", t("opRewrite")]
-          : ["ok", t("opCreate")];
-    const box = h("input", {
-      type: "checkbox",
-      checked: true,
-      onchange: function (event) {
-        onToggle(event.target.checked);
-      },
-    });
-    return h(
-      "div",
-      { class: "op" },
-      box,
-      h(
-        "div",
-        { style: "min-width:0" },
-        h(
-          "label",
-          {
-            class: "op-head",
-            onclick: function (event) {
-              if (event.target !== box) {
-                box.click();
-                event.preventDefault();
-              }
-            },
-          },
-          h("span", { class: "tag " + kind[0] }, kind[1]),
-          h("span", { class: "file-name", style: "flex:none" }, op.file),
-          op.op === "write" ? typeTag(op.type) : null
-        ),
-        op.reason ? h("div", { class: "op-reason" }, op.reason) : null,
-        op.op === "write"
-          ? h(
-              "details",
-              null,
-              h("summary", null, t("previewContent")),
-              h("pre", { class: "pre" }, composeMemory(stem(op.file), op.description, op.type, op.content))
-            )
-          : null
-      )
-    );
-  }
-
-  // 所有有记忆的作用域：全局（开启时）在前，会话按最近活跃排序
   function consolidateTargets() {
-    const ov = state.overview;
-    if (!ov) {
-      return [];
-    }
+    const ov = state.overview || {};
     const targets = [];
-    if (ov.global.enabled && ov.global.fileCount > 0) {
-      targets.push({ scope: "global", key: "", label: t("globalTitle"), sub: t("globalSub") });
+    if (ov.board && ov.board.fileCount > 0) {
+      targets.push({ scope: "board", key: "", label: t("boardTitle"), sub: t("boardSub") });
     }
-    const people = ov.people || { platforms: [] };
-    people.platforms
-      .filter(function (p) { return p.fileCount > 0; })
-      .forEach(function (p) {
+    (ov.notebooks || []).forEach(function (item) {
+      if (item.fileCount > 0) {
         targets.push({
-          scope: "people",
-          key: p.key,
-          label: peopleScopeTitle(p.platform, p.key),
-          sub: p.key === SHARED_KEY ? t("peopleSharedSub") : t("peopleSub"),
+          scope: "notebook",
+          key: item.key,
+          label: t("notebookTitle", { platform: item.platform || item.key }),
+          sub: t("notebookSub"),
         });
-      });
-    ov.sessions
-      .filter(function (s) { return s.fileCount > 0; })
-      .sort(function (a, b) {
-        return Math.max(b.lastActive, b.updatedAt) - Math.max(a.lastActive, a.updatedAt);
-      })
-      .forEach(function (s) {
-        targets.push({ scope: "session", key: s.key, label: sessionTitle(s), sub: sessionSub(s) });
-      });
+      }
+    });
+    (ov.whispers || []).forEach(function (item) {
+      if (item.fileCount > 0) {
+        targets.push({
+          scope: "whisper",
+          key: item.key,
+          label: sessionTitle(item),
+          sub: t("whisperSub"),
+        });
+      }
+    });
     return targets;
   }
 
-  function sameScope(a, b) {
-    return !!a && !!b && a.scope === b.scope && (a.key || "") === (b.key || "");
+  async function consolidateScope(sel) {
+    const label = scopeTitle(sel);
+    const ctrl = openDialog({
+      title: t("consolidateTitle"),
+      wide: true,
+      body: h("p", null, t("consolidateHint", { label: label })),
+    });
+    const runBtn = h(
+      "button",
+      { class: "btn primary", onclick: function () { runTarget(ctrl, runBtn, sel, label); } },
+      icon("sparkles"),
+      t("consolidate")
+    );
+    ctrl.setFoot([h("button", { class: "btn", onclick: function () { ctrl.close(null); } }, t("cancel")), runBtn]);
+  }
+
+  async function runTarget(ctrl, button, sel, label) {
+    await withBusy(button, async function () {
+      try {
+        ctrl.setBody(spinnerBlock());
+        const plan = await apiPost("consolidate/preview", { scope: sel.scope, key: sel.key || "" });
+        showPlan(ctrl, sel, plan, plan.files || [], label);
+      } catch (err) {
+        ctrl.setBody(errorBlock(err.message, null));
+      }
+    });
+  }
+
+  function showPlan(ctrl, sel, plan, existing, label) {
+    const ops = plan.operations || [];
+    if (!ops.length) {
+      ctrl.setBody(
+        h(
+          "div",
+          { class: "stack" },
+          emptyState("check", t("consolidateNothingTitle"), t("consolidateNothingHint")),
+          (plan.skipped || []).length ? notice("info", t("consolidateSkipped", { n: plan.skipped.length })) : null
+        )
+      );
+      ctrl.setFoot([h("button", { class: "btn", onclick: function () { ctrl.close(null); } }, t("close"))]);
+      return;
+    }
+    const selected = new Set(ops.map(function (_, index) { return index; }));
+    const box = h("div", { class: "stack" });
+    box.append(h("p", { class: "hint-line" }, t("consolidateReview", { n: ops.length })));
+    if ((plan.skipped || []).length) {
+      box.append(notice("info", t("consolidateSkipped", { n: plan.skipped.length })));
+    }
+    ops.forEach(function (op, index) {
+      const check = h("input", {
+        type: "checkbox",
+        checked: true,
+        onchange: function (event) {
+          if (event.target.checked) {
+            selected.add(index);
+          } else {
+            selected.delete(index);
+          }
+        },
+      });
+      box.append(
+        h(
+          "div",
+          { class: "op" },
+          h("div", { class: "op-head" }, check, h("strong", null, op.op === "delete" ? t("opDelete") : (existing.indexOf(op.file) >= 0 ? t("opRewrite") : t("opCreate"))), h("span", { class: "file-name" }, op.file)),
+          op.reason ? h("div", { class: "op-reason" }, op.reason) : null,
+          op.content ? h("details", null, h("summary", null, t("previewContent")), h("pre", { class: "pre" }, op.content)) : null
+        )
+      );
+    });
+    ctrl.setBody(box);
+    const apply = h(
+      "button",
+      {
+        class: "btn primary",
+        onclick: async function () {
+          const chosen = ops.filter(function (_, index) { return selected.has(index); });
+          if (!chosen.length) {
+            return;
+          }
+          await withBusy(apply, async function () {
+            try {
+              const res = await apiPost("consolidate/apply", {
+                scope: sel.scope,
+                key: sel.key || "",
+                operations: chosen,
+              });
+              toast(res.message || t("consolidateDone"));
+              ctrl.close(true);
+              await refreshAll();
+            } catch (err) {
+              toast(err.message, "error");
+            }
+          });
+        },
+      },
+      t("applySelected")
+    );
+    ctrl.setFoot([h("button", { class: "btn", onclick: function () { ctrl.close(null); } }, t("cancel")), apply]);
   }
 
   async function consolidateAll() {
-    if (!(await confirmDiscard())) {
-      return;
-    }
     const targets = consolidateTargets();
     if (!targets.length) {
-      toast(t("consolidateAllNone"));
+      toast(t("consolidateAllNone"), "error");
       return;
     }
-    const PARALLEL = 2;
-    const ctrl = openDialog({ title: t("consolidateAllTitle"), wide: true });
-    const statusEls = targets.map(function () { return h("span", { class: "tag" }, t("batchWaiting")); });
-    const list = h(
-      "div",
-      { class: "batch-list" },
-      targets.map(function (tg, i) {
-        return h(
-          "div",
-          { class: "batch-row" },
-          h("div", { class: "batch-text" }, h("div", { class: "batch-name" }, tg.label), tg.sub ? h("div", { class: "batch-sub" }, tg.sub) : null),
-          statusEls[i]
-        );
-      })
-    );
-    function setStatus(i, cls, text) {
-      statusEls[i].className = "tag" + (cls ? " " + cls : "");
-      statusEls[i].textContent = text;
-    }
-    function closeBtn(label) {
-      return h("button", { class: "btn", onclick: function () { ctrl.close(null); } }, label);
-    }
-
-    // 第一步：列出要跑的作用域，确认后开始
-    ctrl.setBody([h("p", null, t("consolidateAllIntro", { n: targets.length })), list]);
-    const startBtn = h("button", { class: "btn primary" }, t("start"));
-    ctrl.setFoot([closeBtn(t("cancel")), startBtn]);
-    await new Promise(function (resolve) {
-      startBtn.addEventListener("click", resolve);
-      ctrl.done.then(resolve);
+    const ctrl = openDialog({
+      title: t("consolidateAllTitle"),
+      wide: true,
+      body: h("p", { class: "hint-line" }, t("consolidateAllHint")),
     });
-    if (!ctrl.isOpen()) {
-      return;
-    }
-
-    // 第二步：逐个预览，最多同时跑 PARALLEL 个；"停止"只是不再开新的
-    let stopped = false;
-    let next = 0;
-    let finished = 0;
-    const results = targets.map(function () { return null; });
-    const progress = h("span", { class: "grow" });
-    function updateProgress() {
-      progress.textContent = t("consolidateAllProgress", { done: finished, total: targets.length });
-    }
-    const stopBtn = h(
-      "button",
-      {
-        class: "btn",
-        onclick: function () {
-          stopped = true;
-          stopBtn.disabled = true;
-        },
-      },
-      t("consolidateAllStop")
-    );
-    ctrl.setFoot([progress, closeBtn(t("cancel")), stopBtn]);
-    updateProgress();
-    async function worker() {
-      while (!stopped && next < targets.length && ctrl.isOpen()) {
-        const i = next++;
-        const tg = targets[i];
-        setStatus(i, "", t("batchRunning"));
-        try {
-          const res = await apiPost("consolidate/preview", { scope: tg.scope, key: tg.key });
-          const ops = res.operations || [];
-          results[i] = { ops: ops, existing: new Set(res.files || []), skipped: res.skipped || [] };
-          setStatus(i, ops.length ? "warn" : "ok", ops.length ? t("batchProposed", { n: ops.length }) : t("batchNothing"));
-        } catch (err) {
-          results[i] = { error: err.message };
-          setStatus(i, "danger", t("batchFailed") + "：" + err.message);
+    const box = h("div", { class: "stack" });
+    ctrl.setBody(box);
+    const results = [];
+    const run = h("button", { class: "btn primary" }, t("consolidate"));
+    ctrl.setFoot([h("button", { class: "btn", onclick: function () { ctrl.close(null); } }, t("cancel")), run]);
+    run.addEventListener("click", async function () {
+      await withBusy(run, async function () {
+        for (const target of targets) {
+          try {
+            const plan = await apiPost("consolidate/preview", { scope: target.scope, key: target.key || "" });
+            if ((plan.operations || []).length) {
+              results.push({ target: target, plan: plan });
+            }
+          } catch (err) {
+            results.push({ target: target, error: err.message });
+          }
         }
-        finished++;
-        updateProgress();
-      }
-    }
-    const workers = [];
-    for (let k = 0; k < Math.min(PARALLEL, targets.length); k++) {
-      workers.push(worker());
-    }
-    await Promise.all(workers);
-    if (!ctrl.isOpen()) {
-      return;
-    }
-    targets.forEach(function (tg, i) {
-      if (!results[i]) {
-        setStatus(i, "", t("batchSkipped"));
-      }
+        if (!results.length) {
+          ctrl.setBody(emptyState("check", t("consolidateNothingTitle"), t("consolidateAllNone")));
+          return;
+        }
+        ctrl.setBody(renderConsolidateAll(results));
+      });
     });
+  }
 
-    // 第三步：汇总方案，按作用域分组勾选
-    const groups = [];
-    const failed = [];
-    let clean = 0;
-    targets.forEach(function (tg, i) {
-      const r = results[i];
-      if (!r) {
+  function renderConsolidateAll(results) {
+    const box = h("div", { class: "stack" });
+    results.forEach(function (item) {
+      const label = item.target.label;
+      if (item.error) {
+        box.append(notice("warn", label + "：" + item.error));
         return;
       }
-      if (r.error) {
-        failed.push(tg.label + "：" + r.error);
-      } else if (!r.ops.length) {
-        clean++;
-      } else {
-        groups.push({ tg: tg, ops: r.ops, existing: r.existing, skipped: r.skipped, checks: r.ops.map(function () { return true; }) });
-      }
-    });
-    const failedNotice = failed.length
-      ? notice(
-          "warn",
+      const ops = item.plan.operations || [];
+      const group = h("div", { class: "batch-group" }, h("div", { class: "batch-group-head" }, h("strong", null, label), h("span", { class: "hint-line" }, t("consolidateReview", { n: ops.length }))));
+      const selected = new Set(ops.map(function (_, index) { return index; }));
+      ops.forEach(function (op, index) {
+        group.append(
           h(
             "div",
-            null,
-            h("div", null, t("consolidateAllFailed", { n: failed.length })),
-            failed.map(function (line) { return h("div", null, line); })
-          )
-        )
-      : null;
-    const total = groups.reduce(function (n, g) { return n + g.ops.length; }, 0);
-    if (!total) {
-      ctrl.setBody([failedNotice, emptyState("check", t("consolidateAllNothingTitle"), t("consolidateAllNothingHint"))]);
-      ctrl.setFoot(h("button", { class: "btn primary", onclick: function () { ctrl.close(null); } }, t("close")));
-      return;
-    }
-    const counter = h("span", { class: "grow" });
-    const applyBtn = h("button", { class: "btn primary" }, t("applySelected"));
-    function updateCounter() {
-      const n = groups.reduce(function (sum, g) { return sum + g.checks.filter(Boolean).length; }, 0);
-      counter.textContent = t("selectedCount", { n: n, total: total });
-      applyBtn.disabled = n === 0;
-    }
-    const body = [h("p", null, t("consolidateAllReview", { n: groups.length, clean: clean })), failedNotice];
-    groups.forEach(function (g) {
-      body.push(
-        h(
-          "div",
-          { class: "batch-group" },
-          h("div", { class: "batch-group-head" }, h("strong", null, g.tg.label), h("span", null, t("batchProposed", { n: g.ops.length }))),
-          g.skipped.length ? notice("warn", t("consolidateSkipped", { n: g.skipped.length })) : null,
-          h(
-            "div",
-            null,
-            g.ops.map(function (op, i) {
-              return opRow(op, g.existing, function (checked) {
-                g.checks[i] = checked;
-                updateCounter();
-              });
-            })
-          )
-        )
-      );
-    });
-    ctrl.setBody(body);
-
-    // 第四步：逐个作用域应用，最后列出结果
-    applyBtn.addEventListener("click", async function () {
-      ctrl.busy = true;
-      applyBtn.disabled = true;
-      const outcome = [];
-      const touched = [];
-      let okCount = 0;
-      let failCount = 0;
-      for (const g of groups) {
-        const chosen = g.ops.filter(function (op, i) { return g.checks[i]; });
-        if (!chosen.length) {
-          continue;
-        }
-        counter.textContent = t("consolidateAllApplying", { name: g.tg.label });
-        try {
-          const result = await apiPost("consolidate/apply", { scope: g.tg.scope, key: g.tg.key, operations: chosen });
-          const items = result.results || [];
-          const bad = items.filter(function (item) { return !item.ok; });
-          okCount += items.length - bad.length;
-          failCount += bad.length;
-          outcome.push({ tg: g.tg, ok: items.length - bad.length, bad: bad });
-          touched.push(g.tg);
-        } catch (err) {
-          failCount += chosen.length;
-          outcome.push({ tg: g.tg, ok: 0, bad: [{ file: "", message: err.message }] });
-        }
-      }
-      ctrl.busy = false;
-      ctrl.setBody([
-        h("p", null, t("consolidateAllDone", { ok: okCount, failed: failCount })),
-        h(
-          "div",
-          { class: "batch-list" },
-          outcome.map(function (o) {
-            const detail = o.bad
-              .map(function (b) { return (b.file ? b.file + "：" : "") + b.message; })
-              .join("；");
-            return h(
-              "div",
-              { class: "batch-row" },
-              h(
-                "div",
-                { class: "batch-text" },
-                h("div", { class: "batch-name" }, o.tg.label),
-                detail ? h("div", { class: "batch-sub", title: detail }, detail) : null
-              ),
-              h(
-                "span",
-                { class: "tag " + (o.bad.length ? "danger" : "ok") },
-                o.bad.length ? t("batchPartial", { ok: o.ok, failed: o.bad.length }) : t("batchApplied", { n: o.ok })
-              )
-            );
-          })
-        ),
-      ]);
-      ctrl.setFoot(h("button", { class: "btn primary", onclick: function () { ctrl.close(true); } }, t("close")));
-      const selTouched = touched.some(function (tg) { return sameScope(tg, state.selected); });
-      if (selTouched) {
-        state.editor = null;
-        state.fileQuery = "";
-        state.searchResults = null;
-        await Promise.all([loadDetail(), loadOverview(true)]);
-      } else {
-        await loadOverview(true);
-      }
-    });
-    ctrl.setFoot([counter, closeBtn(t("cancel")), applyBtn]);
-    updateCounter();
-  }
-
-  // ------------------------------------------------------------ 定期整理
-
-  const TIDY_MODES = ["confirm", "auto", "off"];
-  const KEEP_RUNS = 5;
-
-  function tidyModeName(mode) {
-    return mode === "confirm" ? t("tidyModeConfirm") : mode === "auto" ? t("tidyModeAuto") : t("tidyModeOffLabel");
-  }
-
-  function pendingDot(n) {
-    return n ? h("span", { class: "dot", title: t("tidyPendingBadge") }) : null;
-  }
-
-  function segment(options, value, onChange) {
-    const seg = h("div", { class: "segmented" });
-    let current = value;
-    function draw() {
-      seg.replaceChildren();
-      options.forEach(function (opt) {
-        seg.append(
-          h(
-            "button",
-            {
-              type: "button",
-              class: current === opt[0] ? "active" : "",
-              onclick: function () {
-                if (current !== opt[0]) {
-                  current = opt[0];
-                  draw();
-                  onChange(current);
+            { class: "batch-row" },
+            h("input", {
+              type: "checkbox",
+              checked: true,
+              onchange: function (event) {
+                if (event.target.checked) {
+                  selected.add(index);
+                } else {
+                  selected.delete(index);
                 }
               },
-            },
-            opt[1]
+            }),
+            h("span", { class: "batch-name" }, op.file),
+            h("span", { class: "batch-sub" }, op.op === "delete" ? t("opDelete") : op.reason || "")
           )
         );
       });
-    }
-    draw();
-    return seg;
-  }
-
-  function checkRow(label, checked, onChange) {
-    return h(
-      "label",
-      { class: "check" },
-      h("input", {
-        type: "checkbox",
-        checked: checked,
-        onchange: function (event) {
-          onChange(event.target.checked);
-        },
-      }),
-      h("span", null, label)
-    );
-  }
-
-  function selectBox(options, value, onChange) {
-    return h(
-      "select",
-      {
-        class: "input",
-        onchange: function (event) {
-          onChange(event.target.value);
-        },
-      },
-      options.map(function (opt) {
-        return h("option", { value: opt[0], selected: opt[0] === value }, opt[1]);
-      })
-    );
-  }
-
-  function policySelect(value, onChange) {
-    return selectBox(
-      ["newer", "skip", "overwrite"].map(function (p) { return [p, t("policy_" + p)]; }),
-      value,
-      onChange
-    );
-  }
-
-  async function saveTidyMode(mode, hours) {
-    const body = { mode: mode };
-    if (hours !== undefined) {
-      body.hours = hours;
-    }
-    const data = await apiPost("autotidy/config", body);
-    if (state.overview) {
-      state.overview.autoTidy = data;
-    }
-    return data;
-  }
-
-  function renderTidyCard(ov) {
-    const cfg = ov.autoTidy || { mode: "off", hours: 24, asked: true, minChanges: 3 };
-    if (!cfg.asked) {
-      const choice = function (mode, hintKey, primary) {
-        return h(
+      group.append(
+        h(
           "button",
           {
-            class: "choice" + (primary ? " primary" : ""),
-            onclick: async function (event) {
-              const btn = event.currentTarget;
-              await withBusy(btn, async function () {
-                try {
-                  await saveTidyMode(mode);
-                  toast(mode === "off" ? t("saved") : tidyModeName(mode) + " · " + t("enabled"));
-                  renderMain();
-                } catch (err) {
-                  toast(err.message, "error");
-                }
-              });
+            class: "btn primary",
+            onclick: async function () {
+              const chosen = ops.filter(function (_, index) { return selected.has(index); });
+              if (!chosen.length) {
+                return;
+              }
+              try {
+                await apiPost("consolidate/apply", {
+                  scope: item.target.scope,
+                  key: item.target.key || "",
+                  operations: chosen,
+                });
+                toast(t("consolidateDone"));
+                await refreshAll();
+              } catch (err) {
+                toast(err.message, "error");
+              }
             },
           },
-          h("strong", null, mode === "off" ? t("tidyModeOff") : tidyModeName(mode), primary ? h("span", { class: "tag ok" }, t("recommended")) : null),
-          h("span", null, t(hintKey))
-        );
-      };
-      return h(
-        "div",
-        { class: "panel ask-card" },
-        h("div", { class: "action-text" }, h("strong", null, t("tidyAskTitle")), h("span", null, t("tidyAskHint", { n: cfg.minChanges }))),
-        h(
-          "div",
-          { class: "choices" },
-          choice("confirm", "tidyModeConfirmHint", true),
-          choice("auto", "tidyModeAutoHint", false),
-          choice("off", "tidyModeOffHint", false)
+          t("applySelected")
         )
       );
-    }
-    const on = cfg.mode !== "off";
-    return h(
-      "div",
-      { class: "panel action-panel" },
-      h(
-        "div",
-        { class: "action-text" },
-        h("strong", null, t("tidyTitle"), " ", h("span", { class: "tag " + (on ? "ok" : "") }, tidyModeName(cfg.mode))),
-        h("span", null, on ? t("tidyStatusOn", { hours: cfg.hours, n: cfg.minChanges }) : t("tidyStatusOff"))
-      ),
-      h("button", { class: "btn", onclick: tidySettingsDialog }, icon("clock"), t("change"))
-    );
-  }
-
-  function tidySettingsDialog() {
-    const cfg = (state.overview && state.overview.autoTidy) || { mode: "off", hours: 24 };
-    let mode = cfg.mode;
-    const hint = h("div", { class: "hint-line" });
-    function drawHint() {
-      hint.textContent = mode === "confirm" ? t("tidyModeConfirmHint") : mode === "auto" ? t("tidyModeAutoHint") : t("tidyStatusOff");
-    }
-    const hours = h("input", { class: "input", type: "number", min: 1, max: 720, value: cfg.hours, style: "width:120px" });
-    const ctrl = openDialog({
-      title: t("tidyTitle"),
-      body: h(
-        "div",
-        { class: "form-grid" },
-        field(t("modeLabel"), null, h("div", null, segment(TIDY_MODES.map(function (m) { return [m, tidyModeName(m)]; }), mode, function (next) {
-          mode = next;
-          drawHint();
-        }), hint)),
-        field(t("tidyHours"), t("tidyHoursHint"), hours)
-      ),
+      box.append(group);
     });
-    drawHint();
-    const saveBtn = h("button", { class: "btn primary" }, t("save"));
-    saveBtn.addEventListener("click", function () {
-      withBusy(saveBtn, async function () {
-        try {
-          await saveTidyMode(mode, Number(hours.value) || 24);
-          ctrl.close(true);
-          toast(t("saved"));
-          if (!state.selected) {
-            renderMain();
-          }
-        } catch (err) {
-          toast(err.message, "error");
-        }
-      });
-    });
-    ctrl.setFoot([h("button", { class: "btn", onclick: function () { ctrl.close(null); } }, t("cancel")), saveBtn]);
+    return box;
   }
 
-  function pendingScopes(ov) {
-    const items = [];
-    if (ov.global && ov.global.tidyPending) {
-      items.push({ scope: "global", key: "", label: t("globalTitle"), n: ov.global.tidyPending });
-    }
-    ((ov.people || {}).platforms || []).forEach(function (p) {
-      if (p.tidyPending) {
-        items.push({ scope: "people", key: p.key, label: peopleScopeTitle(p.platform, p.key), n: p.tidyPending });
-      }
-    });
-    ov.sessions.forEach(function (s) {
-      if (s.tidyPending) {
-        items.push({ scope: "session", key: s.key, label: sessionTitle(s), sub: sessionSub(s), n: s.tidyPending });
-      }
-    });
-    return items;
-  }
+  // ------------------------------------------------------------ 整理记录
 
-  function renderPendingPanel(ov) {
-    const items = pendingScopes(ov);
-    if (!items.length) {
-      return null;
-    }
-    return h(
-      "div",
-      { class: "panel", style: "margin-top:16px" },
-      h("div", { class: "panel-head" }, h("h3", null, t("tidyPendingTitle")), h("span", { class: "count" }, items.length)),
-      h(
-        "div",
-        null,
-        items.map(function (item) {
-          return h(
-            "button",
-            {
-              class: "batch-row clickable",
-              onclick: function () {
-                selectScope({ scope: item.scope, key: item.key });
-              },
-            },
-            pendingDot(1),
-            h(
-              "div",
-              { class: "batch-text" },
-              h("div", { class: "batch-name" }, item.label),
-              item.sub ? h("div", { class: "batch-sub" }, item.sub) : null
-            ),
-            h("span", { class: "tag warn" }, t("runOps", { n: item.n }))
-          );
-        })
-      )
-    );
-  }
-
-  async function reviewPending() {
-    if (!(await confirmDiscard())) {
-      return;
-    }
-    const sel = state.selected;
-    const plan = (state.detail.tidy || {}).plan;
-    if (!plan) {
-      return;
-    }
-    const existing = new Set(state.detail.files.map(function (f) { return f.file; }));
-    const ctrl = openDialog({ title: t("planTitle"), wide: true });
-    showPlan(ctrl, sel, plan, existing, true);
-  }
-
-  async function dismissPending() {
-    const sel = state.selected;
-    const ok = await confirmDialog({ title: t("dismissTitle"), message: t("dismissMessage"), confirm: t("dismiss"), danger: true });
-    if (!ok) {
-      return;
-    }
+  async function loadRuns() {
     try {
-      await apiPost("autotidy/dismiss", { scope: sel.scope, key: sel.key || "" });
-      toast(t("dismissed"));
-      await reloadAfterChange(sel);
+      const data = await apiGet("tidy/runs", scopeParams());
+      state.runs = data.runs || [];
     } catch (err) {
       toast(err.message, "error");
     }
+    render();
   }
 
-  function outcomeText(info) {
-    if (info.outcome === "failed") {
-      return t("outcome_failed", { message: info.message || "" });
+  function renderRunsTab() {
+    const box = h("div", { class: "stack" });
+    if (!state.runs) {
+      box.append(spinnerBlock());
+      return box;
     }
-    return info.outcome ? t("outcome_" + info.outcome) : "";
-  }
-
-  function opKind(op) {
-    if (op.op === "delete") {
-      return ["danger", t("opDelete")];
+    if (!state.runs.length) {
+      box.append(emptyState("history", t("historyEmptyTitle"), t("historyEmptyHint", { n: 5 })));
+      return box;
     }
-    return op.created ? ["ok", t("opCreate")] : ["warn", t("opRewrite")];
-  }
-
-  async function showHistory() {
-    const sel = state.selected;
-    const ctrl = openDialog({ title: t("tidyHistory"), wide: true });
-    ctrl.setFoot(h("button", { class: "btn", onclick: function () { ctrl.close(null); } }, t("close")));
-
-    async function undoRun(run, button) {
-      const ok = await confirmDialog({ title: t("undoTitle"), message: t("undoMessage"), confirm: t("undo"), danger: true });
-      if (!ok) {
-        return;
-      }
-      await withBusy(button, async function () {
-        try {
-          const res = await apiPost("tidy/undo", { scope: sel.scope, key: sel.key || "", id: run.id });
-          const items = res.results || [];
-          toast(t("undoDone", { ok: items.filter(function (i) { return i.ok; }).length, total: items.length }));
-          items.forEach(function (item) {
-            if (!item.ok) {
-              toast(item.file + "：" + item.message, "error");
-            }
-          });
-          await reloadAfterChange(sel);
-          if (ctrl.isOpen()) {
-            await load();
-          }
-        } catch (err) {
-          toast(err.message, "error");
-        }
-      });
-    }
-
-    function runCard(run) {
-      const undoBtn = run.undoneAt
-        ? h("span", { class: "tag" }, t("undone"))
-        : h("button", { class: "btn small", onclick: function (event) { undoRun(run, event.currentTarget); } }, icon("rotate"), t("undo"));
-      return h(
+    state.runs.forEach(function (run) {
+      const card = h(
         "div",
-        { class: "run-card" + (run.undoneAt ? " undone" : "") },
+        { class: "run-card" },
         h(
           "div",
           { class: "run-head" },
-          h(
-            "div",
-            { class: "grow" },
-            h("strong", null, fmtTime(run.at)),
-            " ",
-            h("span", { class: "tag" }, t("trigger_" + run.trigger)),
-            " ",
-            h("span", { class: "batch-sub" }, t("runOps", { n: run.ops.length }))
-          ),
-          undoBtn
+          h("strong", null, fmtTime(run.at)),
+          h("span", { class: "tag" }, t("trigger_" + run.trigger) || run.trigger),
+          run.undoneAt ? h("span", { class: "tag warn" }, t("undone")) : null
         ),
-        run.ops.map(function (op) {
-          const kind = opKind(op);
-          return h(
-            "div",
-            { class: "run-op" },
-            h("span", { class: "tag " + kind[0] }, kind[1]),
-            h("span", { class: "file-name", style: "flex:none" }, op.file),
-            op.reason ? h("span", { class: "op-reason" }, op.reason) : null
-          );
-        })
+        (run.ops || []).map(function (op) {
+          return h("div", { class: "run-op" }, (op.op === "delete" ? t("opDelete") : op.op === "write" ? (op.created ? t("opCreate") : t("opRewrite")) : op.op) + " · " + op.file);
+        }),
+        !run.undoneAt
+          ? h(
+              "button",
+              {
+                class: "btn",
+                onclick: async function () {
+                  const ok = await confirmDialog({
+                    title: t("undoTitle"),
+                    message: t("undoMessage"),
+                    confirm: t("undo"),
+                  });
+                  if (!ok) {
+                    return;
+                  }
+                  try {
+                    await apiPost("tidy/undo", Object.assign(scopeParams(), { id: run.id }));
+                    toast(t("undoDone"));
+                    state.runs = null;
+                    await refreshAll();
+                    await loadRuns();
+                  } catch (err) {
+                    toast(err.message, "error");
+                  }
+                },
+              },
+              t("undo")
+            )
+          : null
       );
-    }
-
-    async function load() {
-      ctrl.setBody(spinnerBlock());
-      let res;
-      try {
-        res = await apiGet("tidy/runs", { scope: sel.scope, key: sel.key || "" });
-      } catch (err) {
-        ctrl.setBody(notice("warn", err.message));
-        return;
-      }
-      if (!ctrl.isOpen()) {
-        return;
-      }
-      const info = res.tidy || {};
-      const last = Math.max(info.lastRun || 0, info.lastAttempt || 0);
-      const parts = [];
-      if (last && info.outcome) {
-        parts.push(notice("info", t("historyLast", { time: fmtTime(last), result: outcomeText(info) })));
-      }
-      const runs = res.runs || [];
-      if (!runs.length) {
-        parts.push(emptyState("history", t("historyEmptyTitle"), t("historyEmptyHint", { n: KEEP_RUNS })));
-      }
-      runs.forEach(function (run) {
-        parts.push(runCard(run));
-      });
-      ctrl.setBody(parts);
-    }
-
-    await load();
-  }
-
-  // ------------------------------------------------------------ 迁移与备份
-
-  const OUTCOMES = ["added", "replaced", "same", "kept", "invalid"];
-
-  function scopeTitle(item) {
-    if (item.scope === "global") {
-      return t("globalTitle");
-    }
-    if (item.scope === "people") {
-      return peopleScopeTitle(item.platform, item.key);
-    }
-    return sessionTitle(item);
-  }
-
-  function countsLine(counts) {
-    const bits = OUTCOMES.filter(function (k) { return counts && counts[k]; }).map(function (k) {
-      return t("cnt_" + k, { n: counts[k] });
+      box.append(card);
     });
-    return bits.length ? bits.join(" · ") : t("cntNone");
+    return box;
   }
 
-  function landed(counts) {
-    return (counts.added || 0) + (counts.replaced || 0);
-  }
-
-  function issuesBlock(issues) {
-    if (!issues || !issues.length) {
-      return null;
-    }
-    return h(
-      "details",
-      { class: "issues" },
-      h("summary", null, t("issuesCount", { n: issues.length })),
-      h(
-        "div",
-        null,
-        issues.map(function (item) {
-          return h("div", { class: "batch-sub" }, h("code", null, item.name), " ", item.reason);
-        })
-      )
-    );
-  }
+  // ------------------------------------------------------------ 备份与迁移
 
   function allScopes() {
-    const ov = state.overview;
-    if (!ov) {
-      return [];
+    const ov = state.overview || {};
+    const items = [];
+    if (ov.board && ov.board.fileCount > 0) {
+      items.push({ scope: "board", key: "", label: t("boardTitle"), fileCount: ov.board.fileCount });
     }
-    const items = [{ scope: "global", key: "", fileCount: ov.global.fileCount }];
-    ((ov.people || {}).platforms || []).forEach(function (p) {
-      items.push({ scope: "people", key: p.key, platform: p.platform, fileCount: p.fileCount });
+    (ov.notebooks || []).forEach(function (item) {
+      if (item.fileCount > 0) {
+        items.push({ scope: "notebook", key: item.key, label: t("notebookTitle", { platform: item.key }), fileCount: item.fileCount });
+      }
     });
-    ov.sessions
-      .slice()
-      .sort(function (a, b) {
-        return Math.max(b.lastActive, b.updatedAt) - Math.max(a.lastActive, a.updatedAt);
-      })
-      .forEach(function (s) {
-        items.push(Object.assign({ scope: "session" }, s));
-      });
+    (ov.whispers || []).forEach(function (item) {
+      if (item.fileCount > 0) {
+        items.push(Object.assign({ scope: "whisper", label: sessionTitle(item) }, item));
+      }
+    });
     return items;
   }
 
-  async function saveBackup(token, filename) {
-    if (typeof bridge.download === "function") {
-      try {
-        await bridge.download("export/file", { token: token }, filename);
-        return;
-      } catch (err) {
-        // 宿主没有下载能力时退回页面内生成文件
-      }
-    }
-    const data = await apiGet("export/file", { token: token });
-    const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: "application/json" }));
-    const link = h("a", { href: url, download: filename, style: "display:none" });
-    document.body.append(link);
-    link.click();
-    link.remove();
-    setTimeout(function () {
-      URL.revokeObjectURL(url);
-    }, 1000);
-  }
-
-  function pickList(items, render, onChange) {
-    const checks = items.map(function () { return true; });
-    const rows = items.map(function (item, i) {
-      return h(
-        "label",
-        { class: "batch-row pick" },
-        h("input", {
-          type: "checkbox",
-          checked: true,
-          onchange: function (event) {
-            checks[i] = event.target.checked;
-            onChange();
-          },
-        }),
-        render(item)
-      );
-    });
-    return {
-      el: h("div", { class: "batch-list" }, rows),
-      chosen: function () {
-        return items.filter(function (item, i) { return checks[i]; });
-      },
-    };
-  }
-
   function openMigration(tab) {
-    const ctrl = openDialog({ title: t("migrate"), wide: true });
-    const content = h("div");
-    const tabs = segment(
-      [["export", t("tabExport")], ["import", t("tabImport")], ["platform", t("tabPlatform")]],
-      tab,
-      function (next) {
-        show(next);
-      }
-    );
-    ctrl.setBody([h("div", { class: "migrate-tabs" }, tabs), content]);
-    function closeBtn() {
-      return h("button", { class: "btn", onclick: function () { ctrl.close(null); } }, t("close"));
-    }
+    const ctrl = openDialog({ title: t("migrate"), wide: true, body: h("p", { class: "hint-line" }, t("migrateHint")) });
+    const content = h("div", { class: "stack" });
+    const tabs = h("div", { class: "migrate-tabs" });
+    const defs = [["export", "tabExport"], ["import", "tabImport"], ["scope", "tabScope"], ["platform", "tabPlatform"]];
     function show(name) {
+      tabs.replaceChildren();
+      defs.forEach(function (item) {
+        tabs.append(
+          h("button", { class: "tab" + (item[0] === name ? " active" : ""), onclick: function () { show(item[0]); } }, t(item[1]))
+        );
+      });
       content.replaceChildren();
-      ctrl.setFoot(closeBtn());
       if (name === "export") {
-        exportTab(ctrl, content, closeBtn);
+        exportTab(content);
       } else if (name === "import") {
-        importTab(ctrl, content, closeBtn);
+        importTab(content);
+      } else if (name === "scope") {
+        scopeMigrateTab(content);
       } else {
-        platformTab(ctrl, content, closeBtn);
+        platformTab(content);
       }
     }
-    show(tab);
+    ctrl.setBody(h("div", { class: "stack" }, tabs, content));
+    ctrl.setFoot([h("button", { class: "btn", onclick: function () { ctrl.close(null); } }, t("close"))]);
+    show(tab || "export");
   }
 
-  function exportTab(ctrl, box, closeBtn) {
-    const scopes = allScopes().filter(function (item) { return item.fileCount > 0; });
-    box.append(h("p", null, t("exportHint")));
-    if (!scopes.length) {
-      box.append(emptyState("inbox", t("exportNone")));
-      return;
-    }
-    let includeForgotten = true;
-    const counter = h("span", { class: "grow" });
-    const exportBtn = h("button", { class: "btn primary" }, icon("archive"), t("exportButton"));
-    const picker = pickList(
-      scopes,
-      function (item) {
-        return h(
-          "div",
-          { class: "batch-text" },
-          h("div", { class: "batch-name" }, scopeTitle(item)),
-          h("div", { class: "batch-sub" }, t("fileCount", { n: item.fileCount }))
-        );
-      },
-      update
-    );
-    function update() {
-      const n = picker.chosen().length;
-      counter.textContent = t("selectedCount", { n: n, total: scopes.length });
-      exportBtn.disabled = n === 0;
-    }
-    box.append(
-      field(t("exportScopes"), null, picker.el),
-      checkRow(t("includeForgotten"), true, function (value) { includeForgotten = value; })
-    );
-    exportBtn.addEventListener("click", function () {
-      withBusy(exportBtn, async function () {
-        const chosen = picker.chosen();
-        const body = { includeForgotten: includeForgotten };
-        if (chosen.length < scopes.length) {
-          body.scopes = chosen.map(function (item) { return { scope: item.scope, key: item.key || "" }; });
-        }
-        try {
-          const res = await apiPost("export/prepare", body);
-          await saveBackup(res.token, res.filename);
-          toast(t("exported", { n: res.fileCount }));
-        } catch (err) {
-          toast(err.message, "error");
-        }
-      });
-    });
-    ctrl.setFoot([counter, closeBtn(), exportBtn]);
-    update();
-  }
-
-  function importTab(ctrl, box, closeBtn) {
-    let token = "";
-    let policy = "newer";
-    let picker = null;
-    const result = h("div", { class: "migrate-result" });
-    const counter = h("span", { class: "grow" });
-    const importBtn = h("button", { class: "btn primary", disabled: true }, t("importButton"));
-    const fileInput = h("input", {
-      type: "file",
-      accept: ".json,application/json",
-      style: "display:none",
-      onchange: async function (event) {
-        const file = event.target.files && event.target.files[0];
-        event.target.value = "";
-        if (!file) {
-          return;
-        }
-        let bundle;
-        try {
-          bundle = JSON.parse(await file.text());
-        } catch (err) {
-          toast(t("badBackup", { message: err.message }), "error");
-          return;
-        }
-        fileName.textContent = file.name;
-        await preview({ bundle: bundle });
-      },
-    });
-    const fileName = h("span", { class: "batch-sub" });
-    const chooseBtn = h("button", { class: "btn", onclick: function () { fileInput.click(); } }, icon("file"), t("chooseFile"));
-    const policyEl = policySelect(policy, function (value) {
-      policy = value;
-      if (token) {
-        preview({ token: token });
-      }
-    });
-
-    function update() {
-      const n = picker ? picker.chosen().length : 0;
-      counter.textContent = picker ? t("selectedCount", { n: n, total: picker.total }) : "";
-      importBtn.disabled = !token || n === 0;
-    }
-
-    async function preview(body) {
-      result.replaceChildren(spinnerBlock());
-      importBtn.disabled = true;
-      try {
-        const res = await apiPost("import/preview", Object.assign({ policy: policy }, body));
-        token = res.token;
-        const scopes = res.scopes || [];
-        picker = pickList(
-          scopes,
-          function (item) {
-            return h(
-              "div",
-              { class: "batch-text" },
-              h("div", { class: "batch-name" }, scopeTitle(item)),
-              h(
-                "div",
-                { class: "batch-sub" },
-                t("fileCount", { n: item.fileCount }),
-                item.forgottenCount ? " · " + t("forgottenIncluded", { n: item.forgottenCount }) : "",
-                " → ",
-                countsLine(item.counts)
-              ),
-              issuesBlock(item.issues)
-            );
-          },
-          update
-        );
-        picker.total = scopes.length;
-        result.replaceChildren(picker.el);
-        (res.warnings || []).forEach(function (warning) {
-          result.appendChild(notice("warn", warning));
-        });
-      } catch (err) {
-        token = "";
-        picker = null;
-        result.replaceChildren(notice("warn", err.message));
-      }
-      update();
-    }
-
-    importBtn.addEventListener("click", function () {
-      ctrl.busy = true;
-      withBusy(importBtn, async function () {
-        try {
-          const selection = picker.chosen().map(function (item) { return { scope: item.scope, key: item.key || "" }; });
-          const res = await apiPost("import/apply", { token: token, policy: policy, selection: selection });
-          const n = (res.reports || []).reduce(function (sum, r) { return sum + landed(r.counts); }, 0);
-          toast(n ? t("imported", { n: n }) : t("importNothing"));
-          ctrl.busy = false;
-          ctrl.close(true);
-          await reloadAfterChange(state.selected);
-        } catch (err) {
-          toast(err.message, "error");
-        } finally {
-          ctrl.busy = false;
-        }
-      });
-    });
-
-    box.append(
-      h("p", null, t("importHint")),
-      h("div", { class: "row-wrap" }, chooseBtn, fileName, fileInput),
-      field(t("policy"), null, policyEl),
-      result
-    );
-    ctrl.setFoot([counter, closeBtn(), importBtn]);
-  }
-
-  async function platformTab(ctrl, box, closeBtn) {
-    box.append(h("p", null, t("platformHint")));
-    const body = h("div", null, spinnerBlock());
-    box.append(body);
-    let info;
-    try {
-      info = await apiGet("migrate/info");
-    } catch (err) {
-      body.replaceChildren(notice("warn", err.message));
-      return;
-    }
-    const platforms = info.platforms || [];
-    if (!platforms.length) {
-      body.replaceChildren(emptyState("inbox", t("platformNone")));
-      return;
-    }
-    const opts = { from: platforms[0].platform, to: "", mode: "move", policy: "newer", includePeople: true };
-    let previewed = false;
-    const result = h("div", { class: "migrate-result" });
-    const previewBtn = h("button", { class: "btn" }, t("preview"));
-    const runBtn = h("button", { class: "btn primary", disabled: true }, t("runMigrate"));
-    function dirty() {
-      previewed = false;
-      runBtn.disabled = true;
-      result.replaceChildren();
-      // 占位提示一个和旧 ID 不同的、当前启用的机器人
-      toInput.placeholder = (info.adapters || []).filter(function (id) { return id !== opts.from; })[0] || "";
-    }
-    const listId = "mb-adapters";
-    const toInput = h("input", {
-      class: "input",
-      list: listId,
-      spellcheck: "false",
-      autocomplete: "off",
-      oninput: function (event) {
-        opts.to = event.target.value.trim();
-        dirty();
-      },
-    });
-    const datalist = h(
-      "datalist",
-      { id: listId },
-      (info.adapters || []).map(function (id) { return h("option", { value: id }); })
-    );
-    dirty();
-    body.replaceChildren(
-      h(
-        "div",
-        { class: "form-grid two" },
-        field(
-          t("platformFrom"),
-          null,
-          selectBox(
-            platforms.map(function (p) {
-              return [p.platform, p.platform + (p.sessions ? " · " + t("platformSessions", { n: p.sessions }) : "")];
-            }),
-            opts.from,
-            function (value) {
-              opts.from = value;
-              dirty();
-            }
-          )
-        ),
-        field(t("platformTo"), t("platformToHint"), h("div", null, toInput, datalist)),
-        field(t("modeLabel"), null, segment([["move", t("modeMove")], ["copy", t("modeCopy")]], opts.mode, function (value) {
-          opts.mode = value;
-          dirty();
-        })),
-        field(t("policy"), null, policySelect(opts.policy, function (value) {
-          opts.policy = value;
-          dirty();
-        }))
-      ),
-      checkRow(t("includePeople"), true, function (value) {
-        opts.includePeople = value;
-        dirty();
-      }),
-      h("div", { class: "hint-line" }, t("moveHint")),
-      result
-    );
-
-    async function send(dryRun) {
-      return apiPost("migrate/platform", {
-        from: opts.from,
-        to: opts.to,
-        mode: opts.mode,
-        policy: opts.policy,
-        includePeople: opts.includePeople,
-        dryRun: dryRun,
-      });
-    }
-
-    previewBtn.addEventListener("click", function () {
-      withBusy(previewBtn, async function () {
-        result.replaceChildren(spinnerBlock());
-        try {
-          const res = await send(true);
-          const items = res.items || [];
-          const parts = [];
-          if (!items.length) {
-            parts.push(notice("info", t("migrateNothing")));
-          } else {
-            parts.push(h("p", null, t("migratePreview", { n: items.length })));
-            parts.push(
-              h(
-                "div",
-                { class: "batch-list" },
-                items.map(function (item) {
-                  return h(
-                    "div",
-                    { class: "batch-row" },
-                    h(
-                      "div",
-                      { class: "batch-text" },
-                      h("div", { class: "batch-name" }, scopeTitle(item.from)),
-                      h("div", { class: "batch-sub" }, (item.from.umo || item.from.key) + " → " + (item.to.umo || item.to.key)),
-                      issuesBlock(item.issues)
-                    ),
-                    h("span", { class: "tag" }, countsLine(item.counts))
-                  );
-                })
-              )
-            );
-          }
-          (res.warnings || []).forEach(function (warning) {
-            parts.push(notice("warn", warning));
-          });
-          const skipped = res.skipped || [];
-          if (skipped.length) {
-            parts.push(
-              notice("warn", [
-                t("migrateSkipped", { n: skipped.length }),
-                h("div", null, skipped.map(function (item) { return h("div", null, h("code", null, item.key)); })),
-              ])
-            );
-          }
-          result.replaceChildren();
-          append(result, parts);
-          previewed = items.length > 0;
-          runBtn.disabled = !previewed;
-        } catch (err) {
-          result.replaceChildren(notice("warn", err.message));
-        }
-      });
-    });
-
-    runBtn.addEventListener("click", function () {
-      if (!previewed) {
-        return;
-      }
-      ctrl.busy = true;
-      withBusy(runBtn, async function () {
-        try {
-          const res = await send(false);
-          const totals = res.totals || {};
-          toast(t("migrated", { n: landed(totals) }));
-          ctrl.busy = false;
-          ctrl.close(true);
-          await loadOverview(true);
-          // 正在看的会话被整个搬走了就回到首页
-          const sel = state.selected;
-          if (sel && sel.scope !== "global" && !allScopes().some(function (item) { return sameScope(item, sel); })) {
-            state.selected = null;
-            resetDetailState();
-            backToList();
-            renderSessionList();
-            renderMain();
-          } else {
-            await reloadAfterChange(sel);
-          }
-        } catch (err) {
-          toast(err.message, "error");
-        } finally {
-          ctrl.busy = false;
-        }
-      });
-    });
-    ctrl.setFoot([h("span", { class: "grow" }), closeBtn(), previewBtn, runBtn]);
-  }
-
-  async function migrateScope() {
-    if (!(await confirmDiscard())) {
-      return;
-    }
-    const sel = state.selected;
-    const d = state.detail;
-    const files = d.files.map(function (f) { return f.file; });
-    const forgotten = (d.forgotten || []).map(function (f) { return f.file; });
-    const targets = allScopes().filter(function (item) { return !sameScope(item, sel); });
-    const NEW_SESSION = "+session";
-    const NEW_PEOPLE = "+people";
-    const opts = { target: "", umo: "", platform: "", mode: "copy", policy: "newer", includeForgotten: true };
-    let previewed = false;
-    const ctrl = openDialog({ title: t("migrateTo"), wide: true });
-    const result = h("div", { class: "migrate-result" });
-    const previewBtn = h("button", { class: "btn" }, t("preview"));
-    const runBtn = h("button", { class: "btn primary", disabled: true }, t("runMigrate"));
-    function dirty() {
-      previewed = false;
-      runBtn.disabled = true;
-      result.replaceChildren();
-    }
-    const umoInput = h("input", {
-      class: "input",
-      spellcheck: "false",
-      autocomplete: "off",
-      placeholder: "aiocqhttp:GroupMessage:123456",
-      oninput: function (event) {
-        opts.umo = event.target.value.trim();
-        dirty();
-      },
-    });
-    const platformInput = h("input", {
-      class: "input",
-      spellcheck: "false",
-      autocomplete: "off",
-      oninput: function (event) {
-        opts.platform = event.target.value.trim();
-        dirty();
-      },
-    });
-    const umoField = field(t("targetUmo"), t("targetUmoHint"), umoInput);
-    const platformField = field(t("targetPlatform"), null, platformInput);
-    function drawExtra() {
-      umoField.style.display = opts.target === NEW_SESSION ? "" : "none";
-      platformField.style.display = opts.target === NEW_PEOPLE ? "" : "none";
-    }
-    const targetOptions = [["", "—"]]
-      .concat(
-        targets.map(function (item) {
-          const id = item.scope + ":" + (item.key || "");
-          return [id, scopeTitle(item) + (item.scope === "session" && item.platform ? " · " + item.platform : "")];
-        })
-      )
-      .concat([[NEW_SESSION, t("targetNewSession")], [NEW_PEOPLE, t("targetNewPeople")]]);
-    const targetEl = selectBox(targetOptions, "", function (value) {
-      opts.target = value;
-      previewBtn.disabled = !value;
-      drawExtra();
-      dirty();
-    });
-    previewBtn.disabled = true;
-
-    let picker = null;
-    let filesBlock = null;
-    if (files.length > 1) {
-      const counter = h("small");
-      picker = pickList(
-        files,
-        function (file) {
-          return h("div", { class: "batch-text" }, h("div", { class: "file-name" }, file));
-        },
-        function () {
-          counter.textContent = t("selectedFiles", { n: picker.chosen().length, total: files.length });
-          dirty();
-        }
-      );
-      counter.textContent = t("selectedFiles", { n: files.length, total: files.length });
-      filesBlock = h("div", { class: "field" }, h("label", null, h("span", null, t("filesLabel")), counter), picker.el);
-    }
-
-    ctrl.setBody(
-      h(
-        "div",
-        null,
-        h("p", null, t("migrateScopeHint")),
+  function exportTab(box) {
+    const scopes = allScopes();
+    const selected = new Set(scopes.map(function (item) { return item.scope + ":" + (item.key || ""); }));
+    const include = h("input", { type: "checkbox", checked: true });
+    box.append(h("p", { class: "hint-line" }, t("exportHint")));
+    scopes.forEach(function (item) {
+      box.append(
         h(
-          "div",
-          { class: "form-grid two" },
-          field(t("targetLabel"), null, targetEl),
-          field(t("modeLabel"), null, segment([["copy", t("modeCopy")], ["move", t("modeMove")]], opts.mode, function (value) {
-            opts.mode = value;
-            dirty();
-          })),
-          umoField,
-          platformField,
-          field(t("policy"), null, policySelect(opts.policy, function (value) {
-            opts.policy = value;
-            dirty();
-          }))
-        ),
-        filesBlock,
-        forgotten.length
-          ? checkRow(t("includeForgotten"), true, function (value) {
-              opts.includeForgotten = value;
-              dirty();
-            })
-          : null,
-        h("div", { class: "hint-line" }, t("moveHint")),
-        result
-      )
-    );
-    drawExtra();
-
-    function payload(dryRun) {
-      let to;
-      if (opts.target === NEW_SESSION) {
-        to = { umo: opts.umo };
-      } else if (opts.target === NEW_PEOPLE) {
-        to = { scope: "people", platform: opts.platform };
-      } else {
-        const idx = opts.target.indexOf(":");
-        to = { scope: opts.target.slice(0, idx), key: opts.target.slice(idx + 1) };
-      }
-      const body = {
-        from: { scope: sel.scope, key: sel.key || "" },
-        to: to,
-        mode: opts.mode,
-        policy: opts.policy,
-        includeForgotten: opts.includeForgotten,
-        dryRun: dryRun,
-      };
-      if (picker && picker.chosen().length < files.length) {
-        body.files = picker.chosen();
-      }
-      return body;
-    }
-
-    previewBtn.addEventListener("click", function () {
-      withBusy(previewBtn, async function () {
-        result.replaceChildren(spinnerBlock());
-        try {
-          const res = await apiPost("migrate/scope", payload(true));
-          const reportBox = h(
-            "div",
-            { class: "batch-list" },
-            h(
-              "div",
-              { class: "batch-row" },
-              h(
-                "div",
-                { class: "batch-text" },
-                h("div", { class: "batch-name" }, scopeTitle(res.from) + " → " + scopeTitle(res.to)),
-                issuesBlock(res.issues)
-              ),
-              h("span", { class: "tag" }, countsLine(res.counts))
-            )
-          );
-          result.replaceChildren(reportBox);
-          (res.warnings || []).forEach(function (warning) {
-            result.appendChild(notice("warn", warning));
-          });
-          previewed = landed(res.counts) > 0 || (opts.mode === "move" && (res.counts.same || 0) > 0);
-          runBtn.disabled = !previewed;
-        } catch (err) {
-          result.replaceChildren(notice("warn", err.message));
-        }
-      });
+          "label",
+          { class: "check" },
+          h("input", {
+            type: "checkbox",
+            checked: true,
+            onchange: function (event) {
+              if (event.target.checked) {
+                selected.add(item.scope + ":" + (item.key || ""));
+              } else {
+                selected.delete(item.scope + ":" + (item.key || ""));
+              }
+            },
+          }),
+          item.label
+        )
+      );
     });
-
-    runBtn.addEventListener("click", function () {
-      if (!previewed) {
-        return;
-      }
-      ctrl.busy = true;
-      withBusy(runBtn, async function () {
+    box.append(h("label", { class: "check" }, include, t("includeForgotten")));
+    const btn = h("button", { class: "btn primary" }, t("exportButton"));
+    btn.addEventListener("click", async function () {
+      await withBusy(btn, async function () {
         try {
-          const res = await apiPost("migrate/scope", payload(false));
-          toast(t("migrated", { n: landed(res.counts) }));
-          ctrl.busy = false;
-          ctrl.close(true);
-          await reloadAfterChange(sel);
+          const res = await apiPost("export/prepare", {
+            scopes: scopes
+              .filter(function (item) { return selected.has(item.scope + ":" + (item.key || "")); })
+              .map(function (item) { return { scope: item.scope, key: item.key || "" }; }),
+            includeForgotten: include.checked,
+          });
+          const bundle = await apiGet("export/file", { token: res.token });
+          const blob = new Blob([JSON.stringify(bundle, null, 2)], { type: "application/json" });
+          const link = document.createElement("a");
+          link.href = URL.createObjectURL(blob);
+          link.download = res.filename;
+          link.click();
+          URL.revokeObjectURL(link.href);
+          toast(t("exported"));
         } catch (err) {
           toast(err.message, "error");
-        } finally {
-          ctrl.busy = false;
         }
       });
     });
-    ctrl.setFoot([h("span", { class: "grow" }), h("button", { class: "btn", onclick: function () { ctrl.close(null); } }, t("cancel")), previewBtn, runBtn]);
+    box.append(btn);
+  }
+
+  function importTab(box) {
+    const fileInput = h("input", { type: "file", accept: ".json,application/json" });
+    const preview = h("div", { class: "stack" });
+    const policy = h(
+      "select",
+      { class: "input" },
+      ["newer", "skip", "overwrite"].map(function (value) {
+        return h("option", { value: value }, t("policy_" + value));
+      })
+    );
+    const selected = new Set();
+    let token = "";
+    const apply = h("button", { class: "btn primary" }, t("importButton"));
+    apply.disabled = true;
+    fileInput.addEventListener("change", async function () {
+      const file = fileInput.files && fileInput.files[0];
+      if (!file) {
+        return;
+      }
+      try {
+        const bundle = JSON.parse(await file.text());
+        const res = await apiPost("import/preview", { bundle: bundle, policy: policy.value });
+        token = res.token;
+        selected.clear();
+        (res.scopes || []).forEach(function (item) { selected.add(item.scope + ":" + (item.key || "")); });
+        preview.replaceChildren(
+          ...(res.scopes || []).map(function (item) {
+            return h(
+              "label",
+              { class: "check" },
+              h("input", {
+                type: "checkbox",
+                checked: true,
+                onchange: function (event) {
+                  if (event.target.checked) {
+                    selected.add(item.scope + ":" + (item.key || ""));
+                  } else {
+                    selected.delete(item.scope + ":" + (item.key || ""));
+                  }
+                },
+              }),
+              (item.label || item.key || item.scope) + " · " + t("cntAdded", { n: item.counts.added }) + " / " + t("cntReplaced", { n: item.counts.replaced })
+            );
+          })
+        );
+        apply.disabled = false;
+      } catch (err) {
+        toast(t("badBackup"), "error");
+      }
+    });
+    apply.addEventListener("click", async function () {
+      await withBusy(apply, async function () {
+        try {
+          const res = await apiPost("import/apply", {
+            token: token,
+            policy: policy.value,
+            selection: Array.from(selected).map(function (id) {
+              const parts = id.split(":");
+              return { scope: parts[0], key: parts.slice(1).join(":") };
+            }),
+          });
+          toast(res.message || t("imported"));
+          await refreshAll();
+        } catch (err) {
+          toast(err.message, "error");
+        }
+      });
+    });
+    box.append(h("p", { class: "hint-line" }, t("importHint")));
+    box.append(fileInput, h("label", { class: "field-label" }, t("policy")), policy, preview, apply);
+  }
+
+  function scopeMigrateTab(box) {
+    const scopes = allScopes();
+    const options = scopes.map(function (item) {
+      return h("option", { value: item.scope + ":" + (item.key || "") }, item.label);
+    });
+    const src = h("select", { class: "input" }, options);
+    const dst = h("select", { class: "input" }, options);
+    const mode = h(
+      "select",
+      { class: "input" },
+      [h("option", { value: "copy" }, t("modeCopy")), h("option", { value: "move" }, t("modeMove"))]
+    );
+    const dry = h("input", { type: "checkbox", checked: true });
+    const result = h("pre", { class: "pre" });
+    const btn = h("button", { class: "btn primary" }, t("runMigrate"));
+    btn.addEventListener("click", async function () {
+      const from = src.value.split(":");
+      const to = dst.value.split(":");
+      try {
+        const res = await apiPost("migrate/scope", {
+          from: { scope: from[0], key: from.slice(1).join(":") },
+          to: { scope: to[0], key: to.slice(1).join(":") },
+          mode: mode.value,
+          dryRun: dry.checked,
+        });
+        result.textContent = JSON.stringify(res, null, 2);
+        if (!dry.checked) {
+          await refreshAll();
+        }
+      } catch (err) {
+        toast(err.message, "error");
+      }
+    });
+    box.append(h("p", { class: "hint-line" }, t("migrateScopeHint")));
+    box.append(h("label", { class: "field-label" }, t("modeLabel")), mode);
+    box.append(h("label", { class: "field-label" }, t("platformFrom")), src);
+    box.append(h("label", { class: "field-label" }, t("migrateTo")), dst);
+    box.append(h("label", { class: "check" }, dry, t("migratePreview")), btn, result);
+  }
+
+  function platformTab(box) {
+    const from = h("input", { class: "input", placeholder: "aiocqhttp" });
+    const to = h("input", { class: "input", placeholder: "aiocqhttp-new" });
+    const mode = h(
+      "select",
+      { class: "input" },
+      [h("option", { value: "move" }, t("modeMove")), h("option", { value: "copy" }, t("modeCopy"))]
+    );
+    const includeNotebook = h("input", { type: "checkbox", checked: true });
+    const dry = h("input", { type: "checkbox", checked: true });
+    const result = h("pre", { class: "pre" });
+    const btn = h("button", { class: "btn primary" }, t("runMigrate"));
+    btn.addEventListener("click", async function () {
+      try {
+        const res = await apiPost("migrate/platform", {
+          from: from.value.trim(),
+          to: to.value.trim(),
+          mode: mode.value,
+          includeNotebook: includeNotebook.checked,
+          dryRun: dry.checked,
+        });
+        result.textContent = JSON.stringify(res, null, 2);
+        if (!dry.checked) {
+          await refreshAll();
+        }
+      } catch (err) {
+        toast(err.message, "error");
+      }
+    });
+    box.append(h("p", { class: "hint-line" }, t("platformHint")));
+    box.append(h("label", { class: "field-label" }, t("platformFrom")), from);
+    box.append(h("label", { class: "field-label" }, t("platformTo")), to);
+    box.append(h("label", { class: "field-label" }, t("modeLabel")), mode);
+    box.append(h("label", { class: "check" }, includeNotebook, t("includeNotebook")));
+    box.append(h("label", { class: "check" }, dry, t("migratePreview")), btn, result);
   }
 
   // ------------------------------------------------------------ 启动
 
-  function bindShortcuts() {
-    document.addEventListener("keydown", function (event) {
-      if (!(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== "s") {
-        return;
-      }
-      if (document.querySelector(".overlay")) {
-        return;
-      }
-      if (state.tab === "memories" && state.editor && !state.editor.loading) {
-        event.preventDefault();
-        saveFile(null);
-      } else if (state.tab === "index" && state.indexDraft !== null) {
-        event.preventDefault();
-        saveIndex(null);
-      }
-    });
+  function render() {
+    if (!els.main) {
+      buildShell();
+      return;
+    }
+    renderSidebar();
+    renderMain();
   }
 
   async function init() {
-    const app = document.getElementById("app");
-    if (!bridge) {
-      app.replaceChildren(h("div", { class: "center-state" }, emptyState("warn", ZH.noBridge)));
+    if (!bridge || !bridge.apiGet) {
+      document.getElementById("app").replaceChildren(
+        emptyState("warn", t("loadFailed"), t("noBridge"))
+      );
       return;
     }
-    const context = await bridge.ready();
-    let locale = context && context.locale;
     buildShell();
-    bindShortcuts();
-    bridge.onContext(function (next) {
-      if (next && next.locale && next.locale !== locale) {
-        locale = next.locale;
-        buildShell();
-      }
-    });
-    await loadOverview(false);
+    await loadOverview();
   }
 
   init();

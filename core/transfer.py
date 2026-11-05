@@ -4,11 +4,15 @@
 ScopeStore.import_files），老记忆搬完不会看起来像刚写的。同名冲突按策略
 处理（留较新的 / 留现有的 / 用搬来的覆盖），每一步都能先预演再执行。
 
+三层作用域：留言板（board，无键）、小本本（notebook，键是平台目录名）、
+悄悄话（whisper，键是会话目录名）。迁移/导入是管理员在管理页发起的操作，
+所以可以碰到任意会话的悄悄话；聊天工具与召回没有这条通道（PLAN 3.8.3）。
+
 上下文统计和平台上的某段对话绑定，换个会话就没有意义，不在迁移范围内。
 
 平台改名的场景：AstrBot 里删掉重建了机器人适配器、或改了它的 ID，会话
 标识（UMO）的第一段随之变化，记忆目录就对不上了。迁移按旧 UMO 换上新
-平台 ID 算出新目录，把记忆与登记信息一并搬过去。
+平台 ID 算出新目录，把小本本、悄悄话与登记信息一并搬过去。
 """
 
 from __future__ import annotations
@@ -31,7 +35,6 @@ from .memstore import (
     MemoryStore,
     ScopeStore,
     Usage,
-    is_person_file,
     is_scope_key,
     safe_key,
 )
@@ -43,18 +46,17 @@ from .registry import (
     umo_from_key,
 )
 
-BUNDLE_FORMAT = "memory-beyond-backup"
+BUNDLE_FORMAT = "memory-pod-backup"
 BUNDLE_VERSION = 1
 
-SCOPE_GLOBAL = "global"
-SCOPE_SESSION = "session"
-SCOPE_PEOPLE = "people"
-SCOPES = (SCOPE_GLOBAL, SCOPE_SESSION, SCOPE_PEOPLE)
+SCOPE_BOARD = "board"
+SCOPE_NOTEBOOK = "notebook"
+SCOPE_WHISPER = "whisper"
+SCOPES = (SCOPE_BOARD, SCOPE_NOTEBOOK, SCOPE_WHISPER)
 
 MODE_COPY = "copy"
 MODE_MOVE = "move"
 
-PEOPLE_ONLY = "人物记忆只收 user-<数字ID>.md"
 MAX_PLATFORM_CHARS = 64
 OUTCOMES = (IMPORT_ADDED, IMPORT_REPLACED, IMPORT_SAME, IMPORT_KEPT, IMPORT_INVALID)
 
@@ -70,7 +72,7 @@ class ScopeRef:
 
     @property
     def id(self) -> str:
-        return self.scope if self.scope == SCOPE_GLOBAL else f"{self.scope}:{self.key}"
+        return self.scope if self.scope == SCOPE_BOARD else f"{self.scope}:{self.key}"
 
 
 @dataclass
@@ -87,12 +89,14 @@ def make_ref(scope: object, key: object = "") -> ScopeRef:
     """校验作用域与目录名；不合法抛 TransferError。"""
     scope = str(scope or "").strip().lower()
     key = str(key or "").strip()
-    if scope == SCOPE_GLOBAL:
-        return ScopeRef(SCOPE_GLOBAL, "")
+    if scope == SCOPE_BOARD:
+        return ScopeRef(SCOPE_BOARD, "")
     if scope not in SCOPES:
-        raise TransferError("作用域只能是 global、session 或 people")
+        raise TransferError("作用域只能是 board、notebook 或 whisper")
     if not is_scope_key(key):
-        raise TransferError("会话标识不合法" if scope == SCOPE_SESSION else "平台标识不合法")
+        raise TransferError(
+            "平台标识不合法" if scope == SCOPE_NOTEBOOK else "会话标识不合法"
+        )
     return ScopeRef(scope, key)
 
 
@@ -223,21 +227,6 @@ def parse_bundle(data: object) -> list[BundleScope]:
     return result
 
 
-def _people_filter(
-    ref: ScopeRef, entries: list[ImportEntry]
-) -> tuple[list[ImportEntry], list[ImportResult]]:
-    """人物作用域一人一个文件：不是 user-<数字ID>.md 的条目直接判为不合法。"""
-    if ref.scope != SCOPE_PEOPLE:
-        return entries, []
-    kept = [e for e in entries if is_person_file(e.name)]
-    rejected = [
-        ImportResult(e.name, IMPORT_INVALID, PEOPLE_ONLY)
-        for e in entries
-        if not is_person_file(e.name)
-    ]
-    return kept, rejected
-
-
 def _has_memories(store: ScopeStore) -> bool:
     return bool(store.list_files() or store.forgotten_files())
 
@@ -257,12 +246,12 @@ class MemoryTransfer:
         self.registry = registry
 
     def scope_store(self, ref: ScopeRef) -> ScopeStore:
-        if ref.scope == SCOPE_GLOBAL:
-            return self.store.global_scope()
-        if ref.scope == SCOPE_PEOPLE:
-            found = self.store.people_scope_by_key(ref.key)
+        if ref.scope == SCOPE_BOARD:
+            return self.store.board_scope()
+        if ref.scope == SCOPE_NOTEBOOK:
+            found = self.store.notebook_scope_by_key(ref.key)
         else:
-            found = self.store.session_scope_by_key(ref.key)
+            found = self.store.whisper_scope_by_key(ref.key)
         if found is None:
             raise TransferError("作用域标识不合法")
         return found
@@ -270,7 +259,9 @@ class MemoryTransfer:
     def describe(self, ref: ScopeRef) -> dict:
         """给页面展示用的作用域信息（名称由页面按语言拼）。"""
         data = {"scope": ref.scope, "key": ref.key}
-        if ref.scope == SCOPE_SESSION:
+        if ref.scope == SCOPE_NOTEBOOK:
+            data["platform"] = ref.key
+        elif ref.scope == SCOPE_WHISPER:
             record = self.registry.get(ref.key)
             if record is None:
                 platform, kind, target = guess_from_key(ref.key)
@@ -285,14 +276,12 @@ class MemoryTransfer:
                 name=record.name,
                 remark=record.remark,
             )
-        elif ref.scope == SCOPE_PEOPLE:
-            data["platform"] = ref.key
         return data
 
     def all_refs(self) -> list[ScopeRef]:
-        refs = [ScopeRef(SCOPE_GLOBAL)]
-        refs += [ScopeRef(SCOPE_PEOPLE, key) for key in self.store.people_keys()]
-        refs += [ScopeRef(SCOPE_SESSION, key) for key in self.store.session_keys()]
+        refs = [ScopeRef(SCOPE_BOARD)]
+        refs += [ScopeRef(SCOPE_NOTEBOOK, key) for key in self.store.notebook_keys()]
+        refs += [ScopeRef(SCOPE_WHISPER, key) for key in self.store.whisper_keys()]
         return refs
 
     # ------------------------------------------------------------ 备份
@@ -319,7 +308,7 @@ class MemoryTransfer:
             }
             if index:
                 item["index"] = index
-            if ref.scope == SCOPE_SESSION:
+            if ref.scope == SCOPE_WHISPER:
                 session = _session_to_json(self.registry.get(ref.key))
                 if session:
                     item["session"] = session
@@ -341,9 +330,8 @@ class MemoryTransfer:
         reports = []
         for item in scopes:
             store = self.scope_store(item.ref)
-            entries, rejected = _people_filter(item.ref, item.entries)
-            results = rejected + await store.import_files(
-                entries,
+            results = await store.import_files(
+                item.entries,
                 policy,
                 index=item.index,
                 dry_run=dry_run,
@@ -351,7 +339,7 @@ class MemoryTransfer:
             )
             if (
                 not dry_run
-                and item.ref.scope == SCOPE_SESSION
+                and item.ref.scope == SCOPE_WHISPER
                 and any(r.landed for r in results)
             ):
                 info = item.session
@@ -374,7 +362,7 @@ class MemoryTransfer:
         for item in scopes:
             data = self.describe(item.ref)
             info = item.session
-            if item.ref.scope == SCOPE_SESSION:
+            if item.ref.scope == SCOPE_WHISPER:
                 umo = str(info.get("umo") or "")
                 if umo and not data.get("umo") and safe_key(umo) == item.ref.key:
                     platform, kind, target = parse_umo(umo)
@@ -419,8 +407,7 @@ class MemoryTransfer:
             index = ""
         if not entries:
             raise TransferError("来源没有可迁移的记忆")
-        entries, rejected = _people_filter(dst, entries)
-        results = rejected + await dst_store.import_files(
+        results = await dst_store.import_files(
             entries,
             policy,
             index=index,
@@ -429,7 +416,7 @@ class MemoryTransfer:
         )
         moved = 0
         if not dry_run:
-            if dst.scope == SCOPE_SESSION and any(r.landed for r in results):
+            if dst.scope == SCOPE_WHISPER and any(r.landed for r in results):
                 umo = dst_umo if dst_umo and safe_key(dst_umo) == dst.key else ""
                 await asyncio.to_thread(self.registry.adopt, dst.key, umo)
             if mode == MODE_MOVE:
@@ -460,10 +447,12 @@ class MemoryTransfer:
 
     # ------------------------------------------------------------ 平台改名
 
-    def platform_sessions(self, platform: str) -> list[tuple[str, str, SessionRecord | None]]:
+    def platform_sessions(
+        self, platform: str
+    ) -> list[tuple[str, str, SessionRecord | None]]:
         """属于某个平台 ID 的会话：(目录名, 可还原的 UMO 或空串, 登记记录)。"""
         records = self.registry.all()
-        keys = sorted(set(self.store.session_keys()) | set(records))
+        keys = sorted(set(self.store.whisper_keys()) | set(records))
         found = []
         for key in keys:
             if not is_scope_key(key):
@@ -487,10 +476,10 @@ class MemoryTransfer:
         *,
         mode: str = MODE_MOVE,
         policy: str = CONFLICT_NEWER,
-        include_people: bool = True,
+        include_notebook: bool = True,
         dry_run: bool = False,
     ) -> dict:
-        """把旧平台 ID 下所有会话的记忆与登记搬到新平台 ID 下。
+        """把旧平台 ID 下的小本本、悄悄话与登记搬到新平台 ID 下。
 
         每个会话按旧 UMO 换上新平台 ID 算出新目录；移动模式下源会话的
         记忆全部落到目标后，源目录、登记记录一并清掉。
@@ -503,9 +492,29 @@ class MemoryTransfer:
             raise TransferError("迁移方式只能是 copy 或 move")
         items: list[dict] = []
         skipped: list[dict] = []
+        # 小本本按平台目录整份搬
+        src_notebook = ScopeRef(SCOPE_NOTEBOOK, safe_key(src_platform))
+        dst_notebook = ScopeRef(SCOPE_NOTEBOOK, safe_key(dst_platform))
+        src_store = self.scope_store(src_notebook)
+        if (
+            include_notebook
+            and src_notebook.key != dst_notebook.key
+            and await asyncio.to_thread(_has_memories, src_store)
+        ):
+            report = await self.transfer(
+                src_notebook,
+                dst_notebook,
+                mode=mode,
+                policy=policy,
+                dry_run=dry_run,
+            )
+            if not dry_run and mode == MODE_MOVE:
+                await self._drop_if_empty(src_store)
+            items.append(report)
+        # 悄悄话按会话逐个换 UMO
         sessions = await asyncio.to_thread(self.platform_sessions, src_platform)
         for key, umo, record in sessions:
-            src = ScopeRef(SCOPE_SESSION, key)
+            src = ScopeRef(SCOPE_WHISPER, key)
             src_store = self.scope_store(src)
             has_files = await asyncio.to_thread(_has_memories, src_store)
             if not has_files:
@@ -516,7 +525,7 @@ class MemoryTransfer:
                 )
                 continue
             new_umo = dst_platform + ":" + umo.split(":", 1)[1]
-            dst = ScopeRef(SCOPE_SESSION, safe_key(new_umo))
+            dst = ScopeRef(SCOPE_WHISPER, safe_key(new_umo))
             report = await self.transfer(
                 src, dst, dst_umo=new_umo, mode=mode, policy=policy, dry_run=dry_run
             )
@@ -525,21 +534,6 @@ class MemoryTransfer:
                 await self._carry_session(key, dst.key, new_umo, record, mode, src_store)
                 report["to"] = {**self.describe(dst), "umo": new_umo}
             items.append(report)
-        if include_people:
-            # 来源按旧的物理目录找；目标是共享成员时 people_key 会映射到
-            # _shared，不能直接用 safe_key(dst_platform) 搬进已停用的旧目录
-            src = ScopeRef(SCOPE_PEOPLE, safe_key(src_platform))
-            dst = ScopeRef(SCOPE_PEOPLE, self.store.people_key(dst_platform))
-            src_store = self.scope_store(src)
-            if src.key != dst.key and await asyncio.to_thread(
-                _has_memories, src_store
-            ):
-                report = await self.transfer(
-                    src, dst, mode=mode, policy=policy, dry_run=dry_run
-                )
-                if not dry_run and mode == MODE_MOVE:
-                    await self._drop_if_empty(src_store)
-                items.append(report)
         totals = {name: 0 for name in OUTCOMES}
         for report in items:
             for name, value in report["counts"].items():

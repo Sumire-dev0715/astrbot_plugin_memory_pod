@@ -1,6 +1,7 @@
 """注入块里的记忆正文：去掉 frontmatter、瘦身、标题与档案区渲染。
 
-索引块、私聊人物档案（开头块）和每轮召回块共用同一套呈现方式：
+开头块（留言板全文、小本本索引、悄悄话索引、私聊人物档案）和每轮召回块
+共用同一套呈现方式：
 
 - 记忆文件只在磁盘上带 frontmatter；注入给模型的只有正文，标题行写作
   ``### 作用域/文件名（类型｜几天前写入）``，description 作为标题下的第一行。
@@ -8,7 +9,8 @@
   多少字——新内容通常补在末尾，只取前 N 字会把最新的事实切掉。
 - 来源 ID 只在它和文件所记的人不同（旁人转述）时写进标题，避免每行都拖着
   一串无信息量的数字。
-- 共享人物空间的文件在标题里注明"多个机器人共享"，和 3.3 的规范一致。
+- 留言板告示带署名；全部告示从新到旧注入全文，合计不超过 2000 字，超出
+  的只列标题（PLAN 3.8.3）。
 
 这里只做纯渲染，不读盘、不依赖 AstrBot 事件；main.py 的开头块与
 core.recall 的召回块都调用同一套函数，保证两处呈现一致。
@@ -26,8 +28,13 @@ from . import memstore, prompts
 FILE_CHARS = 3000
 TOTAL_CHARS = 9000
 DAY_SECONDS = 86400
-# 开头块里人物档案区的标题（标题下才是各条档案）
-PROFILE_HEADING = "# 发送者人物档案（私聊）"
+# 开头块里各段的标题（标题下才是内容）
+PROFILE_HEADING = "# 私聊人物档案"
+BOARD_HEADING = "# 留言板"
+NOTEBOOK_HEADING = "# 小本本索引"
+WHISPER_HEADING = "# 这段对话的悄悄话索引"
+# 留言板全文的总字数上限；超出的告示只列标题
+BOARD_LIMIT_CHARS = 2000
 
 _PERSON_FILE_RE = re.compile(r"^user-(\d+)\.md$")
 _INDEX_LINK_RE = re.compile(r"\]\(([^()\s]+\.md)\)")
@@ -91,8 +98,6 @@ class MemoryView:
     # 中间省略的字数；未截断为 0
     omitted: int
     written: float
-    # 来自共享人物空间，标题里注明"多个机器人共享"
-    shared: bool = False
     # 标题与 description 之后的附注（如"人物档案已更新，以这里为准"）
     note: str = ""
 
@@ -118,7 +123,6 @@ def prepare_view(
     content: str,
     written: float,
     *,
-    shared: bool = False,
     note: str = "",
     limit: int = FILE_CHARS,
 ) -> MemoryView:
@@ -137,16 +141,13 @@ def prepare_view(
         truncated=truncated,
         omitted=omitted,
         written=written,
-        shared=shared,
         note=note,
     )
 
 
 def render_title(view: MemoryView, now: float | None = None) -> str:
-    """条目标题：``### 引用（类型｜几天前写入）``；共享与旁人转述追加在括号里。"""
+    """条目标题：``### 引用（类型｜几天前写入）``；旁人转述追加在括号里。"""
     parts = [view.mem_type or "未标注"]
-    if view.shared:
-        parts.append("多个机器人共享")
     parts.append(f"{age_label(view.written, now)}写入")
     source = source_note(view.ref, view.source)
     if source:
@@ -173,31 +174,94 @@ def render_profiles(views: list[MemoryView], now: float | None = None) -> str:
     return "\n\n".join([PROFILE_HEADING, *[render_view(view, now) for view in views]])
 
 
+@dataclass(frozen=True)
+class BoardNotice:
+    """留言板的一条告示；全文注入时带署名。"""
+
+    file: str
+    title: str
+    body: str
+    signature: str = ""
+    written: float = 0.0
+
+
+def render_board_notices(
+    notices: list[BoardNotice],
+    now: float | None = None,
+    limit: int = BOARD_LIMIT_CHARS,
+) -> str:
+    """渲染留言板：从新到旧全文注入，合计不超过 limit 字，超出的只列标题。
+
+    "全文"包含标题、署名与正文；一旦下一条会超出上限，它和更旧的告示都
+    只列标题，并提示用 memory_read 读全文。
+    """
+    if not notices:
+        return ""
+    ordered = sorted(
+        notices, key=lambda item: (item.written, item.file), reverse=True
+    )
+    full: list[str] = []
+    overflow: list[BoardNotice] = []
+    used = 0
+    for notice in ordered:
+        title = notice.title or notice.file[: -len(memstore.MEMORY_FILE_SUFFIX)]
+        block_parts = [f"### {notice.file}"]
+        title_line = f"标题：{title}"
+        signature_line = f"署名：{notice.signature}" if notice.signature else ""
+        body = (notice.body or "").strip()
+        rendered = "\n".join(
+            part for part in (block_parts[0], title_line, signature_line, body) if part
+        )
+        if used + len(rendered) > limit:
+            overflow.append(notice)
+            continue
+        used += len(rendered)
+        full.append(rendered)
+    lines = [BOARD_HEADING]
+    if full:
+        lines.append("\n\n".join(full))
+    if overflow:
+        if full:
+            lines.append("其余告示只列标题，需要时用 memory_read 读取：")
+        else:
+            lines.append("告示只列标题，需要时用 memory_read 读取：")
+        for notice in overflow:
+            title = notice.title or notice.file[: -len(memstore.MEMORY_FILE_SUFFIX)]
+            lines.append(f"- {notice.file} — {title}")
+    return "\n\n".join(lines)
+
+
 def build_opening_block(
-    global_index: str | None,
-    session_index: str,
+    board: str,
+    notebook_index: str,
+    whisper_index: str,
     profiles: list[MemoryView] | None = None,
     now: float | None = None,
 ) -> str | None:
-    """拼开头块：索引与私聊人物档案共用同一个快照。
+    """拼开头块：留言板全文、小本本与当前悄悄话的索引、私聊人物档案。
 
-    没有人物档案时与 prompts.build_index_block 完全相同；有档案时把档案区
-    放在索引段之后、关闭标记之前。索引与档案都为空才返回 None。
+    四个部分都是空时返回 None（不注入空块）。留言板由 render_board_notices
+    渲染好传进来，本函数只负责分段与包裹数据标记。
     """
-    profiles = profiles or []
-    base = prompts.build_index_block(global_index, session_index)
-    if not profiles:
-        return base
-    profile_text = render_profiles(profiles, now)
-    if base is None:
-        return (
-            f"{prompts.INDEX_BLOCK_OPEN}\n"
-            f"{prompts.DATA_NOTICE}\n\n"
-            f"{profile_text}\n"
-            f"{prompts.INDEX_BLOCK_CLOSE}"
-        )
-    head = base[: -len(prompts.INDEX_BLOCK_CLOSE)].rstrip("\n")
-    return f"{head}\n\n{profile_text}\n{prompts.INDEX_BLOCK_CLOSE}"
+    sections: list[str] = []
+    if board.strip():
+        sections.append(board.strip())
+    if notebook_index.strip():
+        sections.append(f"{NOTEBOOK_HEADING}\n{notebook_index.strip()}")
+    if whisper_index.strip():
+        sections.append(f"{WHISPER_HEADING}\n{whisper_index.strip()}")
+    profile_text = render_profiles(profiles or [], now)
+    if profile_text:
+        sections.append(profile_text)
+    if not sections:
+        return None
+    body = "\n\n".join(sections)
+    return (
+        f"{prompts.INDEX_BLOCK_OPEN}\n"
+        f"{prompts.DATA_NOTICE}\n\n"
+        f"{body}\n"
+        f"{prompts.INDEX_BLOCK_CLOSE}"
+    )
 
 
 def indexed_names(*index_texts: str) -> set[str]:

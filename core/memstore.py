@@ -3,9 +3,10 @@
 一个文件一条事实（Markdown + frontmatter），每个作用域一个 MEMORY.md
 索引，索引一条记忆占一行、只放指针永不放正文。
 
-聊天场景的双层作用域：
-    global/            —— 机器人自我的全局记忆（偏好、行为准则），所有会话共享注入
-    session/<会话键>/  —— 当前会话（UMO）的记忆：本群 / 本私聊里的人和事
+三层作用域（PLAN 3.8.3）：
+    board/              —— 留言板：所有机器人的所有会话都能读，管理员写
+    notebook/<平台ID>/  —— 小本本：这台机器人的所有群聊和私聊
+    whisper/<会话>/     —— 悄悄话：只有这段对话（私聊的这个人 / 这个群）
 
 索引自动注入通道有 200 行 / 25KB 上限。超过时不再从底部截断：先整块丢
 日志，再按最近一次用到的时间从旧到新丢非日志条目（没有使用统计的按
@@ -24,8 +25,8 @@ updated 算），feedback 类最后丢；剩下的行保持原顺序，末尾注
 原顺序，日志在索引末尾折叠成"最近两篇 + 一行汇总"的块，判定与折叠规则
 见 core/journal.py。
 
-共享人物空间：配置里列出的机器人统一使用 people/_shared/，目录映射只在
-MemoryStore.people_scope() 一处决定；成员表与写权限见 core/sharing.py。
+留言板每条告示带署名（写在 frontmatter 的 metadata.signature），开头块
+按从新到旧注入全文。
 
 使用统计与遗忘：每个作用域目录下有一份 .usage.json，记每个文件最近一次
 被召回或读取的时间与次数。开启遗忘后，长期没用到的文件移进 forgotten/
@@ -46,7 +47,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import history, index_view, insights, journal, sharing
+from . import history, index_view, insights, journal
 
 INDEX_FILENAME = "MEMORY.md"
 INDEX_MAX_LINES = 200
@@ -61,6 +62,26 @@ MAX_HOOK_CHARS = 100
 # 召回打分只看文件开头这么多字符，避免个别大文件拖慢每轮的扫描
 HEADER_TEXT_CHARS = 8 * 1024
 MEMORY_TYPES = ("user", "feedback", "project", "reference", "journal")
+
+# 三层作用域（工具参数、目录名、管理页都用这套键）
+SCOPE_BOARD = "board"
+SCOPE_NOTEBOOK = "notebook"
+SCOPE_WHISPER = "whisper"
+SCOPES = (SCOPE_BOARD, SCOPE_NOTEBOOK, SCOPE_WHISPER)
+SCOPE_LABELS = {
+    SCOPE_BOARD: "留言板",
+    SCOPE_NOTEBOOK: "小本本",
+    SCOPE_WHISPER: "悄悄话",
+}
+# 留言板告示的署名长度上限（"<请求人>（由 <机器人> 代发）"也够用）
+MAX_SIGNATURE_CHARS = 100
+
+# 日记：最近一篇不超过这么多字、且最后一次更新不超过这么多天，就接着写；
+# 否则新开一篇 journal-<日期>.md，同一天重名时加序号。
+JOURNAL_MAX_CHARS = 3000
+JOURNAL_MAX_AGE_DAYS = 7
+# 单次追加给日记的流水上限，避免一次写入把一篇日记撑爆
+MAX_JOURNAL_APPEND_CHARS = 2000
 
 # 插件自动维护的三个戳（写在 frontmatter 的 metadata 下）：
 #   created  首次写入时间；改写、整理都不会把老记忆变"新"
@@ -191,10 +212,12 @@ class MemoryDoc:
     created: str = ""
     updated: str = ""
     source: str = ""
+    # 留言板告示的署名，由插件写进 metadata.signature
+    signature: str = ""
 
 
 def parse_memory(content: str) -> MemoryDoc:
-    """拆解记忆文件：frontmatter 的 name / description / type、三个戳与正文。
+    """拆解记忆文件：frontmatter 的 name / description / type、三个戳、署名与正文。
 
     type 按规范写在 metadata 下一级（metadata:\\n  type: user），也兼容
     直接写在顶层的 type:，两处都有时以 metadata 下的为准。
@@ -213,7 +236,9 @@ def parse_memory(content: str) -> MemoryDoc:
             key = key.strip().lower()
             value = value.strip().strip("'\"")
             if line[:1] in (" ", "\t"):
-                if in_metadata and (key == "type" or key in STAMP_KEYS):
+                if in_metadata and (
+                    key == "type" or key in STAMP_KEYS or key == "signature"
+                ):
                     nested.setdefault(key, value)
                 continue
             in_metadata = key == "metadata" and not value
@@ -230,6 +255,7 @@ def parse_memory(content: str) -> MemoryDoc:
         created=nested.get("created", ""),
         updated=nested.get("updated", ""),
         source=nested.get("source", ""),
+        signature=nested.get("signature", ""),
     )
 
 
@@ -241,17 +267,23 @@ def compose_memory(
     created: str = "",
     updated: str = "",
     source: str = "",
+    signature: str = "",
 ) -> str:
     """按标准格式拼出记忆文件：frontmatter（name / description / metadata.type）+ 正文。
 
     三个戳平时不用传——写入时由 stamp_memory 自动补；传了就原样写进 metadata。
+    signature 只用于留言板告示，同样写进 metadata。
     """
     description = _HOOK_WS_RE.sub(" ", description or "").strip()
     meta = [f"  type: {mem_type.strip()}"]
-    for key, value in (("created", created), ("updated", updated), ("source", source)):
+    values = (("created", created), ("updated", updated), ("source", source))
+    for key, value in values:
         value = " ".join(str(value or "").split())
         if value:
             meta.append(f"  {key}: {value}")
+    signature = " ".join(str(signature or "").split())[:MAX_SIGNATURE_CHARS]
+    if signature:
+        meta.append(f"  signature: {signature}")
     return (
         "---\n"
         f"name: {name.strip()}\n"
@@ -405,6 +437,10 @@ class WriteReport:
     # 记录"看过"的版本；失败时为空串。不要再从磁盘重读：写锁释放后别人
     # 可能已经写入，重读会把对方的版本记成本机器人看过。
     content: str = ""
+    # 实际写入（或删除）的文件名；日记由插件决定写到哪一篇时给调用方看
+    file: str = ""
+    # 这次写入是否新建了文件（日记：新开一篇为 true，续写为 false）
+    new: bool = False
 
 
 @dataclass
@@ -424,6 +460,8 @@ class MemoryHeader:
     updated: float = 0.0
     created: float = 0.0
     source: str = ""
+    # 留言板告示的署名
+    signature: str = ""
     # 使用统计（来自 .usage.json）：最近一次被召回或读取的时间、累计次数
     last_used: float = 0.0
     uses: int = 0
@@ -603,8 +641,11 @@ class ScopeStore:
         *,
         scope_label: str = "",
         scopes_trash_dir: Path | None = None,
+        layer: str = "",
     ):
         self.root = root
+        # 所属层（board / notebook / whisper）；只用于提示词与整理标签
+        self.layer = layer
         self._lock = asyncio.Lock()
         # 文件名 -> ((mtime_ns, size), 头信息)；按修改时间失效
         self._headers: dict[str, tuple[tuple[int, int], MemoryHeader]] = {}
@@ -784,6 +825,7 @@ class ScopeStore:
             updated=parse_stamp(doc.updated) or st.st_mtime,
             created=parse_stamp(doc.created) or 0.0,
             source=doc.source,
+            signature=doc.signature,
         )
 
     # ------------------------------------------------------------ 写 / 删
@@ -794,14 +836,12 @@ class ScopeStore:
         content: str,
         source: str = "",
         actor: str = "",
-        forbid_overwrite: bool = False,
+        now: float | None = None,
     ) -> WriteReport:
         """写入记忆文件并自动同步索引行（钩子取自 frontmatter description）。
 
         source 是本次写入的来源 ID（通常是当前发送者），并入文件的 source 戳；
-        actor 是这次变更的执行者（后台整理记平台 ID），写进审计。
-        forbid_overwrite 为 true 时只允许新建：持锁确认在册或已遗忘的同名
-        文件都不存在，避免 append 级成员在并发下绕过"只能新建"。
+        actor 是这次变更的执行者（聊天工具记平台 ID），写进审计。
         """
         # 与 _resolve 同样的归一化：索引守门与索引行都要用整理后的名字，
         # 否则 " MEMORY.md" / "/MEMORY.md" 能绕过守门，索引行也会写错
@@ -830,8 +870,6 @@ class ScopeStore:
                 return WriteReport(
                     False, f"读取 {name} 的现有内容失败，未写入：{exc}"
                 )
-            if forbid_overwrite and (active is not None or previous is not None):
-                return WriteReport(False, sharing.APPEND_OVERWRITE_REFUSAL)
             return await self._commit(
                 name,
                 path,
@@ -842,7 +880,99 @@ class ScopeStore:
                 action=history.ACTION_WRITE,
                 actor=actor,
                 active_before=active,
+                now=now,
             )
+
+    # ------------------------------------------------------------ 日记
+
+    async def write_journal(
+        self,
+        text: str,
+        *,
+        now: float,
+        actor: str = "",
+        source: str = "",
+    ) -> WriteReport:
+        """把一段流水写进日记，写到哪一篇由插件决定（PLAN 3.8.3）。
+
+        接着最近一篇写；最近一篇正文超过 JOURNAL_MAX_CHARS 字、或最后一次
+        更新已经过了 JOURNAL_MAX_AGE_DAYS 天、或还没有日记，就新开一篇
+        journal-<当天日期>.md，同一天重名时加序号。每天第一次写进某篇时
+        补一个 `## YYYY-MM-DD` 小标题。模型不需要知道文件名。
+        """
+        text = (text or "").strip()[:MAX_JOURNAL_APPEND_CHARS].strip()
+        if not text:
+            return WriteReport(False, "日记内容为空，未写入。")
+        date = time.strftime("%Y-%m-%d", time.localtime(now))
+        headers = await asyncio.to_thread(self.headers)
+        journals = [
+            header
+            for header in headers
+            if journal.is_journal(header.file, header.type)
+        ]
+        latest = None
+        if journals:
+            latest = max(
+                journals,
+                key=lambda header: (
+                    header.updated,
+                    header.mtime,
+                    journal.journal_date(header.file),
+                    header.file,
+                ),
+            )
+        if latest is not None:
+            content = await self.read(latest.file) or ""
+            body_chars = len(parse_memory(content).body)
+            age_seconds = now - latest.updated if latest.updated else None
+            if (
+                content
+                and body_chars <= JOURNAL_MAX_CHARS
+                and age_seconds is not None
+                and age_seconds <= JOURNAL_MAX_AGE_DAYS * 86400.0
+            ):
+                block = (
+                    f"\n\n{text}"
+                    if journal.last_heading_date(content) == date
+                    else f"\n\n## {date}\n\n{text}"
+                )
+                report = await self.edit(
+                    latest.file,
+                    "",
+                    block,
+                    mode="append",
+                    actor=actor,
+                    source=source,
+                    now=now,
+                )
+                report.file = latest.file
+                report.new = False
+                return report
+        name = self._new_journal_name(now)
+        content = compose_memory(
+            name[: -len(MEMORY_FILE_SUFFIX)],
+            f"{date} 的日记",
+            journal.JOURNAL_TYPE,
+            f"## {date}\n\n{text}",
+            source=source,
+        )
+        report = await self.write(name, content, actor=actor, source=source, now=now)
+        report.file = name
+        report.new = report.ok
+        return report
+
+    def _new_journal_name(self, now: float) -> str:
+        """新日记文件名：journal-<日期>.md；同一天重名时依次加 -2、-3…"""
+        date = time.strftime("%Y-%m-%d", time.localtime(now))
+        base = f"journal-{date}"
+        name = f"{base}.md"
+        if not self.exists(name):
+            return name
+        for index in range(2, 100):
+            name = f"{base}-{index}.md"
+            if not self.exists(name):
+                return name
+        return f"{base}-{int(now)}.md"
 
     @staticmethod
     def _read_if_exists(path: Path) -> str | None:
@@ -884,6 +1014,7 @@ class ScopeStore:
         source: str = "",
         actor: str = "",
         mode: str = "replace",
+        now: float | None = None,
     ) -> WriteReport:
         """局部修改：默认 replace 把 old 替换成 new；append 追加内容；section 换小节正文。
 
@@ -951,6 +1082,7 @@ class ScopeStore:
                     action=history.ACTION_EDIT,
                     actor=actor,
                     active_before=content,
+                    now=now,
                 )
             if mode == "section":
                 if not old.strip():
@@ -972,6 +1104,7 @@ class ScopeStore:
                     action=history.ACTION_EDIT,
                     actor=actor,
                     active_before=content,
+                    now=now,
                 )
             # 精确替换只作用于正文：frontmatter 由插件生成，模型不能借
             # replace 改 type、created、source 这些字段
@@ -1024,9 +1157,12 @@ class ScopeStore:
         action: str = history.ACTION_WRITE,
         actor: str = "",
         active_before: str | None = None,
+        now: float | None = None,
     ) -> WriteReport:
         """持锁落盘：补戳 → 体积守门 → 存旧版 → 原子写 → 失效头缓存 → 同步索引行。"""
-        content = stamp_memory(content, time.time(), source, previous)
+        content = stamp_memory(
+            content, time.time() if now is None else now, source, previous
+        )
         if len(content.encode("utf-8")) > MAX_FILE_BYTES:
             return WriteReport(
                 False,
@@ -1071,7 +1207,7 @@ class ScopeStore:
         health = self._index_health(lines, size)
         if health:
             message += "。" + health
-        return WriteReport(True, message, content)
+        return WriteReport(True, message, content, name)
 
     async def delete(self, name: str, actor: str = "") -> WriteReport:
         name = (name or "").strip().lstrip("/")
@@ -1099,7 +1235,7 @@ class ScopeStore:
             self._drop_header(name)
             await asyncio.to_thread(self._remove_index_line, name)
             await asyncio.to_thread(self._forget_usage, name)
-        return WriteReport(True, f"已删除 {name}，对应索引行已同步移除")
+        return WriteReport(True, f"已删除 {name}，对应索引行已同步移除", file=name)
 
     def _renames_path(self) -> Path:
         return self.root / RENAMES_FILENAME
@@ -2532,8 +2668,8 @@ def is_person_file(name: str) -> bool:
 
 
 class MemoryStore:
-    """三层作用域的记忆库根：global（机器人自我）、session（每个会话）、
-    people（每个平台的人物记忆）。作用域目录按需创建、ScopeStore 按键缓存。"""
+    """三层作用域的记忆库根：board（留言板）、notebook（每个平台的小本本）、
+    whisper（每段对话的悄悄话）。作用域目录按需创建、ScopeStore 按键缓存。"""
 
     def __init__(
         self,
@@ -2548,20 +2684,6 @@ class MemoryStore:
         self._scopes_lock = threading.RLock()
         self.history_keep_days = max(0, int(history_keep_days))
         self.trash_keep_days = max(0, int(trash_keep_days))
-        # 共享人物空间的成员表；为空时 people 仍按平台各自一份（上游行为）
-        self._shared_people = sharing.Membership()
-
-    def set_shared_people(self, membership: sharing.Membership) -> None:
-        """注入共享人物空间成员表；插件启动与配置变更时调用。
-
-        只影响之后的 people_scope() 解析，已缓存的作用域对象照旧可用
-        （非成员与成员各自用自己目录下的那个 ScopeStore）。
-        """
-        with self._scopes_lock:
-            self._shared_people = membership or sharing.Membership()
-
-    def shared_people(self) -> sharing.Membership:
-        return self._shared_people
 
     def set_retention(self, history_keep_days: int, trash_keep_days: int) -> None:
         """更新保留期配置，已缓存的作用域一并生效。"""
@@ -2582,7 +2704,7 @@ class MemoryStore:
             return path.name
         return "-".join(rel.parts) or path.name
 
-    def _scope(self, path: Path) -> ScopeStore:
+    def _scope(self, path: Path, layer: str = "") -> ScopeStore:
         path = path.resolve()
         with self._scopes_lock:
             store = self._scopes.get(path)
@@ -2591,66 +2713,51 @@ class MemoryStore:
                     path,
                     scope_label=self._scope_label(path),
                     scopes_trash_dir=self.base_dir / history.SCOPE_TRASH_DIRNAME,
+                    layer=layer,
                 )
                 store.set_retention(self.history_keep_days, self.trash_keep_days)
                 self._scopes[path] = store
         return store
 
-    def global_scope(self) -> ScopeStore:
-        return self._scope(self.base_dir / "global")
+    def board_scope(self) -> ScopeStore:
+        """留言板：整个 AstrBot 共用一份，所有机器人的所有会话都能读。"""
+        return self._scope(self.base_dir / SCOPE_BOARD, SCOPE_BOARD)
 
-    def session_scope(self, session_key: str) -> ScopeStore:
-        return self._scope(self.base_dir / "session" / safe_key(session_key))
+    def notebook_scope(self, platform: str) -> ScopeStore:
+        """某个平台（机器人）的小本本：这台机器人的所有群聊和私聊共享。
 
-    def session_scope_by_key(self, key: str) -> ScopeStore | None:
-        """按目录名（safe_key 的输出）取会话作用域；目录名不合法返回 None。"""
-        if not is_scope_key(key):
-            return None
-        return self._scope(self.base_dir / "session" / key)
-
-    def session_keys(self) -> list[str]:
-        """磁盘上已有记忆目录的会话（目录名）。"""
-        return self._subdirs("session")
-
-    def people_scope(self, platform: str) -> ScopeStore:
-        """某个平台的人物记忆：一人一个文件，该平台的所有群聊和私聊共享。
         按平台分目录是因为不同平台的数字 ID 可能撞号。
-
-        共享人物空间的成员统一指向 people/_shared/；成员表只在 people_key()
-        这一处生效（people_scope 也走它），main.py、管理页、导出导入、整理
-        与迁移的调用点都自动走同一套映射。
-        safe_key 的输出不会以 _ 开头，_shared 不会和任何平台目录撞名。
         """
-        return self._scope(self.base_dir / "people" / self.people_key(platform))
+        return self._scope(
+            self.base_dir / SCOPE_NOTEBOOK / safe_key(platform or "unknown"),
+            SCOPE_NOTEBOOK,
+        )
 
-    def people_key(self, platform: str) -> str:
-        """平台 ID 对应的人物目录名：共享成员统一 _shared，否则 safe_key。
-
-        迁移脚本、平台改名迁移与「迁移到某个平台的人物记忆」需要目录名而不
-        是 ScopeStore，也走这里，避免绕过共享映射把数据搬进已经停用的旧目录。
-        """
-        if self._shared_people.is_member(platform):
-            return sharing.SHARED_KEY
-        return safe_key(platform or "unknown")
-
-    def is_shared_people_scope(self, store: ScopeStore) -> bool:
-        """这个作用域是否就是共享人物目录（权限判定 fail-closed 用）。"""
-        try:
-            return store.root.resolve() == (
-                self.base_dir / "people" / sharing.SHARED_KEY
-            ).resolve()
-        except OSError:
-            return False
-
-    def people_scope_by_key(self, key: str) -> ScopeStore | None:
-        """按目录名取人物作用域；目录名不合法返回 None。"""
+    def notebook_scope_by_key(self, key: str) -> ScopeStore | None:
+        """按目录名取小本本；目录名不合法返回 None。"""
         if not is_scope_key(key):
             return None
-        return self._scope(self.base_dir / "people" / key)
+        return self._scope(self.base_dir / SCOPE_NOTEBOOK / key, SCOPE_NOTEBOOK)
 
-    def people_keys(self) -> list[str]:
-        """磁盘上已有人物记忆目录的平台（目录名）。"""
-        return self._subdirs("people")
+    def notebook_keys(self) -> list[str]:
+        """磁盘上已有小本本的平台目录名。"""
+        return self._subdirs(SCOPE_NOTEBOOK)
+
+    def whisper_scope(self, session_key: str) -> ScopeStore:
+        """一段对话的悄悄话：私聊就是机器人和这个人，群聊就是这个群。"""
+        return self._scope(
+            self.base_dir / SCOPE_WHISPER / safe_key(session_key), SCOPE_WHISPER
+        )
+
+    def whisper_scope_by_key(self, key: str) -> ScopeStore | None:
+        """按会话目录名取悄悄话；目录名不合法返回 None。"""
+        if not is_scope_key(key):
+            return None
+        return self._scope(self.base_dir / SCOPE_WHISPER / key, SCOPE_WHISPER)
+
+    def whisper_keys(self) -> list[str]:
+        """磁盘上已有悄悄话的会话（目录名）。"""
+        return self._subdirs(SCOPE_WHISPER)
 
     def _subdirs(self, layer: str) -> list[str]:
         root = self.base_dir / layer
@@ -2662,13 +2769,13 @@ class MemoryStore:
 
     def scopes_for_cleanup(self) -> list[ScopeStore]:
         """参与保留期清理的作用域；应在事件循环里取好再进工作线程。"""
-        stores = [self.global_scope()]
-        for key in self.session_keys():
-            store = self.session_scope_by_key(key)
+        stores = [self.board_scope()]
+        for key in self.notebook_keys():
+            store = self.notebook_scope_by_key(key)
             if store is not None:
                 stores.append(store)
-        for key in self.people_keys():
-            store = self.people_scope_by_key(key)
+        for key in self.whisper_keys():
+            store = self.whisper_scope_by_key(key)
             if store is not None:
                 stores.append(store)
         return stores
@@ -2704,7 +2811,5 @@ class MemoryStore:
 
 
 def is_scope_key(key: str) -> bool:
-    """目录名是否是合法的作用域键；_shared 是共享人物空间的保留键。"""
-    if key == sharing.SHARED_KEY:
-        return True
+    """目录名是否是合法的作用域键（小本本的平台目录 / 悄悄话的会话目录）。"""
     return bool(key) and bool(_SCOPE_KEY_RE.match(key))

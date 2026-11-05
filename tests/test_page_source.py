@@ -1,4 +1,4 @@
-"""管理页没有 DOM 测试环境：这里锁住回收站「彻底删除（含历史）」的关键接线。"""
+"""管理页没有 DOM 测试环境：这里锁住关键接线与已删除功能的痕迹。"""
 
 from pathlib import Path
 
@@ -12,7 +12,6 @@ def _source() -> str:
 
 def test_trash_tab_purge_button_only_for_missing_active_files():
     source = _source()
-    # 回收站渲染时先取当前在册文件名，只有不在册的条目才给彻底删除按钮
     render = source.split("function renderTrashTab()", 1)[1].split(
         "async function viewTrashEntry", 1
     )[0]
@@ -25,7 +24,7 @@ def test_trash_tab_purge_button_only_for_missing_active_files():
 def test_trash_purge_uses_file_purge_with_confirmation():
     source = _source()
     body = source.split("async function purgeTrashFile(item)", 1)[1].split(
-        "// ------------------------------------------------------------", 1
+        "// ------------------------------------------------------------ 整理", 1
     )[0]
     assert "confirmDialog(" in body
     assert 't("trashPurgeTitle")' in body
@@ -35,7 +34,6 @@ def test_trash_purge_uses_file_purge_with_confirmation():
 
 
 def test_home_shows_user_identifier_notice():
-    """3.7.1：管理页首页提示 AstrBot 用户识别；压缩相关提示随功能删除。"""
     source = _source()
     welcome = source.split("function renderWelcome()", 1)[1].split(
         "function renderDetail()", 1
@@ -45,11 +43,11 @@ def test_home_shows_user_identifier_notice():
 
 
 def test_context_panel_is_read_only():
-    """3.8.6：上下文面板只读，没有重置或改动上下文的入口。"""
     source = _source()
     assert '"tabContext"' in source
     assert 't("contextReadonlyNotice")' in source
-    assert 'apiGet("session/context"' in source
+    assert 'apiGet("whisper/context"' in source
+    assert "session/context" not in source
     assert "session/reset" not in source
     assert "resetCompression" not in source
     assert 't("summaryTitle")' in source
@@ -65,19 +63,29 @@ def test_context_panel_leaves_no_dead_ui():
     assert "hasContext" not in api_source
 
 
-def test_archive_tab_is_gone():
+def test_removed_features_are_gone_from_page():
     source = _source()
-    assert 't("tabArchives")' not in source
-    assert "renderArchiveTab" not in source
-    assert "openArchive" not in source
+    for needle in (
+        "autotidy",
+        "autoTidy",
+        "tidyMode",
+        "pendingScopes",
+        "renderPendingPanel",
+        "SHARED_KEY",
+        "globalTitle",
+        "peopleTitle",
+        "renderArchiveTab",
+    ):
+        assert needle not in source, needle
 
 
-def test_consolidate_all_includes_people_without_enabled_flag():
-    """overview 不再返回 people.enabled；整理全部仍要收进已有人物记忆。"""
+def test_consolidate_all_covers_three_layers_only():
     source = _source()
     body = source.split("function consolidateTargets()", 1)[1].split(
         "function sameScope(", 1
     )[0]
-    assert "people.enabled" not in body
-    assert "people.platforms" in body
-    assert "p.fileCount > 0" in body
+    assert "ov.board" in body
+    assert "ov.notebooks" in body
+    assert "ov.whispers" in body
+    assert "people.platforms" not in body
+    assert "sessions" not in body

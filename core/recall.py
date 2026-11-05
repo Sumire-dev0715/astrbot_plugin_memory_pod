@@ -17,8 +17,8 @@
 日志（journal）是流水账，既不进身份必选，也不进关键词挑选；
 需要时按日期显式 memory_read 或 memory_search。
 
-共享人物空间里召回的人物文件在标题里注明"多个机器人共享"：召回内容
-只是数据，模型据此知道这不是当前机器人独有的人物记忆。
+召回只看小本本（这台机器人的所有会话共享）和当前这段对话的悄悄话；
+别的对话的悄悄话永远不在候选里（PLAN 3.8.3）。
 
 召回分两档（3.6 第 2 条）：相关度最高的 recall_full_files 个非身份文件
 带全文，其余合成一行指针，需要细节时由模型 memory_read。身份必选文件
@@ -120,13 +120,14 @@ def identity_files(
     return [f"user-{uid}.md" for uid in ids]
 
 
-# 身份必选只认这两个作用域：全局作用域不该有 user-<ID> 文件
-FORCED_SCOPES = ("session", "people")
+# 身份必选只认小本本：悄悄话里的人物档案只在私聊开头块出现，
+# 群聊的悄悄话不按关键词或身份扩散（PLAN 3.8.3）。
+FORCED_SCOPES = ("notebook",)
 
 
 @dataclass
 class Candidate:
-    """一个可召回的记忆：作用域标签（global / session / people）+ 头信息。"""
+    """一个可召回的记忆：作用域标签（notebook / whisper）+ 头信息。"""
 
     scope: str
     header: MemoryHeader
@@ -144,9 +145,9 @@ def select_by_keywords(
 ) -> list[Candidate]:
     """身份必选在前，其余按关键词得分（同分取较新）补足到 limit 条。
 
-    人物作用域（people）只参与身份必选：正在说话、被提到的人才带上，
-    不按关键词把别的群里的人扩散进来。日志是流水账，既不进身份必选，
-    也不按关键词扩散。
+    身份必选只认小本本里正在说话与被提到的人；悄悄话文件按关键词参与，
+    但本来就只来自当前这段对话。日志是流水账，既不进身份必选，也不按
+    关键词扩散。
     """
     if limit <= 0:
         return []
@@ -165,7 +166,7 @@ def select_by_keywords(
     query_tokens = tokenize(query)
     scored = []
     for cand in candidates:
-        if cand in chosen or cand.scope == "people":
+        if cand in chosen:
             continue
         if journal.is_journal(cand.header.file, cand.header.type):
             continue
@@ -186,8 +187,6 @@ class Recalled:
     content: str
     # 最近修改时间（frontmatter 的 updated 戳，缺省退回 mtime）
     written: float
-    # 来自共享人物空间：标题里标明"多个机器人共享"，提醒模型这是共用记忆
-    shared: bool = False
     # 取自 MemoryHeader：指针行只写引用，必要时附一句描述
     description: str = ""
     # 标题与 description 之后的附注（快照后更新的人物档案用）
@@ -228,7 +227,6 @@ def plan_sections(
             item.ref,
             item.content,
             item.written,
-            shared=item.shared,
             note=item.note,
         )
         # 标题与 description 也真的进了块，预算不能只算正文
@@ -370,7 +368,6 @@ async def assemble_recall(
     forced_files: list[str],
     limit: int,
     data_notice: str,
-    shared_people: bool = False,
     now: float | None = None,
     full_files: int | None = None,
     extra_items: list[Recalled] | None = None,
@@ -378,8 +375,8 @@ async def assemble_recall(
 ) -> RecallPlan:
     """挑文件、读正文、分档、按预算瘦身并渲染召回块（不依赖 AstrBot 事件）。
 
-    调用方准备好作用域表（键是 global / session / people）和候选清单；
-    shared_people 为真时 people 作用域的文件在块里标注"多个机器人共享"。
+    调用方准备好作用域表（键是 notebook / whisper）和候选清单；
+    候选只来自当前这段对话的悄悄话，别的对话的内容不会进这里。
 
     full_files 是每轮带全文的非身份文件数；None 表示不分档（全部尝试带
     全文，与重构前行为一致）。身份必选文件始终带全文、不占这个名额，但仍
@@ -403,7 +400,6 @@ async def assemble_recall(
             cand.ref,
             content,
             cand.header.updated,
-            shared=shared_people and cand.scope == "people",
             description=cand.header.description,
         )
         items.append(item)

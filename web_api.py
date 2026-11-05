@@ -1,17 +1,20 @@
 """WebUI 记忆管理页的后端接口。
 
 页面（pages/memory）经 AstrBot 的插件页面桥接调用这里注册的接口，
-管理员可以查看并编辑每个会话的记忆、整理记忆、查看只读的上下文统计，
-设置定期整理并确认它给出的方案、撤销最近的整理，以及导出导入备份、
-在会话之间或平台改名后迁移记忆。
+管理员可以查看并编辑三层记忆（留言板 / 小本本 / 悄悄话）、发布带署名的
+留言板告示、手动整理记忆、查看只读的上下文统计，以及导出导入备份、
+在作用域之间或平台改名后迁移记忆。
 
 接口约定：
     - 只用 GET / POST；成功返回 {"status": "ok", "message": "", "data": {...}}，
       失败返回 {"status": "error", "message": "原因", "data": {}}，HTTP 状态码
       一律 200（面板把 status=error 转成页面里的报错文案）。
-    - 作用域用 scope=global|session 加 key（会话目录名）定位；目录名先校验
+    - 作用域用 scope=board|notebook|whisper 加 key 定位：board 无键，
+      notebook 的键是平台目录名，whisper 的键是会话目录名。目录名先校验
       格式再拼路径，不接受任何路径片段。
-    - 改动记忆后作废对应会话的索引快照，下一轮对话就能看到。
+    - 管理页是管理员操作，所以可以编辑任意会话的悄悄话、直接写留言板；
+      聊天工具与召回没有这些通道（PLAN 3.8.3）。
+    - 改动记忆后作废相应会话的索引快照，下一轮对话就能看到。
 
 AstrBot v4.24.1 起支持插件页面；更早的版本没有 register_web_api，
 这里静默跳过注册，插件其余功能照常。
@@ -22,7 +25,6 @@ from __future__ import annotations
 import asyncio
 import secrets
 import time
-from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from astrbot.api import logger
@@ -33,9 +35,7 @@ from .core import (
     history,
     insights,
     memstore,
-    pending,
     registry,
-    sharing,
     tidy,
     transfer,
 )
@@ -52,28 +52,18 @@ PLUGIN_NAME = "astrbot_plugin_memory_pod"
 ROUTE_PREFIX = f"/{PLUGIN_NAME}/"
 LOG_PREFIX = "[MemoryPod] "
 
-SCOPE_GLOBAL = "global"
-SCOPE_SESSION = "session"
-SCOPE_PEOPLE = "people"
-# 管理页迁移/导入到共享人物空间时的隐私提醒。迁移算管理员操作、不拦截，
-# 但 PLAN 第 6 节要求先人工确认拆分，页面不能默认用户已经知道。
-SHARED_PEOPLE_WARNING = (
-    "注意：内容会整份写入共享人物空间，原文件里的关系、健康、性、家庭矛盾等"
-    "只应在原私聊可见的段落也会被所有共享成员机器人读到。迁移/导入不会拆分"
-    "文件，请先确认已按 PLAN 第 6 节把这类段落留在原会话的 session 里。"
-)
-PEOPLE_FILE_RULE = "人物记忆一人一个文件，文件名必须是 user-<数字ID>.md"
+SCOPE_BOARD = memstore.SCOPE_BOARD
+SCOPE_NOTEBOOK = memstore.SCOPE_NOTEBOOK
+SCOPE_WHISPER = memstore.SCOPE_WHISPER
+SCOPES = memstore.SCOPES
+
 MAX_REMARK = 64
 MAX_QUERY = 200
+MAX_BOARD_TITLE = 120
+MAX_BOARD_BODY = 8000
 # 导出、导入的暂存：先生成再下载、先预演再执行，期间内容放在内存里
 STAGE_TTL = 30 * 60
 MAX_STAGED = 4
-
-
-@asynccontextmanager
-async def _null_async():
-    """没有后台锁的替身（测试里直接构造的最小插件对象）。"""
-    yield
 
 
 class ApiError(Exception):
@@ -127,6 +117,7 @@ def _header_dict(header: memstore.MemoryHeader) -> dict:
         "updated": header.updated,
         "created": header.created,
         "source": header.source,
+        "signature": header.signature,
         "size": header.size,
         "links": header.links,
         "lastUsed": header.last_used,
@@ -135,7 +126,9 @@ def _header_dict(header: memstore.MemoryHeader) -> dict:
     }
 
 
-def _file_flags(store: memstore.ScopeStore, headers: list[memstore.MemoryHeader]) -> dict[str, dict]:
+def _file_flags(
+    store: memstore.ScopeStore, headers: list[memstore.MemoryHeader]
+) -> dict[str, dict]:
     """文件列表里的提醒标记：悬空链接与过长文件（同步，放进线程执行）。"""
     available = {header.file for header in headers} | set(store.forgotten_files())
     flags: dict[str, dict] = {}
@@ -226,47 +219,6 @@ def _scan_scope(store: memstore.ScopeStore) -> tuple[int, float]:
     return count, latest
 
 
-def _member_dicts(membership: sharing.Membership) -> list[dict]:
-    """共享人物空间的成员与权限，按配置顺序给页面展示。"""
-    return [
-        {"platform": member.platform_id, "permission": member.permission}
-        for member in membership.members.values()
-    ]
-
-
-def _member_keys(membership: sharing.Membership) -> set[str]:
-    """成员原来的 people 目录名；用于把已并入共享的旧目录标成未使用。"""
-    return {
-        memstore.safe_key(member.platform_id)
-        for member in membership.members.values()
-    }
-
-
-def _people_display(key: str, membership: sharing.Membership) -> str:
-    """人物目录在页面上的显示名：共享目录用保留键，成员目录还原平台 ID。"""
-    if key == sharing.SHARED_KEY:
-        return key
-    for member in membership.members.values():
-        if memstore.safe_key(member.platform_id) == key:
-            return member.platform_id
-    return key
-
-
-def _people_info(key: str, membership: sharing.Membership) -> dict:
-    """管理页定位人物作用域时随详情返回的共享信息。"""
-    info = {
-        "key": key,
-        "platform": _people_display(key, membership),
-        "shared": key == sharing.SHARED_KEY,
-    }
-    if info["shared"]:
-        info["active"] = membership.active
-        info["members"] = _member_dicts(membership)
-    else:
-        info["unused"] = membership.active and key in _member_keys(membership)
-    return info
-
-
 class MemoryDashboard:
     """把 WebUI 接口挂到 AstrBot 上，并实现每个接口。"""
 
@@ -280,11 +232,11 @@ class MemoryDashboard:
 
     def _routes(self) -> list[tuple[str, str, Callable[[], Awaitable[dict]], str]]:
         return [
-            ("overview", "GET", self.overview, "记忆管理：会话总览"),
+            ("overview", "GET", self.overview, "记忆管理：三层记忆总览"),
             ("scope", "GET", self.scope_detail, "记忆管理：作用域详情"),
             ("file", "GET", self.file_detail, "记忆管理：读取记忆文件"),
             ("search", "GET", self.search, "记忆管理：全文搜索"),
-            ("session/context", "GET", self.session_context, "记忆管理：上下文统计"),
+            ("whisper/context", "GET", self.whisper_context, "记忆管理：上下文统计"),
             ("forgotten/file", "GET", self.forgotten_file, "记忆管理：读取已遗忘的文件"),
             ("file/save", "POST", self.file_save, "记忆管理：保存记忆文件"),
             ("file/delete", "POST", self.file_delete, "记忆管理：删除记忆文件"),
@@ -301,8 +253,9 @@ class MemoryDashboard:
             ("file/purge", "POST", self.file_purge, "记忆管理：彻底删除文件及其历史"),
             ("index/save", "POST", self.index_save, "记忆管理：保存索引"),
             ("index/rebuild", "POST", self.index_rebuild, "记忆管理：重建索引"),
-            ("session/remark", "POST", self.session_remark, "记忆管理：会话备注"),
-            ("session/purge", "POST", self.session_purge, "记忆管理：清除会话数据"),
+            ("whisper/remark", "POST", self.whisper_remark, "记忆管理：会话备注"),
+            ("whisper/purge", "POST", self.whisper_purge, "记忆管理：清除会话数据"),
+            ("board/publish", "POST", self.board_publish, "记忆管理：发布留言板告示"),
             (
                 "consolidate/preview",
                 "POST",
@@ -315,9 +268,6 @@ class MemoryDashboard:
                 self.consolidate_apply,
                 "记忆管理：应用整理方案",
             ),
-            ("autotidy", "GET", self.autotidy_status, "记忆管理：定期整理状态"),
-            ("autotidy/config", "POST", self.autotidy_config, "记忆管理：设置定期整理"),
-            ("autotidy/dismiss", "POST", self.autotidy_dismiss, "记忆管理：放弃待确认的方案"),
             ("tidy/runs", "GET", self.tidy_runs, "记忆管理：整理记录"),
             ("tidy/undo", "POST", self.tidy_undo, "记忆管理：撤销整理"),
             ("migrate/info", "GET", self.migrate_info, "记忆管理：迁移可选项"),
@@ -372,29 +322,29 @@ class MemoryDashboard:
 
     # ------------------------------------------------------------ 定位
 
-    def _session_key(self, raw: Any) -> str:
+    def _scope_key(self, raw: Any, scope: str) -> str:
         key = _text(raw).strip()
         if not memstore.is_scope_key(key):
-            raise ApiError("会话标识不合法")
+            raise ApiError("平台标识不合法" if scope == SCOPE_NOTEBOOK else "会话标识不合法")
         return key
 
-    def _scope(self, scope: Any, key: Any) -> tuple[str, str | None, memstore.ScopeStore]:
+    def _scope(self, scope: Any, key: Any) -> tuple[str, str, memstore.ScopeStore]:
         scope = _text(scope).strip().lower()
-        if scope == SCOPE_GLOBAL:
-            return SCOPE_GLOBAL, None, self.plugin._store.global_scope()
-        if scope == SCOPE_SESSION:
-            session_key = self._session_key(key)
-            store = self.plugin._store.session_scope_by_key(session_key)
-            if store is None:
-                raise ApiError("会话标识不合法")
-            return SCOPE_SESSION, session_key, store
-        if scope == SCOPE_PEOPLE:
-            people_key = _text(key).strip()
-            store = self.plugin._store.people_scope_by_key(people_key)
+        if scope == SCOPE_BOARD:
+            return SCOPE_BOARD, "", self.plugin._store.board_scope()
+        if scope == SCOPE_NOTEBOOK:
+            notebook_key = self._scope_key(key, scope)
+            store = self.plugin._store.notebook_scope_by_key(notebook_key)
             if store is None:
                 raise ApiError("平台标识不合法")
-            return SCOPE_PEOPLE, people_key, store
-        raise ApiError("作用域只能是 global、session 或 people")
+            return SCOPE_NOTEBOOK, notebook_key, store
+        if scope == SCOPE_WHISPER:
+            whisper_key = self._scope_key(key, scope)
+            store = self.plugin._store.whisper_scope_by_key(whisper_key)
+            if store is None:
+                raise ApiError("会话标识不合法")
+            return SCOPE_WHISPER, whisper_key, store
+        raise ApiError("作用域只能是 board、notebook 或 whisper")
 
     def _scope_from_query(self):
         return self._scope(_query("scope"), _query("key"))
@@ -414,18 +364,11 @@ class MemoryDashboard:
             raise ApiError("文件名不合法：" + memstore.ScopeStore.path_rules())
         return name
 
-    def _changed(self, key: str | None) -> None:
-        self.plugin.invalidate_for_key(key)
-
-    def _background_lock(self):
-        """与后台整理/定期整理共用同一把锁：清除动作期间不让它们落盘。"""
-        gate = getattr(self.plugin, "_background_gate", None)
-        if gate is None:
-            return _null_async()
-        return gate
+    def _changed(self, scope: str, key: str | None) -> None:
+        self.plugin.invalidate_scope(scope, key)
 
     def _scope_label(self, scope: str, key: str | None) -> str:
-        record = self.plugin._registry.get(key or "") if scope == SCOPE_SESSION else None
+        record = self.plugin._registry.get(key or "") if scope == SCOPE_WHISPER else None
         return tidy.scope_label(scope, key, record)
 
     def _stage(self, payload: Any) -> str:
@@ -447,14 +390,11 @@ class MemoryDashboard:
 
     @staticmethod
     def _tidy_info(meta: tidy.TidyMeta) -> dict:
-        pending = meta.pending or {}
         return {
             "lastRun": meta.last_run,
             "lastAttempt": meta.last_attempt,
             "outcome": meta.outcome,
             "message": meta.message,
-            "pendingCount": meta.pending_count(),
-            "pendingAt": pending.get("createdAt", 0) if pending else 0,
         }
 
     # ------------------------------------------------------------ 查询
@@ -463,102 +403,46 @@ class MemoryDashboard:
         plugin = self.plugin
         store = plugin._store
         records = plugin._registry.all()
-        keys = sorted(set(store.session_keys()) | set(records))
-        membership = store.shared_people()
-        # 共享人物空间启用后即使还没有文件，也要在页面上给它一个入口
-        people_keys = set(store.people_keys())
-        if membership.active:
-            people_keys.add(sharing.SHARED_KEY)
-        # 作用域对象在事件循环里取好再进线程：同一目录只能有一个实例
-        # （串行写入的锁挂在上面），线程里懒建会和循环上的处理器撞车
-        global_scope = store.global_scope()
-        scopes = {
-            key: store.session_scope_by_key(key)
-            for key in keys
-            if memstore.is_scope_key(key)
+        whisper_keys = sorted(set(store.whisper_keys()) | set(records))
+        notebook_keys = store.notebook_keys()
+        board_scope = store.board_scope()
+        notebook_scopes = {
+            key: store.notebook_scope_by_key(key) for key in notebook_keys
         }
-        people_scopes = {
-            key: store.people_scope_by_key(key) for key in sorted(people_keys)
+        whisper_scopes = {
+            key: store.whisper_scope_by_key(key)
+            for key in whisper_keys
+            if store.whisper_scope_by_key(key) is not None
         }
-        members = _member_dicts(membership)
-        member_keys = _member_keys(membership)
 
-        def collect() -> tuple[dict, list[dict], list[dict], dict]:
-            metas = plugin._tidy.all_meta()
-
-            def pending(scope: str, key: str | None) -> int:
-                meta = metas.get(tidy.scope_id(scope, key))
-                return meta.pending_count() if meta is not None else 0
-
-            g_count, g_latest = _scan_scope(global_scope)
-            sessions = []
-            for key, scope in scopes.items():
+        def collect() -> tuple[int, float, list[dict], list[dict]]:
+            board_count, board_latest = _scan_scope(board_scope)
+            notebooks = []
+            for key, scope in notebook_scopes.items():
+                count, latest = _scan_scope(scope) if scope else (0, 0.0)
+                notebooks.append(
+                    {"key": key, "platform": key, "fileCount": count, "updatedAt": latest}
+                )
+            whispers = []
+            for key, scope in whisper_scopes.items():
                 count, latest = _scan_scope(scope) if scope else (0, 0.0)
                 item = _record_dict(key, records.get(key))
-                item.update(
-                    fileCount=count,
-                    updatedAt=latest,
-                    tidyPending=pending(SCOPE_SESSION, key),
-                )
-                sessions.append(item)
-            platforms = []
-            for key, scope in people_scopes.items():
-                count, latest = _scan_scope(scope) if scope else (0, 0.0)
-                shared = key == sharing.SHARED_KEY
-                platforms.append(
-                    {
-                        "key": key,
-                        "platform": _people_display(key, membership),
-                        "fileCount": count,
-                        "updatedAt": latest,
-                        "tidyPending": pending(SCOPE_PEOPLE, key),
-                        "shared": shared,
-                        "active": bool(shared and membership.active),
-                        "members": members if shared else [],
-                        # 已加入共享的成员，原来的平台目录不再被插件读写
-                        "unused": bool(
-                            not shared
-                            and membership.active
-                            and key in member_keys
-                        ),
-                    }
-                )
-            global_info = {
-                "fileCount": g_count,
-                "updatedAt": g_latest,
-                "tidyPending": pending(SCOPE_GLOBAL, None),
-            }
-            return global_info, sessions, platforms, plugin._tidy.settings()
+                item.update(fileCount=count, updatedAt=latest)
+                whispers.append(item)
+            return board_count, board_latest, notebooks, whispers
 
-        global_info, sessions, platforms, settings = await asyncio.to_thread(collect)
-        global_info["enabled"] = plugin._global_on()
-        people_info: dict = {"platforms": platforms}
-        if membership.active:
-            people_info["shared"] = {
-                "key": sharing.SHARED_KEY,
-                "active": True,
-                "members": members,
-            }
+        board_count, board_latest, notebooks, whispers = await asyncio.to_thread(
+            collect
+        )
         return _ok(
             {
                 "memoryEnabled": plugin._bool("enable_memory", True),
-                "global": global_info,
-                "people": people_info,
+                "board": {"fileCount": board_count, "updatedAt": board_latest},
+                "notebooks": notebooks,
+                "whispers": whispers,
                 "context": await plugin.context_status(None),
-                "sessions": sessions,
-                "autoTidy": self._autotidy_settings(settings),
             }
         )
-
-    def _autotidy_settings(self, settings: dict) -> dict:
-        mode = self.plugin.tidy_mode()
-        return {
-            "mode": mode,
-            "hours": self.plugin.tidy_hours(),
-            # 配置页里已经开过的不算没问过
-            "asked": bool(settings.get("asked")) or mode != tidy.MODE_OFF,
-            "minChanges": tidy.MIN_CHANGES,
-        }
 
     async def scope_detail(self) -> dict:
         scope, key, store = self._scope_from_query()
@@ -601,19 +485,12 @@ class MemoryDashboard:
         data["scope"] = scope
         data["key"] = key
         data["tidy"] = self._tidy_info(meta)
-        # 待确认的方案原样给页面，确认时再走 consolidate/apply 重新校验
-        data["tidy"]["plan"] = meta.pending
-        data["tidyMode"] = self.plugin.tidy_mode()
         data["forgettingEnabled"] = self.plugin._forgetting_on()
         data["forgetAfterDays"] = self.plugin._forget_after_days()
-        if scope == SCOPE_SESSION:
-            data["session"] = _record_dict(key, self.plugin._registry.get(key))
-        elif scope == SCOPE_PEOPLE:
-            data["people"] = _people_info(
-                key, self.plugin._store.shared_people()
-            )
-        else:
-            data["enabled"] = self.plugin._global_on()
+        if scope == SCOPE_NOTEBOOK:
+            data["notebook"] = {"platform": key}
+        elif scope == SCOPE_WHISPER:
+            data["whisper"] = _record_dict(key, self.plugin._registry.get(key))
         return _ok(data)
 
     async def file_detail(self) -> dict:
@@ -638,6 +515,7 @@ class MemoryDashboard:
                 "created": doc.created,
                 "updated": doc.updated,
                 "source": doc.source,
+                "signature": doc.signature,
                 "hasFrontmatter": doc.has_frontmatter,
                 "links": memstore.extract_links(content),
             }
@@ -654,7 +532,9 @@ class MemoryDashboard:
             results.append({"file": file, "excerpt": excerpt})
         return _ok({"results": results})
 
-    async def _session_stats(self, key: str) -> tuple[context_stats.ContextStats, bool]:
+    async def _whisper_stats(
+        self, key: str
+    ) -> tuple[context_stats.ContextStats, bool]:
         """(上下文统计, 是否正被插件持有)；持有中的以内存为准。"""
         found = self.plugin.runtime_for_key(key)
         if found is not None:
@@ -662,10 +542,10 @@ class MemoryDashboard:
         stats = await self.plugin.load_stats_for_key(key)
         return stats or context_stats.ContextStats(), False
 
-    async def session_context(self) -> dict:
+    async def whisper_context(self) -> dict:
         """只读的上下文面板：最近一次请求的构成、用量上报与 AstrBot 摘要。"""
-        key = self._session_key(_query("key"))
-        stats, live = await self._session_stats(key)
+        key = self._scope_key(_query("key"), SCOPE_WHISPER)
+        stats, live = await self._whisper_stats(key)
         record = self.plugin._registry.get(key)
         umo = record.umo if record is not None else registry.umo_from_key(key)
         # 目录名不可逆：还原出的 UMO 必须再能转回同一个目录名，否则
@@ -696,11 +576,14 @@ class MemoryDashboard:
         body = await _body()
         scope, key, store = self._scope_from_body(body)
         name = self._file_name(body.get("file"))
-        if scope == SCOPE_PEOPLE and not memstore.is_person_file(name):
-            raise ApiError(PEOPLE_FILE_RULE)
         old_raw = _text(body.get("oldFile")).strip()
         old = self._file_name(old_raw) if old_raw else ""
         renaming = bool(old) and old != name
+
+        current_content = await store.read(old or name) if old or store.exists(name) else None
+        signature = " ".join(_text(body.get("signature")).split())
+        if not signature and current_content:
+            signature = memstore.parse_memory(current_content).signature
 
         if _text(body.get("mode")).strip().lower() == "raw":
             content = _text(body.get("content"))
@@ -710,8 +593,6 @@ class MemoryDashboard:
                 raise ApiError(
                     "类型只能是 user、feedback、project、reference、journal 之一"
                 )
-            if scope == SCOPE_PEOPLE and mem_type != "user":
-                raise ApiError("人物记忆的类型只能是 user")
             description = " ".join(_text(body.get("description")).split())
             if not description:
                 raise ApiError("请填写描述：它会成为索引里的那一行")
@@ -720,9 +601,26 @@ class MemoryDashboard:
                 description,
                 mem_type,
                 _text(body.get("body")).strip("\n"),
+                signature=signature,
             )
         if not content.strip():
             raise ApiError("内容不能为空")
+        # 留言板每条告示都必须带署名（PLAN 3.8.3）
+        if scope == SCOPE_BOARD:
+            if not signature:
+                raise ApiError("留言板告示必须填写署名")
+            signature = signature[: memstore.MAX_SIGNATURE_CHARS]
+            if _text(body.get("mode")).strip().lower() == "raw":
+                # 原文模式由页面直接给出 frontmatter；没有署名就补进去，
+                # 补不进去（没有 metadata 块）就拒绝，避免绕过"每条告示带署名"。
+                if not memstore.parse_memory(content).signature:
+                    content = content.replace(
+                        "metadata:\n",
+                        f"metadata:\n  signature: {signature}\n",
+                        1,
+                    )
+                if not memstore.parse_memory(content).signature:
+                    raise ApiError("留言板原文缺少 metadata.signature；请切换表单模式填写署名")
 
         if (not old or renaming) and store.exists(name):
             raise ApiError(f"已存在同名文件 {name}，请换一个文件名")
@@ -748,25 +646,83 @@ class MemoryDashboard:
                 rolled = await store.delete(name, actor=history.ACTOR_WEBUI)
                 detail = "；已撤回刚写入的新文件" if rolled.ok else ""
                 raise ApiError(renamed.message + detail)
-            # 整理记录与待确认方案里的旧名正文副本不能留下，否则撤销整理
-            # 还能把 old.md 写回来
+            # 整理记录里的旧名正文副本不能留下，否则撤销整理还能把 old.md 写回来
             await asyncio.to_thread(
                 self.plugin._tidy.remove_file,
                 tidy.scope_id(scope, key),
                 old,
             )
             message = f"{message}；{renamed.message}"
-        self._changed(key)
+        self._changed(scope, key)
         return _ok({"file": name, "mtime": store.mtime(name) or 0.0}, message)
+
+    async def board_publish(self) -> dict:
+        """管理页发布一条留言板告示：署名必填，正文与标题由页面填写。"""
+        body = await _body()
+        signature = " ".join(_text(body.get("signature")).split())
+        if not signature:
+            raise ApiError("请填写署名：每条留言板告示都要带署名")
+        if len(signature) > memstore.MAX_SIGNATURE_CHARS:
+            raise ApiError(f"署名最长 {memstore.MAX_SIGNATURE_CHARS} 个字")
+        description = " ".join(
+            _text(body.get("description") or body.get("title")).split()
+        )
+        if not description:
+            raise ApiError("请填写标题")
+        if len(description) > MAX_BOARD_TITLE:
+            raise ApiError(f"标题最长 {MAX_BOARD_TITLE} 个字")
+        content = _text(body.get("body") or body.get("content")).strip()
+        if not content:
+            raise ApiError("正文不能为空")
+        if len(content) > MAX_BOARD_BODY:
+            raise ApiError(f"正文最长 {MAX_BOARD_BODY} 个字")
+        store = self.plugin._store.board_scope()
+        name = self._board_file_name(body.get("file"), store)
+        text = memstore.compose_memory(
+            name[: -len(memstore.MEMORY_FILE_SUFFIX)],
+            description,
+            "reference",
+            content,
+            signature=signature,
+        )
+        report = await store.write(name, text, actor=history.ACTOR_WEBUI)
+        if not report.ok:
+            raise ApiError(report.message)
+        # 留言板对所有会话可见：作废全部开头块快照
+        self._changed(SCOPE_BOARD, None)
+        return _ok({"file": name}, report.message)
+
+    @staticmethod
+    def _board_file_name(raw: Any, store: memstore.ScopeStore) -> str:
+        requested = _text(raw).strip()
+        if requested:
+            name = requested
+            if not name.endswith(memstore.MEMORY_FILE_SUFFIX):
+                name += memstore.MEMORY_FILE_SUFFIX
+            if not memstore.ScopeStore.is_valid_name(name):
+                raise ApiError("文件名不合法：" + memstore.ScopeStore.path_rules())
+            if name.lower() == memstore.INDEX_FILENAME.lower():
+                raise ApiError("MEMORY.md 请在「索引」页编辑")
+            return name
+        stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime())
+        base = f"notice-{stamp}"
+        name = f"{base}.md"
+        if not store.exists(name):
+            return name
+        for index in range(2, 100):
+            name = f"{base}-{index}.md"
+            if not store.exists(name):
+                return name
+        raise ApiError("同时发布的告示太多，请稍后再试")
 
     async def file_delete(self) -> dict:
         body = await _body()
-        _, key, store = self._scope_from_body(body)
+        scope, key, store = self._scope_from_body(body)
         name = self._file_name(body.get("file"))
         report = await store.delete(name, actor=history.ACTOR_WEBUI)
         if not report.ok:
             raise ApiError(report.message)
-        self._changed(key)
+        self._changed(scope, key)
         return _ok({"file": name}, report.message)
 
     # ------------------------------------------------------------ 遗忘
@@ -791,22 +747,22 @@ class MemoryDashboard:
     async def file_forget(self) -> dict:
         """管理员手动把一个在册文件移入已遗忘。"""
         body = await _body()
-        _, key, store = self._scope_from_body(body)
+        scope, key, store = self._scope_from_body(body)
         name = self._file_name(body.get("file"))
         report = await store.forget(name, actor=history.ACTOR_WEBUI)
         if not report.ok:
             raise ApiError(report.message)
-        self._changed(key)
+        self._changed(scope, key)
         return _ok({"file": name}, report.message)
 
     async def forgotten_restore(self) -> dict:
         body = await _body()
-        _, key, store = self._scope_from_body(body)
+        scope, key, store = self._scope_from_body(body)
         name = self._file_name(body.get("file"))
         report = await store.restore(name, actor=history.ACTOR_WEBUI)
         if not report.ok:
             raise ApiError(report.message)
-        self._changed(key)
+        self._changed(scope, key)
         return _ok({"file": name}, report.message)
 
     async def forgotten_delete(self) -> dict:
@@ -847,7 +803,7 @@ class MemoryDashboard:
     async def history_restore(self) -> dict:
         """恢复某一版历史：当前在册文件会先存进历史再覆盖。"""
         body = await _body()
-        _, key, store = self._scope_from_body(body)
+        scope, key, store = self._scope_from_body(body)
         name = self._file_name(body.get("file"))
         version = _text(body.get("version")).strip()
         if not version:
@@ -857,7 +813,7 @@ class MemoryDashboard:
         )
         if not report.ok:
             raise ApiError(report.message)
-        self._changed(key)
+        self._changed(scope, key)
         return _ok({"file": name, "version": version}, report.message)
 
     async def trash_entries(self) -> dict:
@@ -890,14 +846,14 @@ class MemoryDashboard:
     async def trash_restore(self) -> dict:
         """从回收站恢复一条：同名在册文件先存进历史再覆盖。"""
         body = await _body()
-        _, key, store = self._scope_from_body(body)
+        scope, key, store = self._scope_from_body(body)
         entry_name = _text(body.get("entry")).strip()
         if not entry_name:
             raise ApiError("缺少回收站条目")
         report = await store.restore_trash(entry_name, actor=history.ACTOR_WEBUI)
         if not report.ok:
             raise ApiError(report.message)
-        self._changed(key)
+        self._changed(scope, key)
         return _ok({"entry": entry_name}, report.message)
 
     async def trash_delete(self) -> dict:
@@ -912,134 +868,81 @@ class MemoryDashboard:
             raise ApiError(report.message)
         return _ok({"entry": entry_name}, report.message)
 
-    def _pending_keys_for_file(
-        self, scope: str, key: str | None
-    ) -> list[str]:
-        """哪些会话的待整理旧对话可能把刚彻底删除的文件写回来。
-
-        session 只涉及本会话；people 是同一人物目录下的所有会话（共享空间
-        的目录名是 _shared，和会话键无关）；global 对所有会话可见，有
-        待整理记录的会话都可能写回。
-        """
-        book = getattr(self.plugin, "_pending", None)
-        if book is None:
-            return []
-        if scope == SCOPE_SESSION:
-            return [key] if key else []
-        result = []
-        for pending_key, state in book.items():
-            if not state.records:
-                continue
-            if scope == SCOPE_GLOBAL:
-                result.append(pending_key)
-                continue
-            platform = state.platform or registry.parse_umo(state.umo)[0]
-            if self.plugin._store.people_key(platform) == key:
-                result.append(pending_key)
-        return result
-
-    async def _stop_pending_keys(self, keys: list[str]) -> None:
-        for pending_key in keys:
-            await self.plugin.stop_pending_write_key(pending_key)
-
     async def file_purge(self) -> dict:
         """彻底删除在册/已遗忘文件及其全部历史、回收站条目（要求遗忘时用）。"""
         body = await _body()
         scope, key, store = self._scope_from_body(body)
         name = self._file_name(body.get("file"))
         sid = tidy.scope_id(scope, key)
-        # 在途整理先叫停；整理与删除在同一把后台锁下做，删除之后不会再有
-        # 旧上下文把它写回来
-        pending_keys = self._pending_keys_for_file(scope, key)
-        await self._stop_pending_keys(pending_keys)
-        async with self._background_lock():
-            report = await store.delete_file_completely(
-                name, actor=history.ACTOR_WEBUI
-            )
-            if not report.ok:
-                # 正文可能只残留在 tidy/*.runs.json 的 before 里（整理合并后
-                # 回收站又按保留期清掉了）。这时 memstore 报"没有找到"，但
-                # 撤销整理仍能把内容写回；把整理记录清掉后按成功处理。
-                if report.message == f"没有找到 {name}":
-                    removed = await asyncio.to_thread(
-                        self.plugin._tidy.remove_file, sid, name
+        report = await store.delete_file_completely(
+            name, actor=history.ACTOR_WEBUI
+        )
+        if not report.ok:
+            # 正文可能只残留在 tidy/*.runs.json 的 before 里（整理合并后
+            # 回收站又按保留期清掉了）。这时 memstore 报"没有找到"，但
+            # 撤销整理仍能把内容写回；把整理记录清掉后按成功处理。
+            if report.message == f"没有找到 {name}":
+                removed = await asyncio.to_thread(
+                    self.plugin._tidy.remove_file, sid, name
+                )
+                if removed:
+                    self._changed(scope, key)
+                    return _ok(
+                        {"file": name},
+                        f"已清除 {name} 在整理记录里的残留内容",
                     )
-                    if removed:
-                        self._mark_purged(pending_keys, scope, name)
-                        self._changed(key)
-                        return _ok(
-                            {"file": name},
-                            f"已清除 {name} 在整理记录里的残留内容",
-                        )
-                raise ApiError(report.message)
-            # 整理记录与待确认方案里也留着改动前原文；彻底删除要一并清掉，
-            # 否则撤销整理会把刚删掉的正文写回来
-            await asyncio.to_thread(self.plugin._tidy.remove_file, sid, name)
-            # 待整理对话里也可能还有同一条事实：给这些旧对话记下屏蔽，下一
-            # 次整理跳过对这个文件的操作，既不写回，也不丢掉其他无关对话。
-            # 屏蔽和删除在同一把锁内完成，中间没有后台整理插进来的窗口。
-            self._mark_purged(pending_keys, scope, name)
-        self._changed(key)
+            raise ApiError(report.message)
+        # 整理记录里也留着改动前原文；彻底删除要一并清掉，否则撤销整理
+        # 会把刚删掉的正文写回来
+        await asyncio.to_thread(self.plugin._tidy.remove_file, sid, name)
+        self._changed(scope, key)
         return _ok({"file": name}, report.message)
-
-    def _mark_purged(
-        self, pending_keys: list[str], scope: str, name: str
-    ) -> None:
-        now = time.time()
-        for pending_key in pending_keys:
-            self.plugin._pending.mark_purged(pending_key, scope, name, now)
 
     async def index_save(self) -> dict:
         body = await _body()
-        _, key, store = self._scope_from_body(body)
+        scope, key, store = self._scope_from_body(body)
         report = await store.write_index(_text(body.get("content")))
         if not report.ok:
             raise ApiError(report.message)
-        self._changed(key)
+        self._changed(scope, key)
         return _ok({}, report.message)
 
     async def index_rebuild(self) -> dict:
         body = await _body()
-        _, key, store = self._scope_from_body(body)
+        scope, key, store = self._scope_from_body(body)
         count = await store.rebuild_index()
-        self._changed(key)
+        self._changed(scope, key)
         return _ok({"count": count}, f"索引已按 {count} 个记忆文件重建")
 
     # ------------------------------------------------------------ 会话管理
 
-    async def session_remark(self) -> dict:
+    async def whisper_remark(self) -> dict:
         body = await _body()
-        key = self._session_key(body.get("key"))
+        key = self._scope_key(body.get("key"), SCOPE_WHISPER)
         remark = _text(body.get("remark")).strip()[:MAX_REMARK]
         record = await asyncio.to_thread(self.plugin._registry.set_remark, key, remark)
         return _ok(_record_dict(key, record), "备注已保存")
 
-    async def session_purge(self) -> dict:
-        """清除会话数据。
+    async def whisper_purge(self) -> dict:
+        """清除一段对话的悄悄话。
 
-        target=memories（默认）：只删该会话的记忆目录；
+        target=memories（默认）：只删这个会话的悄悄话目录；
         target=all：连同上下文统计、登记记录一并删除。
         """
         body = await _body()
-        key = self._session_key(body.get("key"))
+        key = self._scope_key(body.get("key"), SCOPE_WHISPER)
         plugin = self.plugin
-        # 正在跑的整理先停掉，避免它在清除之后又写回记忆
-        await plugin.stop_pending_write(key)
-        store = plugin._store.session_scope_by_key(key)
-        # 定期自动整理也在同一把后台锁下运行；等它退出后再删，删除之后
-        # 队列里迟到的整理看到的是空作用域，不会重新建出文件
-        async with self._background_lock():
-            removed = (
-                await store.purge(actor=history.ACTOR_WEBUI)
-                if store is not None
-                else 0
-            )
-            plugin.invalidate_for_key(key)
-            # 记忆都没了，待确认的方案、整理记录与待整理对话也跟着作废
-            await asyncio.to_thread(
-                plugin._tidy.remove, tidy.scope_id(SCOPE_SESSION, key)
-            )
-            plugin._pending.clear(key)
+        store = plugin._store.whisper_scope_by_key(key)
+        removed = (
+            await store.purge(actor=history.ACTOR_WEBUI)
+            if store is not None
+            else 0
+        )
+        plugin.invalidate_scope(SCOPE_WHISPER, key)
+        # 记忆都没了，整理记录也跟着作废
+        await asyncio.to_thread(
+            plugin._tidy.remove, tidy.scope_id(SCOPE_WHISPER, key)
+        )
         if _text(body.get("target")).strip().lower() != "all":
             return _ok({"removed": removed}, f"已删除 {removed} 个记忆文件")
 
@@ -1056,7 +959,7 @@ class MemoryDashboard:
         await asyncio.to_thread(wipe)
         return _ok(
             {"removed": removed},
-            "已删除该会话的记忆与上下文统计；会话再次发言时会重新登记",
+            "已删除这段对话的悄悄话与上下文统计；会话再次发言时会重新登记",
         )
 
     # ------------------------------------------------------------ 记忆整理
@@ -1084,15 +987,10 @@ class MemoryDashboard:
         )
 
     async def consolidate_apply(self) -> dict:
-        """应用整理方案（管理页手动整理，或确认定期整理留下的方案）。
-
-        fromPending=true 表示这是定期整理待确认的方案：应用后方案清掉。
-        每次应用都记一份可撤销的记录，也算一次整理，定期整理重新计时。
-        """
+        """应用整理方案（管理页手动整理，使用默认对话模型）。"""
         body = await _body()
         scope, key, store = self._scope_from_body(body)
         raw_ops = body.get("operations")
-        from_pending = bool(body.get("fromPending"))
         existing = set(await asyncio.to_thread(store.list_files))
         ops = consolidate.operations_from_payload(raw_ops, existing)
         requested = consolidate.requested_files(raw_ops)
@@ -1111,15 +1009,10 @@ class MemoryDashboard:
             results = await tidy.apply(
                 store,
                 ops,
-                people=scope == SCOPE_PEOPLE,
                 actor=history.ACTOR_TIDY,
             )
             now = time.time()
-            run = tidy.make_run(
-                tidy.TRIGGER_CONFIRMED if from_pending else tidy.TRIGGER_MANUAL,
-                results,
-                now,
-            )
+            run = tidy.make_run(tidy.TRIGGER_MANUAL, results, now)
             done = sum(1 for item in results if item["ok"])
 
             def record() -> None:
@@ -1131,77 +1024,18 @@ class MemoryDashboard:
                     meta.failures = 0
                     meta.outcome = tidy.OUTCOME_APPLIED
                     meta.message = f"应用了 {done} 项修改"
-                    if from_pending:
-                        meta.pending = None
 
                 book.update_meta(sid, change)
 
             await asyncio.to_thread(record)
         finally:
             book.release(sid)
-        self._changed(key)
+        self._changed(scope, key)
         results = skipped + tidy.public_results(results)
         return _ok(
             {"results": results, "runId": run["id"] if run else ""},
             f"已应用 {done} / {len(results)} 项操作",
         )
-
-    # ------------------------------------------------------------ 定期整理
-
-    async def autotidy_status(self) -> dict:
-        """定期整理的设置，以及每处最近一次整理的结论与待确认的方案。"""
-        book = self.plugin._tidy
-        settings, metas = await asyncio.to_thread(
-            lambda: (book.settings(), book.all_meta())
-        )
-        scopes = []
-        for sid, meta in metas.items():
-            scope, _, key = sid.partition("-")
-            if scope not in (SCOPE_GLOBAL, SCOPE_SESSION, SCOPE_PEOPLE):
-                continue
-            if scope != SCOPE_GLOBAL and not memstore.is_scope_key(key):
-                continue
-            ref = transfer.ScopeRef(scope, key if scope != SCOPE_GLOBAL else "")
-            item = self.transfer.describe(ref)
-            item.update(self._tidy_info(meta))
-            scopes.append(item)
-        scopes.sort(key=lambda item: -max(item["lastRun"], item["lastAttempt"]))
-        data = self._autotidy_settings(settings)
-        data["scopes"] = scopes
-        data["pendingTotal"] = sum(1 for item in scopes if item["pendingCount"])
-        return _ok(data)
-
-    async def autotidy_config(self) -> dict:
-        """改定期整理的方式与间隔（写回插件配置），并记下已经问过。"""
-        body = await _body()
-        mode = _text(body.get("mode")).strip().lower()
-        if mode not in tidy.MODES:
-            raise ApiError("定期整理的方式只能是 off、confirm 或 auto")
-        hours = body.get("hours")
-        hours = tidy.clamp_hours(hours) if hours is not None else None
-        await self.plugin.save_tidy_settings(mode, hours)
-        await asyncio.to_thread(self.plugin._tidy.mark_asked)
-        labels = {
-            tidy.MODE_OFF: "已关闭定期整理",
-            tidy.MODE_CONFIRM: "已开启定期整理：有方案时先问你",
-            tidy.MODE_AUTO: "已开启定期整理：有方案时直接应用",
-        }
-        data = self._autotidy_settings({"asked": True})
-        return _ok(data, labels[mode])
-
-    async def autotidy_dismiss(self) -> dict:
-        body = await _body()
-        scope, key, _ = self._scope_from_body(body)
-
-        def change(meta: tidy.TidyMeta) -> None:
-            meta.pending = None
-            meta.outcome = ""
-            meta.message = "待确认的方案已放弃"
-
-        await asyncio.to_thread(
-            self.plugin._tidy.update_meta, tidy.scope_id(scope, key), change
-        )
-        return _ok({}, "已放弃这份方案；下次定期整理时会重新复盘")
 
     async def tidy_runs(self) -> dict:
         scope, key, _ = self._scope_from_query()
@@ -1212,7 +1046,6 @@ class MemoryDashboard:
             {
                 "runs": [tidy.public_run(run) for run in runs],
                 "tidy": self._tidy_info(meta),
-                "mode": self.plugin.tidy_mode(),
             }
         )
 
@@ -1235,7 +1068,7 @@ class MemoryDashboard:
             await asyncio.to_thread(book.mark_undone, sid, run_id, time.time())
         finally:
             book.release(sid)
-        self._changed(key)
+        self._changed(scope, key)
         done = sum(1 for item in results if item["ok"])
         return _ok({"results": results}, f"已撤销 {done} / {len(results)} 项")
 
@@ -1247,44 +1080,15 @@ class MemoryDashboard:
         return transfer.make_ref(raw.get("scope"), raw.get("key"))
 
     def _changed_ref(self, ref: transfer.ScopeRef) -> None:
-        if ref.scope == SCOPE_SESSION:
-            self._changed(ref.key)
-        elif ref.scope == SCOPE_GLOBAL:
-            self._changed(None)
-        elif ref.scope == SCOPE_PEOPLE:
-            # 人物档案可能钉在私聊开头块里；people 目录名不对应任何会话
-            # 运行时，invalidate_for_key 会按 people/ 前缀作废所有相关快照。
-            self._changed(ref.key)
-
-    async def _drop_tidy_pending(self, ref: transfer.ScopeRef) -> None:
-        """记忆被搬动/覆盖后，那里待确认的整理方案就对不上了。"""
-
-        def change(meta: tidy.TidyMeta) -> None:
-            meta.pending = None
-
-        sid = tidy.scope_id(ref.scope, ref.key or None)
-        meta = await asyncio.to_thread(self.plugin._tidy.meta, sid)
-        if meta.pending:
-            await asyncio.to_thread(self.plugin._tidy.update_meta, sid, change)
-
-    async def _stop_pending(self, ref: transfer.ScopeRef) -> None:
-        """搬动/导入前先停掉在途整理，避免它在结果之后又落一遍盘。"""
-        if ref.scope == SCOPE_SESSION and ref.key:
-            await self.plugin.stop_pending_write_key(ref.key)
-
-    async def _clear_pending(self, ref: transfer.ScopeRef) -> None:
-        """会话被搬走：旧会话的待整理对话不能再写回旧作用域。"""
-        if ref.scope == SCOPE_SESSION and ref.key:
-            await self.plugin.stop_pending_write_key(ref.key)
-            self.plugin._pending.clear(ref.key)
+        self._changed(ref.scope, ref.key or None)
 
     async def migrate_info(self) -> dict:
-        """迁移时可选的平台 ID：已有会话与人物记忆用到的，加上当前启用的机器人。"""
+        """迁移时可选的平台 ID：已有小本本、悄悄话与当前启用的机器人。"""
         records = self.plugin._registry.all()
         counts: dict[str, int] = {}
 
         def collect() -> list[str]:
-            for key in sorted(set(self.plugin._store.session_keys()) | set(records)):
+            for key in sorted(set(self.plugin._store.whisper_keys()) | set(records)):
                 record = records.get(key)
                 platform = (
                     record.platform if record is not None and record.platform
@@ -1292,23 +1096,18 @@ class MemoryDashboard:
                 )
                 if platform:
                     counts[platform] = counts.get(platform, 0) + 1
-            # 共享人物空间不是平台，不能出现在平台改名迁移的下拉框里
-            return [
-                p
-                for p in self.plugin._store.people_keys()
-                if p != sharing.SHARED_KEY
-            ]
+            return list(self.plugin._store.notebook_keys())
 
-        people = await asyncio.to_thread(collect)
+        notebooks = await asyncio.to_thread(collect)
         return _ok(
             {
                 "platforms": [
-                    {"platform": p, "sessions": n, "people": p in people}
+                    {"platform": p, "sessions": n, "notebook": p in notebooks}
                     for p, n in sorted(counts.items())
                 ]
                 + [
-                    {"platform": p, "sessions": 0, "people": True}
-                    for p in people
+                    {"platform": p, "sessions": 0, "notebook": True}
+                    for p in notebooks
                     if p not in counts
                 ],
                 "adapters": self.plugin.platform_ids(),
@@ -1372,13 +1171,7 @@ class MemoryDashboard:
         for item, report in zip(summary, reports):
             item["counts"] = report["counts"]
             item["issues"] = report["issues"]
-        warnings = []
-        if any(
-            item.ref.scope == SCOPE_PEOPLE and item.ref.key == sharing.SHARED_KEY
-            for item in scopes
-        ):
-            warnings.append(SHARED_PEOPLE_WARNING)
-        return _ok({"token": token, "scopes": summary, "warnings": warnings})
+        return _ok({"token": token, "scopes": summary, "warnings": []})
 
     async def import_apply(self) -> dict:
         body = await _body()
@@ -1392,25 +1185,13 @@ class MemoryDashboard:
             scopes = [item for item in scopes if item.ref.id in ids]
         if not scopes:
             raise ApiError("没有选中要导入的地方")
-        # 先停掉目标会话的在途整理，再写记忆：导入结果不会被一段更早开始
-        # 的整理覆盖。导入不碰目标自己的待整理对话（那是另一段内容）。
-        for item in scopes:
-            await self._stop_pending(item.ref)
-        async with self._background_lock():
-            reports = await self.transfer.import_bundle(scopes, policy)
+        reports = await self.transfer.import_bundle(scopes, policy)
         for item in scopes:
             self._changed_ref(item.ref)
-            await self._drop_tidy_pending(item.ref)
         written = sum(
             r["counts"]["added"] + r["counts"]["replaced"] for r in reports
         )
         message = f"导入完成：{len(reports)} 处，写入 {written} 条记忆"
-        if any(
-            item.ref.scope == SCOPE_PEOPLE
-            and item.ref.key == sharing.SHARED_KEY
-            for item in scopes
-        ):
-            message += "\n" + SHARED_PEOPLE_WARNING
         return _ok({"reports": reports}, message)
 
     async def migrate_scope(self) -> dict:
@@ -1420,18 +1201,14 @@ class MemoryDashboard:
         target = body.get("to") if isinstance(body.get("to"), dict) else {}
         dst_umo = _text(target.get("umo")).strip()
         if dst_umo:
-            if target.get("scope") not in (None, "", SCOPE_SESSION):
-                raise ApiError("会话标识只能用于会话")
+            if target.get("scope") not in (None, "", SCOPE_WHISPER):
+                raise ApiError("会话标识只能用于悄悄话")
             if dst_umo.count(":") < 2:
                 raise ApiError("会话标识的格式是 平台ID:消息类型:会话ID")
-            dst = transfer.ScopeRef(SCOPE_SESSION, memstore.safe_key(dst_umo))
-        elif target.get("scope") == SCOPE_PEOPLE and target.get("platform"):
-            # 还没有人物记忆的平台：按平台 ID 算出目录名；共享成员统一进
-            # _shared，和 MemoryStore.people_scope() 使用同一个映射入口
+            dst = transfer.ScopeRef(SCOPE_WHISPER, memstore.safe_key(dst_umo))
+        elif target.get("scope") == SCOPE_NOTEBOOK and target.get("platform"):
             platform = transfer.check_platform(target.get("platform"))
-            dst = transfer.ScopeRef(
-                SCOPE_PEOPLE, self.plugin._store.people_key(platform)
-            )
+            dst = transfer.ScopeRef(SCOPE_NOTEBOOK, memstore.safe_key(platform))
         else:
             dst = self._ref(target)
         raw_files = body.get("files")
@@ -1442,95 +1219,53 @@ class MemoryDashboard:
         )
         dry_run = bool(body.get("dryRun"))
         mode = _text(body.get("mode") or transfer.MODE_COPY).strip().lower()
-        if not dry_run:
-            # 目标会话的在途整理先停掉，免得它在搬动结果之后又写一遍；
-            # 目标自己的待整理对话保留，copy 模式尤其不能连带丢掉
-            await self._stop_pending(dst)
-        # 与后台整理/定期整理互斥，搬动结果不会被迟到的整理覆盖
-        async with (self._background_lock() if not dry_run else _null_async()):
-            report = await self.transfer.transfer(
-                src,
-                dst,
-                dst_umo=dst_umo,
-                files=files,
-                include_forgotten=bool(body.get("includeForgotten", True)),
-                mode=mode,
-                policy=transfer.check_policy(body.get("policy")),
-                dry_run=dry_run,
-            )
-        if dst.scope == SCOPE_PEOPLE and dst.key == sharing.SHARED_KEY:
-            report.setdefault("warnings", []).append(SHARED_PEOPLE_WARNING)
+        report = await self.transfer.transfer(
+            src,
+            dst,
+            dst_umo=dst_umo,
+            files=files,
+            include_forgotten=bool(body.get("includeForgotten", True)),
+            mode=mode,
+            policy=transfer.check_policy(body.get("policy")),
+            dry_run=dry_run,
+        )
         if dry_run:
             return _ok(report)
         self._changed_ref(dst)
-        await self._drop_tidy_pending(dst)
         if report.get("moved"):
-            # 搬走的会话不再存在于原处，旧的待整理对话没有可写回的作用域
+            # 搬走之后原处不再存在于原位置
             self._changed_ref(src)
-            await self._clear_pending(src)
-            await self._drop_tidy_pending(src)
         counts = report["counts"]
         message = f"已写入 {counts['added'] + counts['replaced']} 条"
         if report.get("moved"):
             message += f"，已从原处移走 {report['moved']} 条"
-        if report.get("warnings"):
-            message += "\n" + "\n".join(report["warnings"])
         return _ok(report, message)
 
-    def _platform_pending_keys(self, platform: str) -> list[str]:
-        """待整理记录的 umo/platform 属于某个平台 ID 的会话键。"""
-        keys = []
-        for key, state in self.plugin._pending.items():
-            owner = state.platform or registry.parse_umo(state.umo)[0]
-            if owner == platform:
-                keys.append(key)
-        return keys
-
     async def migrate_platform(self) -> dict:
-        """平台 ID 变了之后，把旧 ID 下所有会话的记忆搬到新 ID 下。"""
+        """平台 ID 变了之后，把旧 ID 下的小本本与悄悄话搬到新 ID 下。"""
         body = await _body()
         dry_run = bool(body.get("dryRun"))
         mode = _text(body.get("mode") or transfer.MODE_MOVE).strip().lower()
-        include_people = bool(body.get("includePeople", True))
+        include_notebook = bool(body.get("includeNotebook", True))
         src_platform = _text(body.get("from"))
         dst_platform = _text(body.get("to"))
-        if not dry_run:
-            # 旧平台的在途整理先停掉；改名后它们不能再用旧 UMO 落盘
-            await self._stop_pending_keys(
-                self._platform_pending_keys(src_platform)
-            )
-        # 与后台整理/定期整理互斥，改名结果不会被迟到的整理覆盖
-        async with (self._background_lock() if not dry_run else _null_async()):
-            result = await self.transfer.remap_platform(
-                src_platform,
-                dst_platform,
-                mode=mode,
-                policy=transfer.check_policy(body.get("policy")),
-                include_people=include_people,
-                dry_run=dry_run,
-            )
-        if (
-            include_people
-            and self.plugin._store.people_key(dst_platform) == sharing.SHARED_KEY
-        ):
-            result.setdefault("warnings", []).append(SHARED_PEOPLE_WARNING)
+        result = await self.transfer.remap_platform(
+            src_platform,
+            dst_platform,
+            mode=mode,
+            policy=transfer.check_policy(body.get("policy")),
+            include_notebook=include_notebook,
+            dry_run=dry_run,
+        )
         if dry_run:
             return _ok(result)
-        # 只有待整理记录、没有记忆文件的会话不在 result["items"] 里，
-        # 必须单独把它们的旧 UMO 换到新平台，否则会照旧写进旧平台目录
-        self.plugin._pending.remap_platform(
-            src_platform, dst_platform, move=mode == transfer.MODE_MOVE
-        )
         for item in result["items"]:
             for side in ("from", "to"):
                 ref = transfer.ScopeRef(item[side]["scope"], item[side]["key"])
                 self._changed_ref(ref)
-                await self._drop_tidy_pending(ref)
         totals = result["totals"]
         message = (
             f"迁移完成：{len(result['items'])} 处，写入 "
             f"{totals['added'] + totals['replaced']} 条记忆"
         )
-        if result.get("warnings"):
-            message += "\n" + "\n".join(result["warnings"])
         return _ok(result, message)

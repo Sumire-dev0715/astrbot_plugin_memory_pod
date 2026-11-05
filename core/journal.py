@@ -88,7 +88,7 @@ def _updated_date(updated: float) -> str:
 def entry_span(name: str, text: str, updated: float) -> tuple[str, str]:
     """一篇日志的日期范围：最早的日期小标题（没有就用文件名日期）到最近更新。
 
-    后台整理续写日志时每天会加 `## YYYY-MM-DD`，一篇日志可能跨好几天；
+    写日记时每天会加 `## YYYY-MM-DD`，一篇日志可能跨好几天；
     索引里的日期范围要能看出它从哪天记到哪天。没有小标题时退回文件名
     日期与最近修改时间。
     """

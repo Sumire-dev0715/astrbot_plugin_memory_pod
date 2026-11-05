@@ -42,7 +42,7 @@ class AstrBotConfig(dict):
 class Filter:
     """@filter 装饰器替身。
 
-    llm_tool 记录工具名，harness 据此取出插件注册的三个工具；其余钩子
+    llm_tool 记录工具名，调用方据此取出插件注册的记忆工具；其余钩子
     装饰器原样返回函数，由 harness 按真实顺序显式调用。
     """
 

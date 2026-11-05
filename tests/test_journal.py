@@ -454,17 +454,17 @@ def test_truncate_index_keeps_journal_block_when_it_fits():
 # ---------------------------------------------------------------- 记忆规范
 
 
-def test_chat_guidance_leaves_journal_rules_to_background():
-    """聊天侧只读，不再写 journal 的写入规则；规则在后台提示词里。"""
+def test_chat_guidance_leaves_journal_rules_to_write_layer():
+    """聊天规范不写日记文件名；写到哪一篇由 ScopeStore 决定。"""
     text = prompts.memory_guidance()
     assert "journal-<日期>.md" not in text
     assert "写入查重" not in text
 
 
-def test_background_and_consolidate_prompts_know_journal():
-    from core import writer
+def test_consolidate_prompt_and_store_know_journal():
+    from core import memstore
 
-    assert writer.JOURNAL_MAX_CHARS == 3000
+    assert memstore.JOURNAL_MAX_CHARS == 3000
     assert "journal" in consolidate.CONSOLIDATE_PROMPT
     assert "不要删除日志文件" in consolidate.CONSOLIDATE_PROMPT
     assert "journal-<日期>.md" in consolidate.CONSOLIDATE_PROMPT
@@ -478,7 +478,7 @@ def test_management_page_offers_journal_type():
         'const TYPES = ["user", "feedback", "project", "reference", "journal"];'
         in app_js
     )
-    assert 'type_journal: "日志"' in app_js
+    assert 'type_journal: "日记"' in app_js
     assert "typeHint_journal:" in app_js
 
 

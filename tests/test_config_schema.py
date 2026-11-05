@@ -1,4 +1,4 @@
-"""3.8 配置项：只保留本轮仍在用的键，上下文管理相关配置不再出现。"""
+"""3.8 配置项：只保留仍在用的键，旧作用域与后台整理配置不再出现。"""
 
 import json
 from pathlib import Path
@@ -10,11 +10,17 @@ def load(name):
     return json.loads((ROOT / name).read_text("utf-8"))
 
 
-def test_recall_full_files_default_two():
-    entry = load("_conf_schema.json")["recall_full_files"]
-    assert entry["type"] == "int"
-    assert entry["default"] == 2
-    assert entry["description"] and entry["hint"]
+def test_schema_has_exactly_the_remaining_configs():
+    expected = {
+        "enable_memory",
+        "recall_max_files",
+        "recall_full_files",
+        "history_keep_days",
+        "trash_keep_days",
+        "enable_forgetting",
+        "forget_after_days",
+    }
+    assert set(load("_conf_schema.json")) == expected
 
 
 def test_new_configs_have_english_translations():
@@ -25,37 +31,33 @@ def test_new_configs_have_english_translations():
         assert config[key]["hint"]
 
 
-def test_schema_has_exactly_the_remaining_configs():
-    """3.8.1 / 3.8.7 删掉的配置不能以任何形式留下；用完整键集守住。"""
-    expected = {
-        "enable_memory",
-        "enable_global_memory",
-        "recall_max_files",
-        "recall_full_files",
-        "memory_provider_id",
-        "auto_consolidate",
-        "auto_consolidate_hours",
-        "auto_extract_interval",
-        "extract_idle_minutes",
-        "shared_people_bots",
-        "history_keep_days",
-        "trash_keep_days",
-        "enable_forgetting",
-        "forget_after_days",
-    }
-    assert set(load("_conf_schema.json")) == expected
-
-
 def test_recall_hint_has_no_model_selection():
-    """召回只按关键词；配置说明不再提模型挑选，填 0 即关闭。"""
     hint = load("_conf_schema.json")["recall_max_files"]["hint"]
     assert "模型" not in hint
     assert "填 0" in hint
 
 
-def test_metadata_help_no_longer_asks_to_change_astrbot():
-    """插件说明不再要求用户调整 AstrBot 的内置设置，也不再有压缩指令。"""
+def test_enable_memory_hint_names_three_layers_and_five_tools():
+    hint = load("_conf_schema.json")["enable_memory"]["hint"]
+    for name in ("memory_read", "memory_search", "memory_write", "memory_edit", "memory_delete"):
+        assert name in hint
+    for layer in ("留言板", "小本本", "悄悄话"):
+        assert layer in hint
+
+
+def test_metadata_version_and_no_removed_features():
     text = (ROOT / "metadata.yaml").read_text("utf-8")
-    assert "按 README 调整 AstrBot" not in text
-    assert "上下文压缩" not in text
-    assert "/mb_reset" not in text and "/mb_probe" not in text
+    assert "version: v2.0.0-dev.2" in text
+    assert "共享人物空间" not in text
+    assert "memory_note" not in text
+    assert "后台整理写入" not in text
+    assert "三层记忆" in text
+
+
+def test_i18n_page_translations_have_no_removed_scopes():
+    for name in ("zh-CN.json", "en-US.json"):
+        pages = load(".astrbot-plugin/i18n/" + name)["pages"]["memory"]
+        for key in ("globalTitle", "peopleTitle", "peopleSharedTitle", "tidyAskTitle"):
+            assert key not in pages
+        for key in ("boardTitle", "notebookTitle", "whisperTitle", "publishTitle"):
+            assert key in pages

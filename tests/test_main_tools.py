@@ -1,0 +1,127 @@
+"""聊天侧工具：三层作用域解析、检索与已遗忘恢复规则。"""
+
+from __future__ import annotations
+
+import os
+import time
+import types
+
+from support import (
+    FakeEvent,
+    main,
+    make_plugin,
+    pkg_memstore,
+    person_file,
+    run,
+    thing,
+)
+
+
+def test_only_read_tools_registered_this_round():
+    names = {
+        getattr(value, "__astrbot_llm_tool__", None)
+        for value in vars(main.MemoryPodPlugin).values()
+    }
+    assert {name for name in names if name} == {"memory_read", "memory_search"}
+
+
+def test_board_readable_by_every_conversation(tmp_path):
+    plugin = make_plugin(tmp_path)
+    run(
+        plugin._store.board_scope().write(
+            "notice.md", thing("notice", body="所有会话都能看到", signature="管理员")
+        )
+    )
+    for event in (
+        FakeEvent("Bot-A", "1", "Bot-A:FriendMessage:1"),
+        FakeEvent("Bot-B", "2", "Bot-B:GroupMessage:9"),
+    ):
+        result = run(plugin.memory_read(event, "board", "notice.md"))
+        assert "所有会话都能看到" in result
+
+
+def test_notebook_is_per_bot(tmp_path):
+    plugin = make_plugin(tmp_path)
+    run(plugin._store.notebook_scope("Bot-A").write("note.md", thing("note", body="A 的小本本")))
+    result = run(plugin.memory_read(FakeEvent("Bot-A", "1"), "notebook", "note.md"))
+    assert "A 的小本本" in result
+    result = run(plugin.memory_read(FakeEvent("Bot-B", "1"), "notebook", "note.md"))
+    assert "A 的小本本" not in result and "不存在" in result
+
+
+def test_search_all_covers_board_notebook_and_current_whisper(tmp_path):
+    plugin = make_plugin(tmp_path)
+    event = FakeEvent("Bot-A", "1")
+    run(plugin._store.board_scope().write("b.md", thing("b", body="公告内容甲")))
+    run(plugin._store.notebook_scope("Bot-A").write("n.md", thing("n", body="小本本内容乙")))
+    run(
+        plugin._store.whisper_scope(pkg_memstore.safe_key(event.unified_msg_origin)).write(
+            "w.md", thing("w", body="悄悄话内容丙")
+        )
+    )
+    result = run(plugin.memory_search(event, "内容", "all", "all"))
+    assert "b.md" in result and "n.md" in result and "w.md" in result
+    result = run(plugin.memory_search(event, "内容", "board", "all"))
+    assert "b.md" in result and "n.md" not in result
+
+
+def test_forgotten_person_profile_not_restored_by_other_user(tmp_path):
+    plugin = make_plugin(tmp_path, enable_forgetting=True, forget_after_days=1)
+    notebook = plugin._store.notebook_scope("Bot-A")
+    notebook.root.mkdir(parents=True, exist_ok=True)
+    path = notebook.root / "user-456.md"
+    path.write_text(person_file("456", "别人的档案"), "utf-8")
+    old = time.time() - 10 * 86400
+    os.utime(path, (old, old))
+    run(notebook.forget_stale(86400.0))
+
+    stranger = FakeEvent("Bot-A", "123")
+    result = run(plugin.memory_read(stranger, "notebook", "user-456.md"))
+    assert "别人的档案" in result
+    assert notebook.has_forgotten("user-456.md")  # 没有替别人恢复
+
+    owner = FakeEvent("Bot-A", "456")
+    result = run(plugin.memory_read(owner, "notebook", "user-456.md"))
+    assert "别人的档案" in result
+    assert not notebook.has_forgotten("user-456.md")
+
+
+def test_forgotten_board_notice_only_restored_by_admin(tmp_path):
+    plugin = make_plugin(tmp_path, enable_forgetting=True)
+    board = plugin._store.board_scope()
+    board.root.mkdir(parents=True, exist_ok=True)
+    path = board.root / "notice.md"
+    path.write_text(thing("notice", body="旧告示"), "utf-8")
+    old = time.time() - 10 * 86400
+    os.utime(path, (old, old))
+    run(board.forget_stale(86400.0))
+
+    result = run(plugin.memory_read(FakeEvent("Bot-A", "123"), "board", "notice.md"))
+    assert "旧告示" in result
+    assert board.has_forgotten("notice.md")
+
+    result = run(
+        plugin.memory_read(FakeEvent("Bot-A", "123", admin=True), "board", "notice.md")
+    )
+    assert "旧告示" in result
+    assert not board.has_forgotten("notice.md")
+
+
+def test_manual_consolidation_uses_default_chat_provider(tmp_path):
+    plugin = make_plugin(tmp_path)
+    calls = []
+
+    class Provider:
+        async def text_chat(self, prompt):
+            calls.append(prompt)
+            return types.SimpleNamespace(completion_text="[]")
+
+    async def get_using_provider(umo=None):
+        calls.append(umo)
+        return Provider()
+
+    plugin.context.get_using_provider = get_using_provider
+    text, log = run(plugin.call_consolidator("整理"))
+    assert text == "[]"
+    assert calls == [None, "整理"]
+    assert log and "成功" in log[0]

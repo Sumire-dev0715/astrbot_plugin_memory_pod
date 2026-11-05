@@ -1,14 +1,13 @@
-"""聊天侧提示词体积测量（PLAN 3.7.6）。
+"""聊天侧提示词体积测量（PLAN 3.8.8）。
 
 统计模型每轮实际看到的固定文本：
 
 - 记忆规范；
-- 三个工具说明：工具名、AstrBot 取的 docstring 第一段 description，以及
+- 工具说明：工具名、AstrBot 取的 docstring 第一段 description，以及
   参数 description（模型实际收到的完整 schema）；
-- 索引块外壳与召回块外壳（块首数据声明、标题与标记，不含具体记忆正文）；
-- 后台整理提示词（空索引、空对话时的模板体积）。
+- 开头块外壳与召回块外壳（块首数据声明、标题与标记，不含具体记忆正文）。
 
-`chat_total` = 记忆规范 + 三个工具的完整 schema，验收线 1200 字。
+`chat_total` = 记忆规范 + 工具完整 schema，验收线 2000 字。
 
 用法：
     python scripts/prompt_sizes.py --json
@@ -17,8 +16,8 @@
 from __future__ import annotations
 
 import argparse
-import asyncio
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -27,9 +26,47 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from scripts.eval import astrbot_stub  # noqa: E402
-from scripts.eval.harness import tool_schema  # noqa: E402
 
-CHAT_LIMIT = 1200
+CHAT_LIMIT = 2000
+
+_ARGS_LINE = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(([^)]*)\)\s*:\s*(.*)$")
+_TYPE_MAP = {"string": "string", "int": "integer", "bool": "boolean", "float": "number"}
+
+
+def first_paragraph(doc: str) -> str:
+    """AstrBot 取工具 description 的口径：docstring 第一段。"""
+    parts = [part.strip() for part in (doc or "").strip().split("\n\n") if part.strip()]
+    return parts[0] if parts else ""
+
+
+def tool_schema(func) -> dict:
+    """按 AstrBot register_llm_tool 的口径还原 OpenAI 工具声明。"""
+    doc = (func.__doc__ or "").strip()
+    properties: dict[str, dict] = {}
+    in_args = False
+    for line in doc.splitlines():
+        stripped = line.strip()
+        if stripped == "Args:":
+            in_args = True
+            continue
+        if not in_args:
+            continue
+        match = _ARGS_LINE.match(line)
+        if not match:
+            continue
+        name, type_name, arg_desc = match.groups()
+        properties[name] = {
+            "type": _TYPE_MAP.get(type_name, type_name),
+            "description": arg_desc.strip(),
+        }
+    return {
+        "type": "function",
+        "function": {
+            "name": func.__astrbot_llm_tool__,
+            "description": first_paragraph(doc),
+            "parameters": {"type": "object", "properties": properties},
+        },
+    }
 
 
 def _tool_docs(plugin_cls) -> dict[str, dict]:
@@ -53,9 +90,9 @@ def _tool_docs(plugin_cls) -> dict[str, dict]:
 
 
 def _recall_shell(recall_mod, injection_mod, prompts) -> int:
-    item = recall_mod.Recalled("session/placeholder.md", "", 0.0)
+    item = recall_mod.Recalled("notebook/placeholder.md", "", 0.0)
     view = injection_mod.MemoryView(
-        ref="session/placeholder.md",
+        ref="notebook/placeholder.md",
         mem_type="reference",
         description="",
         source="",
@@ -77,7 +114,7 @@ def _recall_shell(recall_mod, injection_mod, prompts) -> int:
 def collect_sizes() -> dict:
     astrbot_stub.install()
     module, plugin_cls = astrbot_stub.load_plugin(REPO_ROOT)
-    prefixes = ["core.prompts", "core.injection", "core.recall", "core.writer"]
+    prefixes = ["core.prompts", "core.injection", "core.recall"]
     mods = {
         name: sys.modules[f"{astrbot_stub.PLUGIN_PACKAGE}.{name}"]
         for name in prefixes
@@ -85,30 +122,17 @@ def collect_sizes() -> dict:
     prompts = mods["core.prompts"]
     injection = mods["core.injection"]
     recall = mods["core.recall"]
-    writer = mods["core.writer"]
 
     guidance = prompts.memory_guidance()
     tools = _tool_docs(plugin_cls)
     tool_total = sum(item["description"] for item in tools.values())
     tool_schema_total = sum(sum(item.values()) for item in tools.values())
 
-    index_shell = len(injection.build_opening_block(None, "X", [], now=0.0)) - 1
-    index_shell_with_global = (
-        len(injection.build_opening_block("X", "Y", [], now=0.0)) - 2
-    )
+    index_shell = len(
+        injection.build_opening_block("X", "Y", "Z", [], now=0.0)
+    ) - 3
     recall_shell = _recall_shell(recall, injection, prompts)
 
-    context = asyncio.run(
-        writer.build_context(
-            {},
-            [],
-            now=0.0,
-            permission=None,
-            admin=False,
-            people_shared=False,
-            global_on=False,
-        )
-    )
     chat_total = len(guidance) + tool_schema_total
     return {
         "guidance": len(guidance),
@@ -116,10 +140,7 @@ def collect_sizes() -> dict:
         "tool_total": tool_total,
         "tool_schema_total": tool_schema_total,
         "index_shell": index_shell,
-        "index_shell_with_global": index_shell_with_global,
         "recall_shell": recall_shell,
-        "background_prompt": len(context.prompt),
-        "background_rules": len(writer.WRITE_RULES),
         "chat_total": chat_total,
         "within_limit": chat_total <= CHAT_LIMIT,
         "limit": CHAT_LIMIT,
@@ -142,9 +163,8 @@ def main(argv: list[str] | None = None) -> int:
             )
         print(f"工具说明合计（description）：{sizes['tool_total']} 字")
         print(f"工具完整 schema 合计：{sizes['tool_schema_total']} 字")
-        print(f"索引块外壳：{sizes['index_shell']} 字（含全局段 {sizes['index_shell_with_global']} 字）")
+        print(f"开头块外壳：{sizes['index_shell']} 字")
         print(f"召回块外壳：{sizes['recall_shell']} 字")
-        print(f"后台整理提示词：{sizes['background_prompt']} 字")
         print(
             f"聊天侧合计 chat_total：{sizes['chat_total']} 字"
             f"（上限 {sizes['limit']}，{'通过' if sizes['within_limit'] else '超出'}）"

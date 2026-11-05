@@ -1,6 +1,6 @@
 """OpenAI 兼容的评测模型客户端（只用标准库 urllib）。
 
-聊天与后台整理共用同一个客户端与模型。接口限流（429）与 5xx 退避重试；
+聊天与管理页手动整理共用同一个客户端与模型。接口限流（429）与 5xx 退避重试；
 MB_EVAL_BASE_URL 带不带 /v1 都能用。API key 只放在请求头里，任何异常、
 日志与输出里都先把它抹掉。
 """
@@ -145,7 +145,7 @@ class OpenAICompatClient:
             "messages": messages,
             "temperature": 0,
             # 推理模型的思考 token 也计入 max_tokens：原先的 2400/1200 会在
-            # 思考较长时截断正文，后台整理因此拿到残缺 JSON。留足余量。
+            # 思考较长时截断正文，手动整理因此拿到残缺 JSON。留足余量。
             "max_tokens": 8192,
         }
         if tools:
