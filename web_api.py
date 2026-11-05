@@ -392,7 +392,6 @@ class MemoryDashboard:
     def _tidy_info(meta: tidy.TidyMeta) -> dict:
         return {
             "lastRun": meta.last_run,
-            "lastAttempt": meta.last_attempt,
             "outcome": meta.outcome,
             "message": meta.message,
         }
@@ -688,6 +687,9 @@ class MemoryDashboard:
         report = await store.write(name, text, actor=history.ACTOR_WEBUI)
         if not report.ok:
             raise ApiError(report.message)
+        # 刚发布的告示下一轮就会整块注入，先记一次使用，整理时不会显示
+        # "从未被用到"
+        await asyncio.to_thread(store.note_used, [name])
         # 留言板对所有会话可见：作废全部开头块快照
         self._changed(SCOPE_BOARD, None)
         return _ok({"file": name}, report.message)
@@ -1021,7 +1023,6 @@ class MemoryDashboard:
 
                 def change(meta: tidy.TidyMeta) -> None:
                     meta.last_run = now
-                    meta.failures = 0
                     meta.outcome = tidy.OUTCOME_APPLIED
                     meta.message = f"应用了 {done} 项修改"
 

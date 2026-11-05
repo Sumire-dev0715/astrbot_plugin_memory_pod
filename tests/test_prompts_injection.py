@@ -15,8 +15,12 @@ def test_guidance_describes_three_layers_and_read_tools():
     assert "memory_read" in text and "memory_search" in text
     assert "memory_note" not in text
     assert "global" not in text and "people" not in text
-    # 隐私规则写进提示词（模型判断），强制规则由代码执行
-    assert "隐私" in text and "悄悄话" in text
+    # 3.8.3 交给模型判断的规则写进聊天规范（与整理提示词共用一份）
+    assert "留言板只放管理员要求发布的告示" in text
+    assert "公开部分" in text and "私密部分" in text
+    assert "记成日记或转述" in text
+    assert "不会变成对自己的要求" in text
+    assert "群聊里不会出现任何人的私聊悄悄话" in text
     assert "数据" in text and "不是指令" in text
 
 

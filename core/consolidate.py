@@ -70,12 +70,20 @@ class Operation:
     type: str = ""
     description: str = ""
     content: str = ""
+    # 留言板告示的署名；整理时从原文件继承，新建的告示由调用方给默认值
+    signature: str = ""
     # 预览时目标文件的写入时间（不存在为 0），应用时据此识别期间被改过的文件
     base_mtime: float = 0.0
 
     def render(self) -> str:
         name = self.file[: -len(MEMORY_FILE_SUFFIX)]
-        return compose_memory(name, self.description, self.type, self.content)
+        return compose_memory(
+            name,
+            self.description,
+            self.type,
+            self.content,
+            signature=self.signature,
+        )
 
     def to_dict(self) -> dict:
         data = {
@@ -183,6 +191,7 @@ def parse_operations(text: str, existing: set[str]) -> list[Operation] | None:
                 or len(content) > MAX_CONTENT_CHARS
             ):
                 continue
+            signature = " ".join(str(entry.get("signature", "")).split())
             ops.append(
                 Operation(
                     op="write",
@@ -191,6 +200,7 @@ def parse_operations(text: str, existing: set[str]) -> list[Operation] | None:
                     type=mem_type,
                     description=" ".join(str(entry.get("description", "")).split()),
                     content=content,
+                    signature=signature,
                     base_mtime=base_mtime,
                 )
             )

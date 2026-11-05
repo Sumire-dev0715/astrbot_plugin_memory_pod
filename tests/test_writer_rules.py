@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from support import pkg_writer, run, thing
+import json
+
+from support import pkg_memstore, pkg_writer, run, thing
 
 
 def files(notebook=None, whisper=None, board=None):
@@ -198,3 +200,71 @@ def tmp_path_store(tmp_path):
     from support import pkg_memstore
 
     return pkg_memstore.MemoryStore(tmp_path / "memories").notebook_scope("Bot-A")
+
+
+def test_person_file_name_is_case_insensitive():
+    raw = [
+        {
+            "op": "write",
+            "scope": "notebook",
+            "file": "USER-456.md",
+            "type": "user",
+            "description": "阿杰",
+            "content": "工程师",
+        }
+    ]
+    ops, skipped = validate(raw, sender="123", admin=False)
+    assert not ops and "只有本人或管理员" in skipped[0]
+    ops, skipped = validate(raw, sender="456", admin=False)
+    assert skipped == [] and ops[0].file == "USER-456.md"
+
+
+def test_edit_description_updates_frontmatter_and_index(tmp_path):
+    store = tmp_path_store(tmp_path)
+    run(store.write("note.md", thing("note", description="旧摘要", body="正文")))
+    ops, skipped = validate(
+        [{"op": "edit", "scope": "notebook", "file": "note.md",
+          "mode": "append", "new": "追加", "description": "新摘要"}],
+        sender="123",
+        admin=False,
+        notebook=["note.md"],
+    )
+    assert skipped == []
+    result = run(
+        pkg_writer.apply_operations(
+            {"notebook": store}, ops, actor="Bot-A", source="123",
+            now=1_800_000_000.0,
+        )
+    )
+    assert result.ok
+    content = run(store.read("note.md"))
+    assert pkg_memstore.parse_memory(content).description == "新摘要"
+    assert "新摘要" in (store.root / "MEMORY.md").read_text("utf-8")
+
+
+def test_delete_reason_is_recorded_in_audit(tmp_path):
+    store = tmp_path_store(tmp_path)
+    run(store.write("note.md", thing("note", body="正文")))
+    ops, _ = validate(
+        [{"op": "delete", "scope": "notebook", "file": "note.md", "reason": "过期了"}],
+        sender="123",
+        admin=False,
+        notebook=["note.md"],
+    )
+    result = run(
+        pkg_writer.apply_operations(
+            {"notebook": store}, ops, actor="Bot-A", source="123",
+            now=1_800_000_000.0,
+        )
+    )
+    assert result.ok
+    audit = (store.root / ".audit.jsonl").read_text("utf-8").strip().splitlines()
+    assert json.loads(audit[-1])["reason"] == "过期了"
+
+
+def test_delegated_signature_format():
+    assert (
+        pkg_writer.delegated_signature("小明", "鲸群")
+        == "小明（由 鲸群 代发）"
+    )
+    assert pkg_writer.delegated_signature("", "").endswith("（由 机器人 代发）")

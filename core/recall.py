@@ -244,12 +244,6 @@ def plan_sections(
     return sections, dropped
 
 
-def plan_recall(items: list[Recalled]) -> list[RecallSection]:
-    """只要带全文的条目（保持旧接口）；丢弃的条目由调用方决定是否转指针。"""
-    sections, _ = plan_sections(items)
-    return sections
-
-
 def freshness_note(written: float, now: float | None = None) -> str:
     """超过一天的记忆附上时效提醒；今天、昨天写的不打扰。
 
@@ -314,14 +308,6 @@ def render_recall_block(
         f"{body}\n"
         f"{RECALL_BLOCK_CLOSE}"
     )
-
-
-def build_recall_block(
-    items: list[Recalled], data_notice: str, now: float | None = None
-) -> str | None:
-    """拼召回块（无分档）；超过整块预算的条目同样转为指针。"""
-    sections, dropped = plan_sections(items)
-    return render_recall_block(sections, data_notice, now, pointers=dropped)
 
 
 @dataclass

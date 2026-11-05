@@ -716,8 +716,9 @@ class MemoryPodPlugin(Star):
         pin_key = self._pin_profile_key(event)
         if rt.index_loaded and rt.index_pin_key == pin_key:
             if record_usage:
-                # 钉在开头块的档案每轮都真的发给了模型，使用统计也要每轮记
+                # 钉在开头块的档案与留言板每轮都真的发给了模型，使用统计也要记
                 await self._note_pinned_usage(rt, event)
+                await self._note_board_usage()
             return rt.index_block
         umo = str(getattr(event, "unified_msg_origin", "") or "")
         board_text = await self._board_text()
@@ -745,7 +746,19 @@ class MemoryPodPlugin(Star):
         }
         if record_usage:
             await self._note_pinned_usage(rt, event)
+            await self._note_board_usage()
         return rt.index_block
+
+    async def _note_board_usage(self) -> None:
+        """留言板每轮都整块发给模型（全文或标题），算作被用到。
+
+        不记的话，开启遗忘后告示会按 updated 被移出开头块，整理时也会被
+        当成"从未被用到"。
+        """
+        store = self._board_scope()
+        names = await asyncio.to_thread(store.list_files)
+        if names:
+            await asyncio.to_thread(store.note_used, names)
 
     async def _board_text(self) -> str:
         """留言板开头段：全部告示从新到旧全文注入，超出 2000 字只列标题。"""

@@ -29,7 +29,7 @@ def test_make_ref_rejects_removed_scopes(tmp_path):
 
 def test_export_and_import_three_layers(tmp_path):
     transfer, mover, store, _ = make(tmp_path)
-    run(store.board_scope().write("notice.md", thing("notice", body="告示")))
+    run(store.board_scope().write("notice.md", thing("notice", body="告示", signature="管理员")))
     run(store.notebook_scope("Bot-A").write("note.md", thing("note", body="小本本")))
     run(store.whisper_scope("a").write("secret.md", thing("secret", body="悄悄话")))
     bundle = run(mover.export())
@@ -108,3 +108,30 @@ def test_platform_rename_can_skip_notebook(tmp_path):
     run(mover.remap_platform("Bot-A", "Bot-B", include_notebook=False))
     assert run(store.notebook_scope("Bot-A").read("note.md"))
     assert run(store.notebook_scope("Bot-B").read("note.md")) is None
+
+
+def test_unsigned_board_import_is_rejected(tmp_path):
+    transfer, mover, store, _ = make(tmp_path)
+    unsigned = thing("notice", body="没有署名")
+    results = run(store.board_scope().import_files([pkg_memstore.ImportEntry("notice.md", unsigned)]))
+    assert results[0].outcome == transfer.IMPORT_INVALID
+    assert "署名" in results[0].reason
+    assert run(store.board_scope().read("notice.md")) is None
+
+    signed = thing("notice", body="有署名", signature="管理员")
+    results = run(store.board_scope().import_files([pkg_memstore.ImportEntry("notice.md", signed)]))
+    assert results[0].landed
+
+
+def test_cross_scope_transfer_to_board_rejects_unsigned(tmp_path):
+    transfer, mover, store, _ = make(tmp_path)
+    run(store.notebook_scope("Bot-A").write("note.md", thing("note", body="小本本内容")))
+    report = run(
+        mover.transfer(
+            transfer.ScopeRef("notebook", "Bot-A"),
+            transfer.ScopeRef("board"),
+            mode=transfer.MODE_COPY,
+        )
+    )
+    assert report["counts"]["invalid"] == 1
+    assert run(store.board_scope().read("note.md")) is None

@@ -2,7 +2,7 @@
   "enable_memory": {
     "description": "启用长期记忆",
     "type": "bool",
-    "hint": "注入记忆开头块并向聊天模型提供 memory_read / memory_search / memory_write / memory_edit / memory_delete 工具。记忆分三层：留言板（所有会话可见，管理员写）、小本本（这台机器人的所有群聊和私聊）、悄悄话（只有当前这段对话）。关闭后已存记忆保留在磁盘，仅停止注入与读写。",
+    "hint": "注入记忆开头块并向聊天模型提供 memory_read / memory_search 读取三层记忆（写入工具随后加入）。记忆分三层：留言板（所有会话可见，管理员写）、小本本（这台机器人的所有群聊和私聊）、悄悄话（只有当前这段对话）。关闭后已存记忆保留在磁盘，仅停止注入与读写。",
     "default": true
   },
   "recall_max_files": {

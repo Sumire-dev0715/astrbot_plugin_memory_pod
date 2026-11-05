@@ -9,7 +9,7 @@
 - frontmatter 的 type 是 journal；
 - 文件名以 journal-<YYYY-MM-DD> 开头。
 
-日志不参与关键词召回、身份必选和写入查重；需要时按日期用
+日志不参与关键词召回、身份必选，也不占单独的索引行；需要时按日期用
 memory_read 读取，或用 memory_search 搜索。
 """
 

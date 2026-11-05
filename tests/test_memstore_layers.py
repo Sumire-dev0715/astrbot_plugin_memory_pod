@@ -77,15 +77,18 @@ def test_journal_new_file_then_continue_same_day(tmp_path):
     assert "今天认识了一个人" in content and "下午又聊了一次" in content
 
 
-def test_journal_long_body_starts_new_file(tmp_path):
+def test_journal_append_that_would_cross_3000_starts_new_file(tmp_path):
     store = pkg_memstore.MemoryStore(tmp_path / "memories").notebook_scope("Bot-A")
     date = time.strftime("%Y-%m-%d", time.localtime(NOW))
     first = run(store.write_journal("a" * 2000, now=NOW))
     assert first.ok
-    run(store.write_journal("b" * 2000, now=NOW + 1))
-    second = run(store.write_journal("新的流水", now=NOW + 10))
+    # 再写 2000 字会让正文超过 3000，另开一篇，而不是先撑大再新开
+    second = run(store.write_journal("b" * 2000, now=NOW + 1))
     assert second.ok and second.new
     assert second.file == f"journal-{date}-2.md"
+    third = run(store.write_journal("新的流水", now=NOW + 10))
+    assert third.ok and not third.new
+    assert third.file == second.file
 
 
 def test_journal_older_than_seven_days_starts_new_file(tmp_path):
@@ -122,3 +125,24 @@ def test_journal_is_folded_in_index(tmp_path):
     assert len(journal_lines) <= 2
     assert "不自动召回" in snapshot.text
     assert pkg_journal.is_journal_name(f"journal-{date}.md")
+
+
+def test_journal_append_is_not_silently_truncated(tmp_path):
+    store = pkg_memstore.MemoryStore(tmp_path / "memories").notebook_scope("Bot-A")
+    report = run(store.write_journal("甲" * 3000, now=NOW))
+    assert report.ok
+    body = pkg_memstore.parse_memory(run(store.read(report.file))).body
+    assert len(body) >= 3000
+    over = run(
+        store.write_journal(
+            "乙" * (pkg_memstore.MAX_JOURNAL_APPEND_CHARS + 1), now=NOW + 1
+        )
+    )
+    assert not over.ok
+    assert "上限" in over.message
+
+
+def test_person_file_name_is_case_insensitive():
+    assert pkg_memstore.is_person_file("USER-123.md")
+    assert pkg_memstore.is_person_file("user-123.MD")
+    assert pkg_memstore.is_person_file("User-123.md")

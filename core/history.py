@@ -83,9 +83,6 @@ _TRASH_NAME_RE = re.compile(
 # .trash-scopes 归档名：<层>-<键>-<时间>；键本身可能含连字符，按末尾时间戳切开
 _ARCHIVE_NAME_RE = re.compile(r"^(.*)-(\d{8}-\d{6}-\d{3})$")
 
-# 文件名像手动备份时，写入回执提示不需要
-_BACKUP_MARKERS = ("backup", "bak", "备份", "副本")
-
 
 def _now() -> float:
     """当前时间；单独成函数，测试可以替换它造出不同时间的版本。"""
@@ -117,12 +114,6 @@ def _file_sha1(path: Path) -> str:
         return hashlib.sha1(path.read_bytes()).hexdigest()
     except OSError:
         return ""
-
-
-def looks_like_manual_backup(name: str) -> bool:
-    """文件名像模型自己做的备份（backup / bak / 备份 / 副本 / zz- 开头）。"""
-    stem = (name or "").strip().lower()
-    return stem.startswith("zz-") or any(marker in stem for marker in _BACKUP_MARKERS)
 
 
 def _write_atomic(path: Path, content: str | bytes) -> None:
@@ -266,8 +257,9 @@ class HistoryLog:
         before_sha1: str = "",
         after_sha1: str = "",
         ts: float | None = None,
+        reason: str = "",
     ) -> None:
-        """追加一行审计：ts、动作、文件、actor、来源与前后内容哈希。"""
+        """追加一行审计：ts、动作、文件、actor、来源、前后内容哈希与原因。"""
         ts = _now() if ts is None else ts
         record = {
             "ts": round(ts, 3),
@@ -278,6 +270,8 @@ class HistoryLog:
             "before_sha1": before_sha1,
             "after_sha1": after_sha1,
         }
+        if reason:
+            record["reason"] = reason
         with self._lock:
             append_audit(self.audit_path, record)
 
@@ -656,6 +650,7 @@ class HistoryLog:
         action: str,
         actor: str = "",
         source: str = "",
+        reason: str = "",
     ) -> TrashEntry:
         """把文件移进回收站并记审计；返回回收站条目。"""
         before_sha1 = _file_sha1(path)
@@ -670,7 +665,9 @@ class HistoryLog:
             self.trash_root.mkdir(parents=True, exist_ok=True)
             os.replace(path, dest)
             st = dest.stat()
-            self.record(action, file, actor, source, before_sha1, "", ts=ts)
+            self.record(
+                action, file, actor, source, before_sha1, "", ts=ts, reason=reason
+            )
         return TrashEntry(
             entry=entry,
             file=file,

@@ -37,9 +37,9 @@ def test_recall_hint_has_no_model_selection():
     assert "填 0" in hint
 
 
-def test_enable_memory_hint_names_three_layers_and_five_tools():
+def test_enable_memory_hint_names_three_layers_and_current_tools():
     hint = load("_conf_schema.json")["enable_memory"]["hint"]
-    for name in ("memory_read", "memory_search", "memory_write", "memory_edit", "memory_delete"):
+    for name in ("memory_read", "memory_search"):
         assert name in hint
     for layer in ("留言板", "小本本", "悄悄话"):
         assert layer in hint
@@ -61,3 +61,10 @@ def test_i18n_page_translations_have_no_removed_scopes():
             assert key not in pages
         for key in ("boardTitle", "notebookTitle", "whisperTitle", "publishTitle"):
             assert key in pages
+
+
+def test_english_consolidate_all_hint_has_no_global_scope():
+    pages = load(".astrbot-plugin/i18n/en-US.json")["pages"]["memory"]
+    hint = pages["consolidateAllHint"].lower()
+    assert "global" not in hint
+    assert "every scope" in hint

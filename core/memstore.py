@@ -80,8 +80,9 @@ MAX_SIGNATURE_CHARS = 100
 # 否则新开一篇 journal-<日期>.md，同一天重名时加序号。
 JOURNAL_MAX_CHARS = 3000
 JOURNAL_MAX_AGE_DAYS = 7
-# 单次追加给日记的流水上限，避免一次写入把一篇日记撑爆
-MAX_JOURNAL_APPEND_CHARS = 2000
+# 单次追加给日记的流水上限；与写入层的单条正文上限一致，超出整条拒绝，
+# 绝不静默截断。
+MAX_JOURNAL_APPEND_CHARS = 8000
 
 # 插件自动维护的三个戳（写在 frontmatter 的 metadata 下）：
 #   created  首次写入时间；改写、整理都不会把老记忆变"新"
@@ -348,6 +349,44 @@ def _rewrite_metadata(inner: str, fields: dict[str, str]) -> str:
     if inner.endswith("\r"):
         result += "\r"
     return result
+
+
+def rewrite_description(content: str, description: str) -> str:
+    """替换 frontmatter 顶层的 description，其余内容一个字不动。
+
+    没有 frontmatter 时原样返回：description 是标准格式的一部分，插件不会
+    为了改摘要替模型补一个 frontmatter。
+    """
+    match = _FRONTMATTER_RE.match(content or "")
+    if match is None:
+        return content
+    value = _HOOK_WS_RE.sub(" ", description or "").strip()
+    if not value:
+        return content
+    inner = match.group(1)
+    newline = "\r\n" if "\r\n" in inner else "\n"
+    lines = inner.splitlines()
+    replaced = False
+    for index, line in enumerate(lines):
+        if line[:1] in (" ", "\t"):
+            continue
+        key, sep, _ = line.partition(":")
+        if sep and key.strip().lower() == "description":
+            lines[index] = f"description: {value}"
+            replaced = True
+            break
+    if not replaced:
+        insert_at = 1
+        for index, line in enumerate(lines):
+            key, sep, _ = line.partition(":")
+            if sep and not line[:1].isspace() and key.strip().lower() == "name":
+                insert_at = index + 1
+                break
+        lines.insert(insert_at, f"description: {value}")
+    result = newline.join(lines)
+    if inner.endswith("\r"):
+        result += "\r"
+    return content[: match.start(1)] + result + content[match.end(1):]
 
 
 def stamp_memory(
@@ -900,9 +939,14 @@ class ScopeStore:
         journal-<当天日期>.md，同一天重名时加序号。每天第一次写进某篇时
         补一个 `## YYYY-MM-DD` 小标题。模型不需要知道文件名。
         """
-        text = (text or "").strip()[:MAX_JOURNAL_APPEND_CHARS].strip()
+        text = (text or "").strip()
         if not text:
             return WriteReport(False, "日记内容为空，未写入。")
+        if len(text) > MAX_JOURNAL_APPEND_CHARS:
+            return WriteReport(
+                False,
+                f"日记内容超过单次 {MAX_JOURNAL_APPEND_CHARS} 字上限，请精简后重写",
+            )
         date = time.strftime("%Y-%m-%d", time.localtime(now))
         headers = await asyncio.to_thread(self.headers)
         journals = [
@@ -925,9 +969,14 @@ class ScopeStore:
             content = await self.read(latest.file) or ""
             body_chars = len(parse_memory(content).body)
             age_seconds = now - latest.updated if latest.updated else None
+            heading_cost = (
+                0
+                if journal.last_heading_date(content) == date
+                else len(f"## {date}") + 4
+            )
             if (
                 content
-                and body_chars <= JOURNAL_MAX_CHARS
+                and body_chars + len(text) + heading_cost + 2 <= JOURNAL_MAX_CHARS
                 and age_seconds is not None
                 and age_seconds <= JOURNAL_MAX_AGE_DAYS * 86400.0
             ):
@@ -1014,6 +1063,7 @@ class ScopeStore:
         source: str = "",
         actor: str = "",
         mode: str = "replace",
+        description: str | None = None,
         now: float | None = None,
     ) -> WriteReport:
         """局部修改：默认 replace 把 old 替换成 new；append 追加内容；section 换小节正文。
@@ -1050,6 +1100,13 @@ class ScopeStore:
                 )
             if old == new:
                 return WriteReport(False, "old_text 与 new_text 相同，没有可做的修改。")
+        def with_description(text: str) -> str:
+            return (
+                rewrite_description(text, description)
+                if description is not None
+                else text
+            )
+
         async with self._lock:
             if not path.is_file():
                 return WriteReport(
@@ -1075,7 +1132,7 @@ class ScopeStore:
                 return await self._commit(
                     name,
                     path,
-                    updated,
+                    with_description(updated),
                     f"已向 {name} 追加内容",
                     source,
                     content,
@@ -1097,7 +1154,7 @@ class ScopeStore:
                 return await self._commit(
                     name,
                     path,
-                    updated,
+                    with_description(updated),
                     f"已替换 {name} 的小节「{old.strip()}」",
                     source,
                     content,
@@ -1136,7 +1193,7 @@ class ScopeStore:
             return await self._commit(
                 name,
                 path,
-                updated,
+                with_description(updated),
                 f"已修改 {name}，替换 {replaced} 处",
                 source,
                 content,
@@ -1209,7 +1266,9 @@ class ScopeStore:
             message += "。" + health
         return WriteReport(True, message, content, name)
 
-    async def delete(self, name: str, actor: str = "") -> WriteReport:
+    async def delete(
+        self, name: str, actor: str = "", reason: str = ""
+    ) -> WriteReport:
         name = (name or "").strip().lstrip("/")
         path = self._resolve(name)
         if path is None:
@@ -1229,6 +1288,7 @@ class ScopeStore:
                     name,
                     history.ACTION_DELETE,
                     actor,
+                    reason=reason,
                 )
             except OSError as exc:
                 return WriteReport(False, f"删除前保存到回收站失败，未删除 {name}：{exc}")
@@ -2238,6 +2298,8 @@ class ScopeStore:
             return IMPORT_INVALID, "同一批里重复出现"
         if not entry.content.strip():
             return IMPORT_INVALID, "内容为空"
+        if self.layer == SCOPE_BOARD and not parse_memory(entry.content).signature:
+            return IMPORT_INVALID, "留言板告示缺少署名"
         if len(entry.content.encode("utf-8")) > MAX_FILE_BYTES:
             return IMPORT_INVALID, f"超过单文件上限 {MAX_FILE_BYTES // 1024}KB"
         try:
@@ -2660,7 +2722,7 @@ class ScopeStore:
 
 
 # 人物记忆一人一个文件：user-<数字ID>.md
-_PERSON_FILE_RE = re.compile(r"^user-\d+\.md$")
+_PERSON_FILE_RE = re.compile(r"^user-\d+\.md$", re.I)
 
 
 def is_person_file(name: str) -> bool:

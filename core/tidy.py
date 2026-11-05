@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Awaitable, Callable
 
-from . import consolidate, history, journal
+from . import consolidate, history, journal, memstore
 from .memstore import (
     CONFLICT_OVERWRITE,
     CONFLICT_SKIP,
@@ -70,8 +70,6 @@ class TidyMeta:
     """一个作用域的手动整理记录。"""
 
     last_run: float = 0.0
-    last_attempt: float = 0.0
-    failures: int = 0
     outcome: str = ""
     message: str = ""
 
@@ -83,13 +81,8 @@ class TidyMeta:
             outcome=str(raw.get("outcome") or ""),
             message=str(raw.get("message") or ""),
         )
-        for name, key in (("last_run", "lastRun"), ("last_attempt", "lastAttempt")):
-            try:
-                setattr(meta, name, float(raw.get(key) or 0.0))
-            except (TypeError, ValueError):
-                pass
         try:
-            meta.failures = max(0, int(raw.get("failures") or 0))
+            meta.last_run = float(raw.get("lastRun") or 0.0)
         except (TypeError, ValueError):
             pass
         return meta
@@ -97,8 +90,6 @@ class TidyMeta:
     def to_raw(self) -> dict:
         return {
             "lastRun": round(self.last_run, 3),
-            "lastAttempt": round(self.last_attempt, 3),
-            "failures": self.failures,
             "outcome": self.outcome,
             "message": self.message,
         }
@@ -167,16 +158,6 @@ class TidyBook:
             change(meta)
             self._write(self._path(sid), meta.to_raw())
             return meta
-
-    def all_meta(self) -> dict[str, TidyMeta]:
-        if not self.base_dir.is_dir():
-            return {}
-        result = {}
-        for path in self.base_dir.glob("*.json"):
-            if path.name.endswith(".runs.json"):
-                continue
-            result[path.name[: -len(".json")]] = TidyMeta.from_raw(self._read(path))
-        return result
 
     def runs(self, sid: str) -> list[dict]:
         data = self._read(self._path(sid, ".runs.json"))
@@ -276,6 +257,16 @@ async def propose(
         for op in ops
         if op.file not in journal_files and not journal.is_journal(op.file, op.type)
     ]
+    # 留言板每条告示都必须带署名：改写沿用原署名，合并出的新告示用这次
+    # 整理看到的第一个署名；都没有时按管理页操作署名"管理员"。
+    if store.layer == memstore.SCOPE_BOARD:
+        signatures = {}
+        for header, content in files:
+            signatures[header.file] = memstore.parse_memory(content).signature
+        fallback = next((value for value in signatures.values() if value), "管理员")
+        for op in ops:
+            if op.op == "write" and not op.signature:
+                op.signature = signatures.get(op.file) or fallback
     # 记下复盘时各目标文件的写入时间，应用时据此识别期间被改过的文件
     for op in ops:
         op.base_mtime = store.mtime(op.file) or 0.0

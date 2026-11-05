@@ -117,20 +117,15 @@ class OpenAICompatClient:
         self.timeout = timeout
         self.max_attempts = max(1, int(max_attempts))
         self._sleep = sleep
-        # 指标：聊天回复与后台调用分开计数（含重试次数）
+        # 指标：实际请求次数（含重试次数）
         self.chat_calls = 0
-        self.background_calls = 0
 
     async def complete(
         self,
         messages: list[dict],
         tools: list[dict] | None = None,
-        *,
-        purpose: str = "chat",
     ) -> ModelReply:
-        return await asyncio.to_thread(
-            self._complete_sync, messages, tools, purpose
-        )
+        return await asyncio.to_thread(self._complete_sync, messages, tools)
 
     # ------------------------------------------------------------ 同步实现
 
@@ -138,7 +133,6 @@ class OpenAICompatClient:
         self,
         messages: list[dict],
         tools: list[dict] | None,
-        purpose: str,
     ) -> ModelReply:
         payload: dict = {
             "model": self.model,
@@ -156,10 +150,7 @@ class OpenAICompatClient:
         last_error = ""
         for attempt in range(1, self.max_attempts + 1):
             self.budget.spend()
-            if purpose == "chat":
-                self.chat_calls += 1
-            else:
-                self.background_calls += 1
+            self.chat_calls += 1
             retry_after = 0.0
             try:
                 data = self._post(body)

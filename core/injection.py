@@ -202,8 +202,14 @@ def render_board_notices(
     )
     full: list[str] = []
     overflow: list[BoardNotice] = []
-    used = 0
+    # 标题行与块之间的空行也算进 2000 字；全文段一旦放不下，更旧的告示
+    # 全部只列标题，不再让后面的短告示插队。
+    used = len(BOARD_HEADING) + 2
+    overflow_started = False
     for notice in ordered:
+        if overflow_started:
+            overflow.append(notice)
+            continue
         title = notice.title or notice.file[: -len(memstore.MEMORY_FILE_SUFFIX)]
         block_parts = [f"### {notice.file}"]
         title_line = f"标题：{title}"
@@ -212,10 +218,12 @@ def render_board_notices(
         rendered = "\n".join(
             part for part in (block_parts[0], title_line, signature_line, body) if part
         )
-        if used + len(rendered) > limit:
+        separator = 2 if full else 0
+        if used + separator + len(rendered) > limit:
+            overflow_started = True
             overflow.append(notice)
             continue
-        used += len(rendered)
+        used += separator + len(rendered)
         full.append(rendered)
     lines = [BOARD_HEADING]
     if full:

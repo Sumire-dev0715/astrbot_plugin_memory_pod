@@ -25,21 +25,32 @@ def test_board_signature_round_trips_through_frontmatter():
 
 def test_board_full_text_newest_first_and_over_limit_titles_only():
     notices = [
-        notice("old.md", "旧" * 800, signature="甲", written=1.0),
-        notice("mid.md", "中" * 800, signature="乙", written=2.0),
-        notice("new.md", "新" * 800, signature="丙", written=3.0),
+        notice("old.md", "旧" * 4, signature="甲", written=1.0),
+        notice("mid.md", "中" * 1200, signature="乙", written=2.0),
+        notice("new.md", "新" * 1200, signature="丙", written=3.0),
     ]
     text = pkg_injection.render_board_notices(notices)
-    # 从新到旧
+    # 从新到旧：新的放得下就全文，一旦放不下，更旧的全部只列标题，
+    # 不允许中间的短告示插队。
     assert text.index("new.md") < text.index("mid.md") < text.index("old.md")
     full = text.split("其余告示只列标题")[0]
-    assert "丙" in full and "乙" in full
-    assert full.count("### ") == 2
-    assert "新" * 800 in full and "中" * 800 in full
-    # 放不下的那条只列标题，不出现正文
-    assert "旧" * 800 not in text
-    assert "old.md — 告示" in text
-    # 全文字数（含标题/署名）不超过 2000
+    assert "新" * 1200 in full
+    assert "中" * 1200 not in text
+    assert "旧" * 4 not in text.split("其余告示只列标题")[0]
+    assert "mid.md — 告示" in text and "old.md — 告示" in text
+    # 全文段（含留言板标题）不超过 2000 字
+    assert len(full) <= 2000
+
+
+def test_board_budget_includes_heading_and_block_separators():
+    notices = [
+        notice("a.md", "甲" * 999, signature="甲", written=1.0),
+        notice("b.md", "乙" * 999, signature="乙", written=2.0),
+    ]
+    text = pkg_injection.render_board_notices(notices)
+    full = text.split("其余告示只列标题")[0]
+    assert "乙" * 999 in full
+    assert "甲" * 999 not in full
     assert len(full) <= 2000
 
 

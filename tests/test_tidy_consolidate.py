@@ -101,3 +101,52 @@ def test_consolidate_prompt_mentions_three_layers_but_one_scope():
     assert "这一处" in prompt
     assert "留言板" in prompt and "小本本" in prompt and "悄悄话" in prompt
     assert "不要在这里跨层搬动内容" in prompt
+
+
+def test_board_rewrite_keeps_signature_and_new_notice_gets_one(tmp_path):
+    from support import pkg_memstore
+
+    store = pkg_memstore.MemoryStore(tmp_path / "memories").board_scope()
+    run(store.write("a.md", thing("a", description="甲", body="内容甲", signature="甲管理员")))
+    run(store.write("b.md", thing("b", description="乙", body="内容乙", signature="乙管理员")))
+    plan = [
+        {
+            "op": "write",
+            "file": "a.md",
+            "type": "reference",
+            "description": "合并",
+            "content": "内容甲\n内容乙",
+            "reason": "合并 b",
+        },
+        {"op": "delete", "file": "b.md", "reason": "已合并"},
+    ]
+    proposal = run(
+        pkg_tidy.propose(
+            store, "留言板", replies("<operations>" + json.dumps(plan) + "</operations>")
+        )
+    )
+    assert proposal.operations[0].signature == "甲管理员"
+    run(pkg_tidy.apply(store, proposal.operations))
+    assert pkg_memstore.parse_memory(run(store.read("a.md"))).signature == "甲管理员"
+
+    new_plan = [
+        {
+            "op": "write",
+            "file": "merged.md",
+            "type": "reference",
+            "description": "合并告示",
+            "content": "合并后的正文",
+            "reason": "合并",
+        },
+        {"op": "delete", "file": "a.md", "reason": "已合并"},
+    ]
+    proposal = run(
+        pkg_tidy.propose(
+            store,
+            "留言板",
+            replies("<operations>" + json.dumps(new_plan) + "</operations>"),
+        )
+    )
+    assert proposal.operations[0].signature
+    run(pkg_tidy.apply(store, proposal.operations))
+    assert pkg_memstore.parse_memory(run(store.read("merged.md"))).signature

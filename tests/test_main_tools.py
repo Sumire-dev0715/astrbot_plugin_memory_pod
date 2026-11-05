@@ -125,3 +125,24 @@ def test_manual_consolidation_uses_default_chat_provider(tmp_path):
     assert text == "[]"
     assert calls == [None, "整理"]
     assert log and "成功" in log[0]
+
+
+def test_board_notices_count_as_used_so_forgetting_does_not_drop_them(tmp_path):
+    plugin = make_plugin(tmp_path, enable_forgetting=True)
+    board = plugin._store.board_scope()
+    old = time.time() - 10 * 86400
+    run(
+        board.write(
+            "notice.md",
+            thing("notice", body="旧告示", signature="管理员"),
+            now=old,
+        )
+    )
+    event = FakeEvent("Bot-A", "123")
+    opening = run(plugin._index_block(main.RuntimeSession(), event, record_usage=True))
+    assert "旧告示" in opening
+    assert board.usage_of("notice.md").uses >= 1
+    forgotten = run(board.forget_stale(86400.0))
+    assert forgotten == []
+    refreshed = run(plugin._index_block(main.RuntimeSession(), event))
+    assert "旧告示" in refreshed

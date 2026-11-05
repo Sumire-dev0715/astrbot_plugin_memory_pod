@@ -7,7 +7,7 @@
   "config": {
     "enable_memory": {
       "description": "Enable long-term memory",
-      "hint": "Injects the memory opening block and gives the chat model memory_read / memory_search / memory_write / memory_edit / memory_delete. Memories have three layers: the notice board (visible to every chat, written by admins), the notebook (shared by every group and private chat of this bot), and whispers (only the current conversation). When turned off, saved memories stay on disk; the bot just stops reading and writing them."
+      "hint": "Injects the memory opening block and gives the chat model memory_read / memory_search to read the three layers (write tools follow in the next step). Memories have three layers: the notice board (visible to every chat, written by admins), the notebook (shared by every group and private chat of this bot), and whispers (only the current conversation). When turned off, saved memories stay on disk; the bot just stops reading and writing them."
     },
     "recall_max_files": {
       "description": "Max memories recalled per turn",
@@ -191,7 +191,7 @@
       "consolidateReview": "The model proposes the changes below. Tick the ones to apply: a write replaces the whole file, a delete also removes its index line. Writes are applied before deletes.",
       "consolidateSkipped": "There are too many memories, so {n} files were left out of this review.",
       "consolidateAll": "Tidy up everything",
-      "consolidateAllHint": "Have the model review every session's memories and the global ones one by one. Proposals are collected in one place and nothing is written until you tick and confirm.",
+      "consolidateAllHint": "Review every scope that has memories, one by one; you can apply only part of the plan.",
       "consolidateAllTitle": "Tidy up all memories",
       "consolidateAllNone": "There are no memories to tidy yet",
       "opCreate": "New",

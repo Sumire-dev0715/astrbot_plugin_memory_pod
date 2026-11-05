@@ -1,0 +1,119 @@
+"""保留下来的文件编辑、索引、备份与遗忘行为。"""
+
+from __future__ import annotations
+
+import os
+import time
+
+from support import pkg_memstore, run, thing
+
+
+def store(tmp_path):
+    return pkg_memstore.MemoryStore(tmp_path / "memories").notebook_scope("Bot-A")
+
+
+def test_replace_requires_exactly_one_match(tmp_path):
+    scope = store(tmp_path)
+    run(scope.write("note.md", thing("note", body="甲 乙 乙")))
+    report = run(scope.edit("note.md", "乙", "丙", mode="replace"))
+    assert not report.ok and "出现了 2 处" in report.message
+    report = run(scope.edit("note.md", "甲", "丙", mode="replace"))
+    assert report.ok
+    assert "丙 乙 乙" in run(scope.read("note.md"))
+
+
+def test_section_replace_keeps_other_sections(tmp_path):
+    scope = store(tmp_path)
+    run(
+        scope.write(
+            "note.md",
+            thing("note", body="## 作息\n\n早睡\n\n## 爱好\n\n猫"),
+        )
+    )
+    report = run(scope.edit("note.md", "## 作息", "晚睡", mode="section"))
+    assert report.ok
+    content = run(scope.read("note.md"))
+    assert "晚睡" in content and "早睡" not in content
+    assert "## 爱好" in content and "猫" in content
+
+
+def test_append_to_section(tmp_path):
+    scope = store(tmp_path)
+    run(scope.write("note.md", thing("note", body="## 作息\n\n早睡")))
+    report = run(scope.edit("note.md", "## 作息", "不熬夜", mode="append"))
+    assert report.ok
+    assert "不熬夜" in run(scope.read("note.md"))
+
+
+def test_index_report_missing_and_dangling(tmp_path):
+    scope = store(tmp_path)
+    run(scope.write("a.md", thing("a", body="内容")))
+    index = scope.root / "MEMORY.md"
+    index.write_text("- [gone](gone.md) — 旧行\n", encoding="utf-8")
+    report = scope.index_report()
+    assert "a.md" in report.missing
+    assert "gone.md" in report.dangling
+
+
+def test_rebuild_index_keeps_manual_groups(tmp_path):
+    scope = store(tmp_path)
+    run(scope.write("a.md", thing("a", description="甲", body="内容")))
+    index = scope.root / "MEMORY.md"
+    index.write_text("# 分组\n- [a](a.md) — 旧钩子\n", encoding="utf-8")
+    count = run(scope.rebuild_index())
+    assert count == 1
+    content = run(scope.read("MEMORY.md"))
+    assert "# 分组" in content and "旧钩子" not in content
+
+
+def test_write_index_rejects_too_large(tmp_path):
+    scope = store(tmp_path)
+    report = run(scope.write_index("x" * (pkg_memstore.MAX_FILE_BYTES + 1)))
+    assert not report.ok
+
+
+def test_snapshot_and_import_round_trip(tmp_path):
+    scope = store(tmp_path)
+    run(scope.write("note.md", thing("note", body="正文")))
+    run(scope.write("gone.md", thing("gone", body="已遗忘")))
+    run(scope.forget("gone.md"))
+    entries, index = scope.snapshot()
+    assert {entry.name for entry in entries} == {"note.md", "gone.md"}
+    assert any(entry.forgotten for entry in entries)
+    assert "note.md" in index
+
+    fresh = pkg_memstore.MemoryStore(tmp_path / "other").notebook_scope("Bot-A")
+    results = run(fresh.import_files(entries, pkg_memstore.CONFLICT_OVERWRITE, index=index))
+    assert all(result.landed for result in results)
+    assert "正文" in run(fresh.read("note.md"))
+    assert run(fresh.read_forgotten("gone.md"))
+
+
+def test_import_dry_run_does_not_write(tmp_path):
+    scope = store(tmp_path)
+    entry = pkg_memstore.ImportEntry("new.md", thing("new", body="内容"))
+    results = run(scope.import_files([entry], dry_run=True))
+    assert results[0].landed
+    assert run(scope.read("new.md")) is None
+
+
+def test_forget_stale_exempts_feedback(tmp_path):
+    scope = store(tmp_path)
+    old = time.time() - 20 * 86400
+    run(scope.write("advice.md", thing("advice", body="指导", mem_type="feedback"), now=old))
+    run(scope.write("note.md", thing("note", body="普通"), now=old))
+    for name in ("advice.md", "note.md"):
+        os.utime(scope.root / name, (old, old))
+    forgotten = run(scope.forget_stale(86400.0))
+    assert forgotten == ["note.md"]
+    assert scope.exists("advice.md")
+
+
+def test_delete_trash_removes_bytes(tmp_path):
+    scope = store(tmp_path)
+    run(scope.write("note.md", thing("note", body="正文")))
+    run(scope.delete("note.md"))
+    entry = scope.trash_entries()[0]
+    report = run(scope.delete_trash(entry.entry))
+    assert report.ok
+    assert scope.trash_entries() == []
