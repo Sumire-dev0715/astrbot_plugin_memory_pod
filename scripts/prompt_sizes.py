@@ -114,17 +114,27 @@ def _recall_shell(recall_mod, injection_mod, prompts) -> int:
     return len(block) - len(entry)
 
 
-def collect_sizes() -> dict:
-    astrbot_stub.install()
-    module, plugin_cls = astrbot_stub.load_plugin(REPO_ROOT)
-    prefixes = ["core.prompts", "core.injection", "core.recall"]
-    mods = {
-        name: sys.modules[f"{astrbot_stub.PLUGIN_PACKAGE}.{name}"]
-        for name in prefixes
-    }
-    prompts = mods["core.prompts"]
-    injection = mods["core.injection"]
-    recall = mods["core.recall"]
+def collect_sizes(
+    *,
+    plugin_cls=None,
+    prompts=None,
+    injection=None,
+    recall=None,
+) -> dict:
+    """测量聊天侧提示词体积。
+
+    不传参数时按命令行用法导入仓库里的插件；评测脚本已经有插件实例时
+    直接传入，避免在场景并发运行时重新导入插件包。只传 plugin_cls 时，
+    三个 core 模块仍从当前已导入的插件包里取。
+    """
+    if plugin_cls is None:
+        astrbot_stub.install()
+        _module, plugin_cls = astrbot_stub.load_plugin(REPO_ROOT)
+    if prompts is None or injection is None or recall is None:
+        prefix = f"{astrbot_stub.PLUGIN_PACKAGE}.core"
+        prompts = prompts or sys.modules[f"{prefix}.prompts"]
+        injection = injection or sys.modules[f"{prefix}.injection"]
+        recall = recall or sys.modules[f"{prefix}.recall"]
 
     guidance = prompts.memory_guidance()
     tools = _tool_docs(plugin_cls)
