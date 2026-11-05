@@ -133,15 +133,15 @@ def test_propose_nothing_to_do(scope):
 def test_propose_ignores_journal_operations(scope):
     run(
         scope.write(
-            "daily-2026-11-03.md",
-            compose_memory("daily-2026-11-03", "日志", "journal", "流水"),
+            "journal-2026-11-03.md",
+            compose_memory("journal-2026-11-03", "日志", "journal", "流水"),
         )
     )
     ops = [
-        {"op": "delete", "file": "daily-2026-11-03.md", "reason": "一次性"},
+        {"op": "delete", "file": "journal-2026-11-03.md", "reason": "一次性"},
         {
             "op": "write",
-            "file": "daily-2026-11-03.md",
+            "file": "journal-2026-11-03.md",
             "type": "project",
             "description": "改成项目",
             "content": "挪作他用",

@@ -208,9 +208,6 @@ class FakeEvalModel:
         self._pending_answer = "好的。"
         return _note("用户要求记住新电话 13800000000")
 
-    def _chat_compression_follow_window(self, text: str) -> ModelReply:
-        return ModelReply(content="收到，继续。")
-
     def _chat_group_role_session(self, text: str) -> ModelReply:
         return ModelReply(content="开心果你好。")
 
@@ -236,8 +233,6 @@ class FakeEvalModel:
     def _background(self, prompt: str) -> ModelReply:
         if self.mode == "bad":
             return ModelReply(content="<operations>[]</operations>")
-        if "待压缩的对话" in prompt and "记忆整理助手" not in prompt:
-            return ModelReply(content="<summary>这段对话的摘要。</summary>")
         if "记忆整理助手" not in prompt:
             return ModelReply(content="<operations>[]</operations>")
         scenario = current_scenario()

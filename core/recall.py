@@ -1,21 +1,20 @@
-"""相关记忆召回：每轮挑出与当前消息最相关的少量记忆，把全文附在本轮请求末尾。
+"""相关记忆召回：每轮挑出与当前消息最相关的少量记忆，把全文附在本轮用户消息后面。
 
 索引只是目录，模型需要细节时还得自己调 memory_read；召回把这一步提前：
-插件按本轮消息选出最多几条相关记忆，以 _no_save 数据块附在历史末尾、
-用户新消息之前。块放在末尾而不是开头，逐轮变化也不破坏前缀缓存。
+插件按本轮消息选出最多几条相关记忆，以 _no_save 数据块附在本轮用户消息
+的附加内容里（AstrBot 截断与压缩都保留最新一轮，回存历史时按内容块丢弃）。
+块放在用户消息之后而不是历史开头，逐轮变化也不破坏前缀缓存。
 
 挑选分两档，都不需要向量模型：
 - 身份必选：发送者本人、被 @ 的人、消息里出现的数字 ID，对应的
   user-<ID>.md 存在就一定带上——聊天里最常用的记忆就是"正在说话的人"；
-- 相关性：关键词模式按词重叠打分（英文按词、中文按相邻两字），名称与
-  描述命中权重更高；模型模式把记忆清单交给摘要模型挑选，失败退回关键词。
-  挑选提示词里清单在前、本轮消息在后，写入日期用绝对日期：同一会话里
-  记忆没变时清单逐字不变，模型服务可以复用这段前缀。
+- 相关性：按词重叠打分（英文按词、中文按相邻两字），名称与描述命中
+  权重更高。
 
 每条召回记忆的标题带类型与写入时间；正文去掉 frontmatter，超过单条上限
 时保留开头与结尾（3.6 第 3 条）。记忆是写入时的观察，不是现状。
 
-日志（journal）是流水账，既不进身份必选，也不进关键词与模型挑选；
+日志（journal）是流水账，既不进身份必选，也不进关键词挑选；
 需要时按日期显式 memory_read 或 memory_search。
 
 共享人物空间里召回的人物文件在标题里注明"多个机器人共享"：召回内容
@@ -31,9 +30,7 @@
 
 from __future__ import annotations
 
-import json
 import re
-import time
 from dataclasses import dataclass
 
 from . import injection, journal
@@ -46,8 +43,8 @@ from .injection import (
 )
 from .memstore import MemoryHeader, ScopeStore
 
-RECALL_BLOCK_OPEN = "<memory_beyond_recall>"
-RECALL_BLOCK_CLOSE = "</memory_beyond_recall>"
+RECALL_BLOCK_OPEN = "<memory_pod_recall>"
+RECALL_BLOCK_CLOSE = "</memory_pod_recall>"
 
 DEFAULT_MAX_FILES = 5
 # 配置默认值：每轮带全文的非身份召回文件数
@@ -63,7 +60,7 @@ BODY_CAP = 6
 DAY_SECONDS = 86400
 
 _ASCII_WORD_RE = re.compile(r"[a-z0-9]+")
-_CJK_RUN_RE = re.compile(r"[㐀-䶿一-鿿豈-﫿]+")
+_CJK_RUN_RE = re.compile(r"[㐀-䶿一-鿿豈-﫿]+")
 _DIGIT_ID_RE = re.compile(r"(?<!\d)(\d{5,12})(?!\d)")
 
 # 高频虚词组合：出现在几乎任何中文句子里，计入打分只会制造噪声
@@ -178,114 +175,6 @@ def select_by_keywords(
     scored.sort(key=lambda item: (item[0], item[1]), reverse=True)
     chosen.extend(cand for _, _, cand in scored)
     return chosen[:limit]
-
-
-def choose_candidates(
-    candidates: list[Candidate],
-    query: str,
-    forced_files: list[str],
-    limit: int,
-    model_choice: list[Candidate] | None = None,
-) -> list[Candidate]:
-    """挑出本轮召回的候选：模型挑选结果与身份必选合并，或退回关键词。
-
-    model_choice 为 None 表示这轮不用模型挑选（关键词模式，或模型调用
-    失败）：完全走 select_by_keywords。非 None 时按旧行为合并——先放
-    身份必选（关键词模式、空查询下选出），再接模型挑选的顺序，去重后
-    截到 limit；模型明确回答"没有相关的"（空列表）时也不会退回关键词。
-    """
-    if limit <= 0:
-        return []
-    if model_choice is None:
-        return select_by_keywords(candidates, query, forced_files, limit)
-    keyword_forced = select_by_keywords(candidates, "", forced_files, limit)
-    merged = keyword_forced + [c for c in model_choice if c not in keyword_forced]
-    return merged[:limit]
-
-
-# ---------------------------------------------------------------- 写入查重
-
-# 新建文件时提示"可能重复"的门槛：描述三处重合，或两处重合加正文两处
-# ---------------------------------------------------------------- 模型挑选
-
-SELECTOR_PROMPT = """记忆清单（每行：编号、作用域/文件名、类型、写入日期、一句话描述）：
-{manifest}
-
-你在帮一个聊天机器人挑选记忆。请从上面的清单里挑出机器人回复下面这条新消息时**确实用得上**的记忆，最多 {limit} 条。只选有把握有用的；拿不准就不选；一条都用不上就输出空数组。
-
-只输出一个 JSON 数组，元素是所选记忆的「作用域/文件名」，例如 ["session/user-12345678.md"]，不要输出其他内容。
-
-新消息：
-{query}"""
-
-
-def _selector_date(updated: float) -> str:
-    """候选清单里的写入日期：绝对日期，不随"现在"漂移。
-
-    用相对时间（3 天前）会让同一份记忆隔天换一行、破坏提示词前缀缓存；
-    绝对日期在记忆不变时逐字稳定。
-    """
-    if not updated or updated <= 0:
-        return "未知"
-    return time.strftime("%Y-%m-%d", time.localtime(updated))
-
-
-def build_selector_prompt(
-    candidates: list[Candidate], query: str, limit: int
-) -> str:
-    """拼摘要模型挑选用的清单；日志是流水账，不交给模型挑选。
-
-    清单在前、本轮消息在后，方便模型服务复用清单这一段稳定的前缀；
-    清单里的写入日期用绝对日期，同一会话里记忆没变时逐字不变。
-    """
-    lines = []
-    visible = [
-        cand
-        for cand in candidates
-        if not journal.is_journal(cand.header.file, cand.header.type)
-    ]
-    for i, cand in enumerate(visible, 1):
-        header = cand.header
-        description = header.description or "（无描述）"
-        lines.append(
-            f"{i}. {cand.ref}｜{header.type or '未标注'}｜"
-            f"写入 {_selector_date(header.updated)}｜{description}"
-        )
-    return SELECTOR_PROMPT.format(
-        limit=limit, manifest="\n".join(lines), query=(query or "").strip()[:2000]
-    )
-
-
-def parse_selector_response(
-    text: str, candidates: list[Candidate]
-) -> list[Candidate] | None:
-    """解析模型挑选结果：空数组表示"没有相关的"；找不到 JSON 数组返回 None，
-    调用方据此退回关键词模式——模型答了句闲话不该让召回落空。日志一律不选。"""
-    if not text:
-        return None
-    start, end = text.find("["), text.rfind("]")
-    if start < 0 or end <= start:
-        return None
-    try:
-        data = json.loads(text[start : end + 1])
-    except ValueError:
-        return None
-    if not isinstance(data, list):
-        return None
-    by_ref = {cand.ref: cand for cand in candidates}
-    by_file: dict[str, Candidate] = {}
-    for cand in candidates:
-        by_file.setdefault(cand.header.file, cand)
-    chosen: list[Candidate] = []
-    for item in data:
-        ref = str(item or "").strip()
-        cand = by_ref.get(ref) or by_file.get(ref.rsplit("/", 1)[-1])
-        if cand is None or cand in chosen:
-            continue
-        if journal.is_journal(cand.header.file, cand.header.type):
-            continue
-        chosen.append(cand)
-    return chosen
 
 
 # ---------------------------------------------------------------- 注入块
@@ -481,7 +370,6 @@ async def assemble_recall(
     forced_files: list[str],
     limit: int,
     data_notice: str,
-    model_choice: list[Candidate] | None = None,
     shared_people: bool = False,
     now: float | None = None,
     full_files: int | None = None,
@@ -491,8 +379,7 @@ async def assemble_recall(
     """挑文件、读正文、分档、按预算瘦身并渲染召回块（不依赖 AstrBot 事件）。
 
     调用方准备好作用域表（键是 global / session / people）和候选清单；
-    模型挑选的结果以 model_choice 传入，None 表示退回关键词。shared_people
-    为真时 people 作用域的文件在块里标注"多个机器人共享"。
+    shared_people 为真时 people 作用域的文件在块里标注"多个机器人共享"。
 
     full_files 是每轮带全文的非身份文件数；None 表示不分档（全部尝试带
     全文，与重构前行为一致）。身份必选文件始终带全文、不占这个名额，但仍
@@ -502,7 +389,7 @@ async def assemble_recall(
     读不到正文的文件直接略过；used 供调用方记使用统计，本函数不写盘。
     选中哪些文件、带多少字都在这里判断，调用方不必重复实现。
     """
-    chosen = choose_candidates(candidates, query, forced_files, limit, model_choice)
+    chosen = select_by_keywords(candidates, query, forced_files, limit)
     items: list[Recalled] = []
     used: dict[str, list[str]] = {}
     full_items: list[Recalled] = []
@@ -544,8 +431,3 @@ async def assemble_recall(
             sections, data_notice, now, pointers=pointers, indexed_refs=indexed_refs
         ),
     )
-
-
-def build_recall_message(block: str) -> dict:
-    # 与索引块相同：_no_save 声明不回存，召回内容只存在于本轮请求
-    return {"role": "user", "content": block, "_no_save": True}

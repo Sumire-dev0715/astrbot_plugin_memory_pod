@@ -1,4 +1,4 @@
-"""3.7 配置项：删除的开关与归档配置不再出现，窗口说明跟随 AstrBot。"""
+"""3.8 配置项：只保留本轮仍在用的键，上下文管理相关配置不再出现。"""
 
 import json
 from pathlib import Path
@@ -19,32 +19,22 @@ def test_recall_full_files_default_two():
 
 def test_new_configs_have_english_translations():
     config = load(".astrbot-plugin/i18n/en-US.json")["config"]
-    for key in ("recall_full_files",):
+    for key in load("_conf_schema.json"):
+        assert key in config, f"{key} 缺少英文翻译"
         assert config[key]["description"]
         assert config[key]["hint"]
 
 
 def test_schema_has_exactly_the_remaining_configs():
-    """3.7 删掉的开关与归档配置不能以任何形式留下；用完整键集守住。"""
+    """3.8.1 / 3.8.7 删掉的配置不能以任何形式留下；用完整键集守住。"""
     expected = {
         "enable_memory",
         "enable_global_memory",
-        "recall_mode",
         "recall_max_files",
         "recall_full_files",
-        "enable_compression",
-        "max_context_tokens",
-        "compress_threshold",
-        "compress_buffer",
-        "keep_recent_turns",
-        "summary_provider_id",
         "memory_provider_id",
         "auto_consolidate",
         "auto_consolidate_hours",
-        "summary_retry_count",
-        "summary_timeout",
-        "summary_prompt_template",
-        "summary_max_chars",
         "auto_extract_interval",
         "extract_idle_minutes",
         "shared_people_bots",
@@ -52,23 +42,20 @@ def test_schema_has_exactly_the_remaining_configs():
         "trash_keep_days",
         "enable_forgetting",
         "forget_after_days",
-        "tool_result_idle_minutes",
-        "loop_guard",
     }
     assert set(load("_conf_schema.json")) == expected
 
 
-def test_window_and_compression_hints_follow_astrbot():
-    schema = load("_conf_schema.json")
-    window_hint = schema["max_context_tokens"]["hint"]
-    assert "跟随 AstrBot" in window_hint
-    assert "强烈建议手动填写" not in window_hint
-    compression_hint = schema["enable_compression"]["hint"]
-    assert "交给 AstrBot 自带" in compression_hint
+def test_recall_hint_has_no_model_selection():
+    """召回只按关键词；配置说明不再提模型挑选，填 0 即关闭。"""
+    hint = load("_conf_schema.json")["recall_max_files"]["hint"]
+    assert "模型" not in hint
+    assert "填 0" in hint
 
 
 def test_metadata_help_no_longer_asks_to_change_astrbot():
-    """3.7.1：插件说明不再要求用户调整 AstrBot 的内置设置。"""
+    """插件说明不再要求用户调整 AstrBot 的内置设置，也不再有压缩指令。"""
     text = (ROOT / "metadata.yaml").read_text("utf-8")
     assert "按 README 调整 AstrBot" not in text
-    assert "窗口默认跟随 AstrBot" in text
+    assert "上下文压缩" not in text
+    assert "/mb_reset" not in text and "/mb_probe" not in text

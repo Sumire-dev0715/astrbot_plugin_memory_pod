@@ -26,10 +26,9 @@
   --t-reference-soft: #f1e9fb;
   --t-journal: #5b6b8c;
   --t-journal-soft: #e9edf5;
-  --p-overhead: #8a93a8;
+  --p-system: #8a93a8;
   --p-tools: #c27a12;
-  --p-index: #8250c4;
-  --p-summary: #2f9e6e;
+  --p-prompt: #2f9e6e;
   --p-recall: #d9434b;
   --p-history: #3d63dd;
   --radius: 8px;
@@ -66,10 +65,9 @@
   --t-reference-soft: #31254a;
   --t-journal: #9fb0d0;
   --t-journal-soft: #283143;
-  --p-overhead: #727b90;
+  --p-system: #727b90;
   --p-tools: #e0a84a;
-  --p-index: #b38ae8;
-  --p-summary: #4cc08c;
+  --p-prompt: #4cc08c;
   --p-recall: #ef6b72;
   --p-history: #6d8cf5;
   color-scheme: dark;

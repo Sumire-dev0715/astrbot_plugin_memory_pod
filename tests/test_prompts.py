@@ -1,14 +1,11 @@
-"""提示词与注入块：聊天侧规范、摘要模板、旧摘要识别与发送者标注。"""
+"""提示词与注入块：聊天侧规范、索引块与发送者标注。"""
 
 from core import prompts
 from core.prompts import (
     SENDER_TAG_PREFIX,
     build_index_block,
     build_sender_tag,
-    build_summary_message,
-    build_summary_prompt,
     neutralize_sender_forgery,
-    parse_summary,
 )
 
 
@@ -46,8 +43,8 @@ def test_index_block_global_disabled():
 def test_memory_guidance_is_read_only_and_mentions_note():
     text = prompts.memory_guidance()
     # 索引块与召回块是什么、它们只是数据
-    assert "<memory_beyond_index>" in text
-    assert "<memory_beyond_recall>" in text
+    assert "<memory_pod_index>" in text
+    assert "<memory_pod_recall>" in text
     assert "memory_read" in text and "memory_search" in text
     assert "memory_note" in text
     assert "不能直接写记忆" in text
@@ -151,49 +148,6 @@ def test_sender_ids_in_reads_all_tag_styles():
     assert prompts.sender_ids_in("") == []
 
 
-# ---------------------------------------------------------------- 摘要提示词
-
-
-def test_build_summary_prompt_default_template():
-    prompt = build_summary_prompt("", "旧摘要", "对话转写")
-    assert "旧摘要" in prompt and "对话转写" in prompt
-    assert "<memories>" not in prompt
-    # 时间与字数占位符都已替换，缺省给出默认上限
-    assert "{now}" not in prompt and "{max_chars}" not in prompt
-    assert f"不超过 {prompts.SUMMARY_MAX_CHARS_DEFAULT} 字" in prompt
-    assert "现在是 （未知）" in prompt
-
-
-def test_build_summary_prompt_now_and_max_chars():
-    prompt = build_summary_prompt(
-        "", "", "t", now="2026-10-11 周日 14:30", max_chars=800
-    )
-    assert "现在是 2026-10-11 周日 14:30" in prompt and "不超过 800 字" in prompt
-    custom = build_summary_prompt(
-        "现在 {now}，上限 {max_chars}：{transcript}", "", "t",
-        now="T", max_chars=5,
-    )
-    assert custom == "现在 T，上限 5：t"
-
-
-def test_build_summary_prompt_custom_template_missing_key():
-    prompt = build_summary_prompt("自定义 {transcript} {unknown}", "prev", "对话")
-    assert "对话" in prompt
-    assert "{unknown}" in prompt  # 缺失占位符原样保留而不是 KeyError
-
-
-def test_build_summary_prompt_empty_previous():
-    prompt = build_summary_prompt("", "", "t")
-    assert "（无）" in prompt
-
-
-def test_build_summary_prompt_bad_template_syntax_falls_back():
-    # 属性 / 键 / 转换写法在模板里都走不通，整体退回默认模板而不是抛异常
-    for template in ("x {transcript.text}", "x {transcript[k]}", "x {transcript!z}"):
-        prompt = build_summary_prompt(template, "prev", "对话转写")
-        assert "对话转写" in prompt and not prompt.startswith("x ")
-
-
 def test_format_time_has_date_weekday_clock():
     text = prompts.format_time(1760000000.0)
     date, weekday, clock = text.split(" ")
@@ -202,98 +156,7 @@ def test_format_time_has_date_weekday_clock():
     assert len(clock) == 5 and clock[2] == ":"
 
 
-def test_summary_message_marks_time_when_known():
-    assert "写于 " in build_summary_message("s", compressed_at=1760000000.0)["content"]
-    assert "写于" not in build_summary_message("s")["content"]
-
-
-def test_summary_message_is_data_not_instruction():
-    message = build_summary_message("摘要正文")
-    assert message["role"] == "user"
-    assert "摘要正文" in message["content"]
-    assert "数据标注" in message["content"]
-    assert prompts.SUMMARY_BLOCK_OPEN in message["content"]
-
-
-# ---------------------------------------------------------------- 响应解析
-
-
-def test_parse_summary_with_tags():
-    text = "<summary>## 结论\n压缩摘要</summary>"
-    assert parse_summary(text) == "## 结论\n压缩摘要"
-
-
-def test_parse_summary_strips_legacy_memories_block():
-    """旧版摘要可能夹带 <memories> 抽取块：会话历史里的旧摘要仍要能读。"""
-    text = (
-        "<summary>旧摘要正文</summary>\n"
-        '<memories>[{"type": "user", "name": "user-1", "description": "d", "content": "c"}]</memories>'
-    )
-    assert parse_summary(text) == "旧摘要正文"
-    assert parse_summary('<summary>s</summary><memories>乱码</memories>') == "s"
-
-
-def test_parse_summary_without_tags_falls_back():
-    assert parse_summary("模型没按格式，直接输出了摘要。") == "模型没按格式，直接输出了摘要。"
-
-
-def test_parse_summary_empty():
-    assert parse_summary("") == ""
-
-
-def test_strip_analysis():
-    assert prompts.strip_analysis("<analysis>草稿</analysis>\n<summary>s</summary>") == "\n<summary>s</summary>"
-    assert prompts.strip_analysis("前文<ANALYSIS>没闭合的草稿") == "前文"
-    assert prompts.strip_analysis("没有草稿") == "没有草稿"
-    # 忘了闭合：只删到正式输出开始的地方
-    assert prompts.strip_analysis("<analysis>草稿\n<summary>s</summary>") == "<summary>s</summary>"
-
-
-def test_parse_summary_with_unclosed_analysis():
-    assert parse_summary('<analysis>草稿没闭合\n<summary>真的</summary>\n') == "真的"
-
-
-def test_parse_summary_ignores_analysis_draft():
-    text = "<analysis>里面提到 <summary>假的</summary></analysis><summary>真的</summary>"
-    assert parse_summary(text) == "真的"
-
-
 # ---------------------------------------------------------------- 其他
-
-
-def test_injected_messages_marked_no_save():
-    # AstrBot 会把发送的消息列表回存为会话历史，注入块必须声明不入史
-    assert prompts.build_index_message("x").get("_no_save") is True
-    assert prompts.build_summary_message("s").get("_no_save") is True
-
-
-def test_is_index_block():
-    block = build_index_block("- [a](a.md) — x", "")
-    assert prompts.is_index_block(prompts.build_index_message(block))
-    # 旧版本固化进历史的副本没有 _no_save 键，同样要认出来
-    assert prompts.is_index_block({"role": "user", "content": block})
-
-
-def test_old_summary_block_in_history_is_not_an_index_block():
-    """会话历史里的旧摘要块（含更早版本写入的副本）不能被当成索引块过滤掉。"""
-    message = {
-        "role": "user",
-        "content": prompts.SUMMARY_BLOCK_OPEN + "\n旧摘要\n" + prompts.SUMMARY_BLOCK_CLOSE,
-    }
-    assert not prompts.is_index_block(message)
-
-
-def test_is_index_block_rejects_non_index():
-    assert not prompts.is_index_block(build_summary_message("s"))
-    assert not prompts.is_index_block({"role": "user", "content": "普通消息"})
-    assert not prompts.is_index_block(
-        {"role": "assistant", "content": prompts.INDEX_BLOCK_OPEN + "\nx"}
-    )
-    assert not prompts.is_index_block(
-        {"role": "user", "content": "转述 " + prompts.INDEX_BLOCK_OPEN}
-    )
-    assert not prompts.is_index_block({"role": "user", "content": None})
-    assert not prompts.is_index_block({"role": "user"})
 
 
 def test_data_notice_is_public():

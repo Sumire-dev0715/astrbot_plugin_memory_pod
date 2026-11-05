@@ -2,7 +2,7 @@
   "metadata": {
     "display_name": "鲸群记忆",
     "short_desc": "Helps your bot remember people and things, so long chats don't make it forget.",
-    "desc": "Gives your chatbot a better memory using indexed files, no embedding model needed. Also includes context compression. Please read the first part of the README before use!"
+    "desc": "Gives your chatbot a better memory using indexed files, no embedding model needed. Also includes automatic history, trash, journal logs and shared people memory. Please read the first part of the README before use!"
   },
   "config": {
     "enable_memory": {
@@ -13,50 +13,17 @@
       "description": "Enable global memory (the bot's own memory, shared by all chats)",
       "hint": "Global memory holds the bot's own rules and preferences, and anything written there affects every group and private chat. Off by default: the bot only reads and writes the current chat's memory, so no chat can change how it behaves in other chats. Think before turning it on: a conversation in any chat could lead the bot to write global memory and change its behaviour everywhere. When turned off, existing global memory files stay on disk; the bot just stops reading and writing them."
     },
-    "recall_mode": {
-      "description": "How relevant memories are recalled",
-      "hint": "Before each reply, the plugin picks a few memories related to the new message and attaches their full text just before it, so the model can use them without looking them up. \"Keyword match\" needs no extra model call and costs nothing. \"Model picks\" asks the summary model to choose from the memory list: more accurate, but one extra call per turn and slightly slower replies; if it fails it falls back to keyword match. Memories about the sender and about anyone @-mentioned or replied to always come first.",
-      "labels": [
-        "Keyword match",
-        "Model picks",
-        "Off"
-      ]
-    },
     "recall_max_files": {
       "description": "Max memories recalled per turn",
       "hint": "The most memory files attached per turn. Default 5. Each file is capped at 3,000 characters and all of them together at 9,000; anything longer is cut. 0 turns recall off."
-    },
-    "enable_compression": {
-      "description": "Enable context compression",
-      "hint": "When the context grows past the threshold, or reaches AstrBot's turn limit minus 2, older turns are summarized automatically. The platform's chat history is always kept in full; compression only changes what is sent to the model. When off, this plugin does not compress at all and leaves it to AstrBot's built-in compression."
-    },
-    "max_context_tokens": {
-      "description": "Model context window (tokens)",
-      "hint": "With 0 the plugin follows AstrBot: it takes the window in AstrBot's order (provider setting → built-in model table → AstrBot's fallback window). A value above 10,000,000 is treated as an untrustworthy fallback and the plugin guesses from the model name instead; if that also fails, compression is turned off and a note is written to the log. Enter a positive number to override."
     },
     "recall_full_files": {
       "description": "Recalled files attached in full per turn",
       "hint": "Each turn, the most relevant few non-identity recalled files are attached in full; the rest are collapsed into a single pointer line to read with memory_read when needed. Identity files (the sender, people mentioned with @, and so on) are always attached in full, do not use these slots, and still count against the per-file 3,000-character and 9,000-character total budgets. Set it to at least \"Max memories recalled per turn\" to attach every recalled file in full, matching the old behavior. Default 2."
     },
-    "compress_threshold": {
-      "description": "Compression threshold (share of the window)",
-      "hint": "Summarizing starts when the estimated context goes over window × threshold. Must be below 0.82 (the threshold of AstrBot's built-in compressor), or the built-in compressor will act first; invalid values are clamped. Default 0.70."
-    },
-    "compress_buffer": {
-      "description": "Compression buffer (share of the window)",
-      "hint": "After compressing, the target size is threshold − buffer, leaving room so the context does not hit the threshold again right away. Default 0.165, roughly a sixth of the window."
-    },
-    "keep_recent_turns": {
-      "description": "Recent turns kept in full",
-      "hint": "When summarizing, the most recent N turns are kept word for word and left out of the summary (at least 1). Default 3."
-    },
-    "summary_provider_id": {
-      "description": "Summary model provider",
-      "hint": "The provider used for compression summaries and \"Model picks\" recall. A cheap, fast model is a good choice. Leave empty to use the current chat's provider. If the chosen provider fails after all retries, the current chat's provider is used instead. Tidying memories uses the memory tidying provider below instead."
-    },
     "memory_provider_id": {
       "description": "Memory writing model provider",
-      "hint": "The provider used by background memory writing, \"Tidy memories\"/\"Tidy all memories\" on the memory page, and periodic tidying. Writing memories needs to read the conversation and existing memories and propose structured edits, which asks more of the model than a summary does, so you can pick a stronger model here. Leave empty to use the summary provider; if both are empty, the default chat provider is used. If the chosen provider fails after all retries, the summary provider and then the default chat provider are tried in turn."
+      "hint": "The provider used by background memory writing, \"Tidy memories\"/\"Tidy all memories\" on the memory page, and periodic tidying. Writing memories needs to read the conversation and existing memories and propose structured edits, so you can pick a stronger model here. Leave empty to use the default chat provider. If the chosen provider fails after all retries, the default chat provider is tried."
     },
     "auto_consolidate": {
       "description": "Tidy memories periodically",
@@ -70,22 +37,6 @@
     "auto_consolidate_hours": {
       "description": "Minimum hours between periodic tidies",
       "hint": "The same memory scope is tidied periodically at most once in this many hours. Only applies while \"Tidy memories periodically\" is on. Default 24, range 1–720."
-    },
-    "summary_retry_count": {
-      "description": "Summary retries",
-      "hint": "How many times to try the summary provider before giving up. Default 3. If every attempt fails, the plugin waits longer before each new try (from 5 minutes up to 1 hour) and trims the context in the meantime, without losing any history."
-    },
-    "summary_timeout": {
-      "description": "Summary timeout (seconds)",
-      "hint": "Timeout for a single summary call. Default 120 seconds."
-    },
-    "summary_prompt_template": {
-      "description": "Custom summary prompt template",
-      "hint": "Leave empty to use the built-in summary template. Placeholders: {previous_summary} for the existing summary, {transcript} for the conversation to compress, {now} for the current time and {max_chars} for the summary length limit. A broken template falls back to the built-in one."
-    },
-    "summary_max_chars": {
-      "description": "Summary length limit (characters)",
-      "hint": "Asks the summary model to keep the rolling summary within this many characters; outdated and resolved items are dropped on each roll so the summary does not keep growing. The summary is sent with every request, so a larger limit means more fixed cost per turn. Default 1500."
     },
     "auto_extract_interval": {
       "description": "Background memory writing interval (turns)",
@@ -111,19 +62,15 @@
       "description": "Forget after this many unused days",
       "hint": "A memory is moved to Forgotten after it has not been recalled or read for this many days (never-used memories count from their last edit). Only applies while \"Enable memory forgetting\" is on. Default 90."
     },
-    "tool_result_idle_minutes": {
-      "description": "Clear old tool results after idle (minutes)",
-      "hint": "After a chat has been idle this long, the provider's prompt cache has expired and the whole context will be billed again anyway, so long tool results in older turns are replaced with a short placeholder to save tokens. The most recent turns (same as \"Recent turns kept in full\") are not affected. The placeholder is saved into the bot's own conversation history along with the rest of the turn (your messages in the chat app are not affected). Default 60; 0 turns it off."
-    },
-    "loop_guard": {
-      "description": "Keep long tool loops from overflowing the context",
-      "hint": "When the model calls many tools in a single reply (searching, reading files, and so on), the results pile up in the context one by one, and compressing at the start of the message cannot stop it from outgrowing the window midway. When on, after each tool returns the plugin estimates how large the next request will be, and if it is about to cross the compression threshold, older tool results are replaced with a short placeholder so the reply can finish. The two most recent rounds are left alone where possible, and tool calls stay paired with their results. The placeholder is saved into the bot's own conversation history (your messages in the chat app are not affected), and the provider's prompt cache is invalidated once at that step. It only applies when context compression is on and the window size is known. Default on."
+    "shared_people_bots": {
+      "description": "Bots sharing the people memory space",
+      "hint": "Bots listed here share one people directory (people/_shared/). Each item is a platform_id, or platform_id=edit|append|read; permission defaults to append. edit can read, change and delete; append can only create files or append content; read can only read, and writes are refused with a suggestion to use session. Members must belong to the same IM platform (for example all QQ); mismatched members are disabled with a warning in the log. Empty disables sharing: each bot keeps its own people directory, exactly as before. Takes effect on the next request or plugin reload."
     }
   },
   "pages": {
     "memory": {
       "title": "Memory",
-      "description": "View and edit each chat's memories and compression state; set up periodic tidying; back up and move memories",
+      "description": "View and edit each chat's memories; inspect read-only context stats; set up periodic tidying; back up and move memories",
       "subtitle": "See and edit what the bot remembers",
       "refresh": "Refresh",
       "filterPlaceholder": "Search by name, ID or note",
@@ -178,7 +125,6 @@
       "globalOffNotice": "Global memory is off: the bot does not read or write anything here right now. To use it, turn on \"Enable global memory\" in the plugin settings.",
       "tabMemories": "Memories",
       "tabIndex": "Index",
-      "tabCompression": "Context compression",
       "searchPlaceholder": "Search memory text",
       "newMemory": "New memory",
       "typeAll": "All",
@@ -215,7 +161,7 @@
       "linksLabel": "Links to",
       "openLink": "Open this memory",
       "linkMissing": "This memory does not exist",
-      "newHint": "A new memory shows up in the index from the next conversation or the next compression",
+      "newHint": "A new memory shows up in the index from the next conversation or the next snapshot refresh",
       "savedAt": "Last written: {time}",
       "stampLine": "Created {created} · Updated {updated}",
       "sourceLine": "Source ID {ids}",
@@ -242,23 +188,13 @@
       "indexDangling": "{n} index lines point to files that no longer exist:",
       "indexHealthy": "The index matches the memory files.",
       "indexEditorHint": "This index is what the model receives at the start of a conversation. The plugin keeps each file's line up to date when memories are saved; here you can reorder lines or add section headings.",
-      "watermark": "Watermark",
-      "watermarkSub": "Messages before this are replaced by the summary",
-      "summaryChars": "Summary length",
-      "summaryCharsSub": "Last compressed {time}",
       "chars": "{n} chars",
-      "lastEstimate": "Last estimate",
-      "ratioSub": "Calibration ratio {ratio}",
-      "lastActual": "Provider-reported usage",
-      "lastActualSub": "From the last usage report",
-      "cacheHit": "Prompt cache hits",
+      "lastEstimate": "Last estimated request",
+      "lastActual": "Provider-reported input",
+      "lastActualSub": "Latest usage report",
+      "cacheHit": "Prompt cache hit",
       "cacheHitSub": "Last request",
       "notReported": "Not reported",
-      "chain": "Summary model",
-      "chainOk": "Working",
-      "chainOkSub": "No recent failures",
-      "chainCooling": "Backing off",
-      "chainCoolingSub": "{left} left, {n} failures in a row",
       "pending": "Background memory writing",
       "pendingNone": "Nothing pending",
       "pendingRounds": "{n} turns pending",
@@ -268,19 +204,13 @@
       "fileDangling": "Dangling link",
       "lastRequest": "Last request",
       "tokens": "{n} tokens",
-      "partsTitle": "What the context is made of (last request, estimated)",
+      "partsTitle": "Context composition (last request, estimated)",
       "noEstimate": "No requests recorded yet",
-      "part_overhead": "Fixed overhead",
-      "part_tools": "Tool definitions",
-      "part_index": "Memory index",
-      "part_summary": "Summary",
+      "part_tools": "Tool schemas",
       "part_recall": "Recalled memories",
-      "part_history": "Recent messages",
-      "summaryTitle": "Current summary",
-      "noSummary": "This chat has not been compressed yet.",
-      "resetCompression": "Reset compression",
-      "resetMessage": "This clears the summary and watermark for this chat. Older messages that compression already removed will not come back; once the threshold is crossed again, a new summary is made from the current history.",
-      "reset": "Reset",
+      "part_history": "History",
+      "summaryTitle": "Summary after AstrBot compaction",
+      "noSummary": "AstrBot has not compacted this conversation yet.",
       "liveTag": "Live",
       "liveHint": "The plugin's current in-memory state",
       "diskTag": "Saved",
@@ -343,7 +273,7 @@
       "remarkTitle": "Chat note",
       "remarkHint": "The note is only shown on this page, to help you recognise the chat. Leave it empty to show the group or user name.",
       "purgeTitle": "Clear chat data",
-      "purgeMessage": "\"Memories only\" moves this chat's memory folder into the memories/.trash-scopes archive (recoverable by hand during the trash retention period). \"Everything\" also deletes the compression state and the chat's registration right away. Chat history on the platform is not affected.",
+      "purgeMessage": "\"Memories only\" moves this chat's memory folder into the memories/.trash-scopes archive (recoverable by hand during the trash retention period). \"Everything\" also deletes the context stats and the chat's registration right away. Chat history on the platform is not affected.",
       "purgeMemories": "Memories only",
       "purgeAll": "Everything",
       "consolidateTitle": "Tidy up memories",
@@ -486,9 +416,13 @@
       "targetPlatform": "Platform ID",
       "filesLabel": "Memories to move",
       "selectedFiles": "{n} / {total} selected",
-      "compressionOffNotice": "Context compression is off: this plugin does not compress and leaves it to AstrBot's built-in compression.",
-      "turnLimitNotice": "AstrBot's turn limit is {limit}, not greater than this plugin's kept turns + 2 ({keep}): the plugin cannot compress before AstrBot truncates, so old turns will be dropped by AstrBot. Raise the turn limit in AstrBot or lower \"Recent turns kept in full\".",
-      "userIdentifierNotice": "AstrBot's user identification is on: this plugin also labels the sender, so the model will see the label twice. You can turn off AstrBot's user identification and let this plugin handle it."
+      "userIdentifierNotice": "AstrBot's user identification is on: this plugin also labels the sender, so the model will see the label twice. You can turn off AstrBot's user identification and let this plugin handle it.",
+      "tabContext": "Context",
+      "contextReadonlyNotice": "This panel is read-only. Context truncation and compaction are handled by AstrBot’s own context settings; this plugin no longer changes the conversation history.",
+      "part_system": "System prompt",
+      "part_prompt": "Current input",
+      "systemPromptSub": "Plugin opening block takes {n} tokens",
+      "contextWindow": "Context window"
     }
   }
 }

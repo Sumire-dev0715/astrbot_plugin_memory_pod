@@ -32,7 +32,7 @@ def _ensure_astrbot_stubs():
         sys.modules["astrbot.api"] = api
     astrbot.api = api
     if not hasattr(api, "logger"):
-        logger = logging.getLogger("memory_beyond_sharing_test")
+        logger = logging.getLogger("memory_pod_sharing_test")
         logger.addHandler(logging.NullHandler())
         logger.setLevel(logging.DEBUG)
         api.logger = logger
@@ -58,12 +58,6 @@ def _ensure_astrbot_stubs():
             return lambda func: func
 
         def on_llm_response(self, *args, **kwargs):
-            return lambda func: func
-
-        def on_agent_begin(self, *args, **kwargs):
-            return lambda func: func
-
-        def on_llm_tool_respond(self, *args, **kwargs):
             return lambda func: func
 
         def permission_type(self, *args, **kwargs):
@@ -113,7 +107,7 @@ def _ensure_astrbot_stubs():
         # 只是为了让 web_api 能导入；本文件不调用管理页接口。测试结束后
         # 由 _release_web_stub 撤掉，让 test_web_api 自己建请求替身。
         web_mod.request = object()
-        web_mod._memory_beyond_placeholder = True
+        web_mod._memory_pod_placeholder = True
         sys.modules["astrbot.api.web"] = web_mod
     api.web = web_mod
 
@@ -121,7 +115,7 @@ def _ensure_astrbot_stubs():
 def _release_web_stub():
     """撤掉只为导入 main 而建的 astrbot.api.web 与 web_api 模块。"""
     web_mod = sys.modules.get("astrbot.api.web")
-    if web_mod is None or not getattr(web_mod, "_memory_beyond_placeholder", False):
+    if web_mod is None or not getattr(web_mod, "_memory_pod_placeholder", False):
         return
     sys.modules.pop("astrbot.api.web", None)
     api = sys.modules.get("astrbot.api")
@@ -143,7 +137,7 @@ def _load_main():
 
 
 main = _load_main()
-pkg_compress = importlib.import_module(f"{PACKAGE}.core.compress")
+pkg_context_stats = importlib.import_module(f"{PACKAGE}.core.context_stats")
 pkg_history = importlib.import_module(f"{PACKAGE}.core.history")
 pkg_index_view = importlib.import_module(f"{PACKAGE}.core.index_view")
 pkg_injection = importlib.import_module(f"{PACKAGE}.core.injection")
@@ -241,12 +235,9 @@ def make_plugin(tmp_path, members):
         "enable_memory": True,
         "enable_global_memory": False,
         "shared_people_bots": members,
-        "recall_mode": "keyword",
         "recall_max_files": 5,
         "auto_extract_interval": 0,
         "extract_idle_minutes": 10,
-        "keep_recent_turns": 1,
-        "summary_max_chars": 500,
     }
     plugin.data_dir = tmp_path
     plugin._store = pkg_memstore.MemoryStore(tmp_path / "memories")
@@ -345,7 +336,7 @@ def test_private_profile_pinned_in_opening_and_excluded_from_recall(tmp_path):
         )
     )
 
-    rt = main.RuntimeSession(state=pkg_compress.SessionState())
+    rt = main.RuntimeSession()
     opening = run(plugin._index_block(rt, event, record_usage=True))
     assert opening is not None
     assert pkg_injection.PROFILE_HEADING in opening
@@ -364,7 +355,7 @@ def test_private_profile_pinned_in_opening_and_excluded_from_recall(tmp_path):
     # 默认配置下召回块只带相关会话记忆，发送者档案不再出现
     message = run(plugin._recall_message(event, umo, "开黑", rt))
     assert message is not None
-    content = message["content"]
+    content = message
     assert "weekend-game.md" in content
     assert "### session/user-123.md" not in content
     assert "### people/user-123.md" not in content
@@ -378,7 +369,7 @@ def test_deleting_pinned_profile_invalidates_opening_snapshot(tmp_path):
     event = FakeEvent("Bot-A", sender_id="123")
     people = plugin._store.people_scope("Bot-A")
     run(people.write("user-123.md", person_file(body="跨群身份事实"), actor="system"))
-    rt = main.RuntimeSession(state=pkg_compress.SessionState())
+    rt = main.RuntimeSession()
     plugin._sessions[event.unified_msg_origin] = rt
     opening = run(plugin._index_block(rt, event, record_usage=True))
     assert "跨群身份事实" in opening
@@ -405,7 +396,7 @@ def test_forgetting_pinned_profile_invalidates_opening_snapshot(tmp_path):
     old = time.time() - 10 * 86400
     os.utime(path, (old, old))
 
-    rt = main.RuntimeSession(state=pkg_compress.SessionState())
+    rt = main.RuntimeSession()
     plugin._sessions[event.unified_msg_origin] = rt
     opening = run(plugin._index_block(rt, event, record_usage=True))
     assert "跨群身份事实" in opening
@@ -426,7 +417,7 @@ def test_people_edit_invalidates_pinned_snapshot(tmp_path):
     event = FakeEvent("Bot-A", sender_id="123")
     people = plugin._store.people_scope("Bot-A")
     run(people.write("user-123.md", person_file(body="旧身份"), actor="system"))
-    rt = main.RuntimeSession(state=pkg_compress.SessionState())
+    rt = main.RuntimeSession()
     plugin._sessions[event.unified_msg_origin] = rt
     assert "旧身份" in run(plugin._index_block(rt, event))
 
@@ -443,7 +434,7 @@ def test_sharing_membership_change_invalidates_pinned_snapshot(tmp_path):
     event = FakeEvent("Bot-A", sender_id="123")
     people = plugin._store.people_scope("Bot-A")
     run(people.write("user-123.md", person_file(body="共享身份事实"), actor="system"))
-    rt = main.RuntimeSession(state=pkg_compress.SessionState())
+    rt = main.RuntimeSession()
     plugin._sessions[event.unified_msg_origin] = rt
     assert "共享身份事实" in run(plugin._index_block(rt, event))
 
@@ -456,7 +447,7 @@ def test_sharing_membership_change_invalidates_pinned_snapshot(tmp_path):
 
 def test_recall_off_does_not_restore_or_attach_updated_profile(tmp_path):
     plugin = make_plugin(tmp_path, [])
-    plugin.config["recall_mode"] = "off"
+    plugin.config["recall_max_files"] = 0
     event = FakeEvent("Bot-A", sender_id="123")
     umo = event.unified_msg_origin
     session = plugin._store.session_scope(umo)
@@ -464,7 +455,7 @@ def test_recall_off_does_not_restore_or_attach_updated_profile(tmp_path):
     run(people.write("user-123.md", person_file(body="旧档案"), actor="system"))
     run(session.write("user-123.md", person_file(body="身份"), actor="system"))
 
-    rt = main.RuntimeSession(state=pkg_compress.SessionState())
+    rt = main.RuntimeSession()
     assert "旧档案" in run(plugin._index_block(rt, event))
     run(people.write("user-123.md", person_file(body="新档案"), actor="system"))
     assert run(plugin._recall_message(event, umo, "你好", rt)) is None
@@ -485,7 +476,7 @@ def test_group_chat_never_pins_profile(tmp_path):
     run(people.write("user-123.md", person_file(body="跨群身份事实"), actor="system"))
     run(session.write("weekend-game.md", note_file("weekend-game", "开黑活动", "周六")))
 
-    rt = main.RuntimeSession(state=pkg_compress.SessionState())
+    rt = main.RuntimeSession()
     opening = run(plugin._index_block(rt, event))
     # 群聊有索引块，但绝不含发送者档案区或钉住的 people 文件
     assert opening is not None
@@ -496,8 +487,8 @@ def test_group_chat_never_pins_profile(tmp_path):
     # 群聊行为不变：人物档案仍作为身份必选进入每轮召回
     message = run(plugin._recall_message(event, event.unified_msg_origin, "你好", rt))
     assert message is not None
-    assert "跨群身份事实" in message["content"]
-    assert pkg_injection.PROFILE_HEADING not in message["content"]
+    assert "跨群身份事实" in message
+    assert pkg_injection.PROFILE_HEADING not in message
 
 
 def test_pin_snapshot_is_stable_and_updated_profile_wins(tmp_path):
@@ -507,7 +498,7 @@ def test_pin_snapshot_is_stable_and_updated_profile_wins(tmp_path):
     people = plugin._store.people_scope("Bot-A")
     run(people.write("user-123.md", person_file(body="旧版本档案"), actor="system"))
 
-    rt = main.RuntimeSession(state=pkg_compress.SessionState())
+    rt = main.RuntimeSession()
     first = run(plugin._index_block(rt, event))
     # 记忆没变时逐轮逐字不变（前缀缓存）
     assert run(plugin._index_block(rt, event)) == first
@@ -518,8 +509,8 @@ def test_pin_snapshot_is_stable_and_updated_profile_wins(tmp_path):
     assert run(plugin._index_block(rt, event)) == first
     message = run(plugin._recall_message(event, umo, "你好", rt))
     assert message is not None
-    assert "人物档案已更新，以这里为准" in message["content"]
-    assert "新版本档案" in message["content"]
+    assert "人物档案已更新，以这里为准" in message
+    assert "新版本档案" in message
 
     # 索引刷新（压缩/切换对话/管理页改动后）改为钉住新版本
     rt.clear_index()
@@ -544,7 +535,7 @@ def test_index_snapshot_does_not_follow_usage_changes(tmp_path, monkeypatch):
     # a 最久没用：第一次生成快照时丢 a
     session.note_used(["a.md"], 100.0)
 
-    rt = main.RuntimeSession(state=pkg_compress.SessionState())
+    rt = main.RuntimeSession()
     first = run(plugin._index_block(rt, event))
     assert "a.md" not in first
     assert "还有 1 条未加载，可用 memory_search 找到" in first
@@ -570,12 +561,12 @@ def test_updated_profile_does_not_use_recall_full_quota(tmp_path):
     run(session.write("a.md", note_file("a", "开黑活动安排", "周六晚上")))
     run(session.write("b.md", note_file("b", "开黑活动记录", "周日下午")))
 
-    rt = main.RuntimeSession(state=pkg_compress.SessionState())
+    rt = main.RuntimeSession()
     run(plugin._index_block(rt, event))
     run(people.write("user-123.md", person_file(body="新档案"), actor="system"))
 
     message = run(plugin._recall_message(event, umo, "开黑", rt))
-    content = message["content"]
+    content = message
     assert "人物档案已更新，以这里为准" in content
     # 更新档案不占名额：仍有一个会话文件带全文，另一个进指针
     assert "### session/a.md" in content or "### session/b.md" in content
@@ -610,9 +601,9 @@ def test_full_quota_at_limit_matches_keyword_selection(tmp_path):
         candidates, "开黑", ["user-123.md"], 5
     )
     assert len(expected) >= 3
-    rt = main.RuntimeSession(state=pkg_compress.SessionState())
+    rt = main.RuntimeSession()
     message = run(plugin._recall_message(event, umo, "开黑", rt))
-    content = message["content"]
+    content = message
     positions = [content.index(f"### {cand.ref}（") for cand in expected]
     assert positions == sorted(positions)
     # 全部带全文，没有指针行
@@ -644,47 +635,14 @@ def test_recall_message_delegates_to_core_pipeline(tmp_path, monkeypatch):
 
     monkeypatch.setattr(pkg_recall, "assemble_recall", spy)
     message = run(plugin._recall_message(event, umo, "这周六还开黑吗"))
-    assert message is not None and "weekend-game.md" in message["content"]
+    assert message is not None and "weekend-game.md" in message
     assert calls["stores"] == ["people", "session"]
     assert "session/weekend-game.md" in calls["refs"]
     assert calls["kwargs"]["query"] == "这周六还开黑吗"
     assert calls["kwargs"]["forced_files"] == ["user-123.md"]
     assert calls["kwargs"]["limit"] == 5
-    assert calls["kwargs"]["model_choice"] is None
     assert calls["kwargs"]["shared_people"] is False
     assert calls["kwargs"]["data_notice"] == pkg_prompts.DATA_NOTICE
-
-
-def test_recall_message_passes_model_choice_to_core_pipeline(tmp_path, monkeypatch):
-    plugin = make_plugin(tmp_path, [])
-    plugin.config["recall_mode"] = "llm"
-    event = FakeEvent("Bot-A", sender_id="123")
-    umo = event.unified_msg_origin
-    session = plugin._store.session_scope(umo)
-    run(session.write("a.md", note_file("a", "开黑活动", "周六晚上")))
-    run(session.write("b.md", note_file("b", "点歌清单", "周杰伦")))
-
-    seen = {}
-
-    async def fake_select(umo_arg, candidates, query, limit):
-        seen["model_candidates"] = [(c.scope, c.header.file) for c in candidates]
-        return [c for c in candidates if c.header.file == "b.md"]
-
-    plugin._select_by_model = fake_select
-    real = pkg_recall.assemble_recall
-
-    async def spy(stores, candidates, **kwargs):
-        seen["model_choice"] = kwargs["model_choice"]
-        return await real(stores, candidates, **kwargs)
-
-    monkeypatch.setattr(pkg_recall, "assemble_recall", spy)
-    message = run(plugin._recall_message(event, umo, "周六开黑"))
-    # 人物文件只走身份必选，不交给模型挑
-    assert all(scope != "people" for scope, _ in seen["model_candidates"])
-    assert [c.ref for c in seen["model_choice"]] == ["session/b.md"]
-    assert message is not None
-    assert "session/b.md" in message["content"]
-    assert "session/a.md" not in message["content"]
 
 
 # ---------------------------------------------------------------- 提取门控
@@ -803,16 +761,14 @@ def _status_text(plugin, event):
         return "\n".join(chunks)
 
     plugin._runtime = lambda umo: _async_value(
-        types.SimpleNamespace(state=pkg_compress.SessionState())
+        types.SimpleNamespace(stats=pkg_context_stats.ContextStats())
     )
     plugin._resolve_window_for = lambda umo: _async_value((128000, "测试窗口"))
     plugin._estimate_live = lambda event, rt: _async_value((0, {}))
-    plugin._loop_guard_label = lambda rt: "关闭"
     plugin._recall_label = lambda: "关闭"
     plugin._extract_label = lambda state: "关闭"
     plugin._forget_label = lambda umo: "关闭"
     plugin._tidy_label = lambda umo: "关闭"
-    plugin._warned_threshold = False
     return run(collect())
 
 
@@ -874,8 +830,8 @@ def test_memory_search_tool_mode_ranking_and_format(tmp_path):
     )
 
 
-def test_memory_search_tool_not_crowded_out_by_daily_files(tmp_path):
-    """回归：按文件名取前 8 条时，daily-* 会把 important.md 挤出结果。"""
+def test_memory_search_tool_not_crowded_out_by_journal_files(tmp_path):
+    """回归：按文件名取前 8 条时，日志会把 important.md 挤出结果。"""
     plugin = make_plugin(tmp_path, [])
     event = FakeEvent("Bot-A")
     store = plugin._session_scope(event)
@@ -883,14 +839,14 @@ def test_memory_search_tool_not_crowded_out_by_daily_files(tmp_path):
     for day in range(1, 10):
         run(
             store.write(
-                f"daily-2026-01-{day:02d}.md",
-                person_file(f"daily-2026-01-{day:02d}", "项目 日志"),
+                f"journal-2026-01-{day:02d}.md",
+                person_file(f"journal-2026-01-{day:02d}", "项目 日志"),
             )
         )
     result = run(plugin.memory_search(event, "项目", scope="session"))
     assert "important.md" in result
     # 非日志排在日志前面
-    assert result.index("important.md") < result.index("daily-2026-01-01.md")
+    assert result.index("important.md") < result.index("journal-2026-01-01.md")
 
 
 def test_memory_search_tool_forgotten_results_use_same_ranking_and_cap(tmp_path):
@@ -902,8 +858,8 @@ def test_memory_search_tool_forgotten_results_use_same_ranking_and_cap(tmp_path)
     for day in range(1, 10):
         run(
             store.write(
-                f"daily-2026-01-{day:02d}.md",
-                person_file(f"daily-2026-01-{day:02d}", "项目 日志"),
+                f"journal-2026-01-{day:02d}.md",
+                person_file(f"journal-2026-01-{day:02d}", "项目 日志"),
             )
         )
     for name in store.list_files():
@@ -927,8 +883,8 @@ def test_mb_status_lists_long_session_files(tmp_path):
     assert run(store.write("dense.md", person_file("dense", "2026-01-01 " * 16))).ok
     assert run(
         store.write(
-            "daily-2026-11-03.md",
-            person_file("daily-2026-11-03", "2026-01-01 " * 20),
+            "journal-2026-11-03.md",
+            person_file("journal-2026-11-03", "2026-01-01 " * 20),
         )
     ).ok
     text = _status_text(plugin, event)
@@ -939,7 +895,7 @@ def test_mb_status_lists_long_session_files(tmp_path):
     assert "dense.md" in line and "16 个日期" in line
     assert "short.md" not in line
     # 日志只看体积：日期虽多但文件不大，不列入长文件
-    assert "daily-2026-11-03.md" not in line
+    assert "journal-2026-11-03.md" not in line
 
 
 def test_mb_status_survives_non_utf8_session_file(tmp_path):
@@ -971,7 +927,7 @@ def test_read_search_and_pin_follow_event_platform_not_umo_prefix(tmp_path):
     )
     result = run(plugin.memory_search(event, "私密", scope="people"))
     assert "user-123" not in result and "正文" not in result
-    rt = main.RuntimeSession(state=pkg_compress.SessionState())
+    rt = main.RuntimeSession()
     opening = run(plugin._index_block(rt, event))
     assert opening is None or "共享私密正文" not in opening
 
@@ -1026,8 +982,8 @@ def test_other_private_session_does_not_get_pinned_profile(tmp_path):
     run(session_b.write("user-123.md", person_file(body="会话二的私密档案")))
     run(people.write("user-123.md", person_file(body="跨群身份事实")))
 
-    rt_a = main.RuntimeSession(state=pkg_compress.SessionState())
-    rt_b = main.RuntimeSession(state=pkg_compress.SessionState())
+    rt_a = main.RuntimeSession()
+    rt_b = main.RuntimeSession()
     opening_a = run(plugin._index_block(rt_a, event_a))
     opening_b = run(plugin._index_block(rt_b, event_b))
     assert "会话一的私密档案" in opening_a

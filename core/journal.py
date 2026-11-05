@@ -7,12 +7,9 @@
 
 判定规则（任一成立即为日志）：
 - frontmatter 的 type 是 journal；
-- 文件名以 daily-<YYYY-MM-DD> 或 journal-<YYYY-MM-DD> 开头。
+- 文件名以 journal-<YYYY-MM-DD> 开头。
 
-文件名规则是给上游老数据留的：v1.4.1 的 daily-*.md 写的是 type: project，
-不改用户的文件，直接按文件名认成日志。
-
-日志不参与关键词召回、摘要模型挑选、身份必选和写入查重；需要时按日期用
+日志不参与关键词召回、身份必选和写入查重；需要时按日期用
 memory_read 读取，或用 memory_search 搜索。
 """
 
@@ -26,7 +23,7 @@ JOURNAL_TYPE = "journal"
 # 索引里保留最近几篇日志各占一行；其余只进汇总
 RECENT_ENTRIES = 2
 
-JOURNAL_DATE_RE = re.compile(r"^(?:daily|journal)-(\d{4}-\d{2}-\d{2})")
+JOURNAL_DATE_RE = re.compile(r"^journal-(\d{4}-\d{2}-\d{2})")
 _HEADING_DATE_RE = re.compile(r"^##\s+(\d{4}-\d{2}-\d{2})\s*$", re.M)
 _TARGET_RE = re.compile(r"\]\(([^()\s]+\.md)\)")
 _SUMMARY_PREFIX = "- 日志共 "
@@ -92,8 +89,8 @@ def entry_span(name: str, text: str, updated: float) -> tuple[str, str]:
     """一篇日志的日期范围：最早的日期小标题（没有就用文件名日期）到最近更新。
 
     后台整理续写日志时每天会加 `## YYYY-MM-DD`，一篇日志可能跨好几天；
-    索引里的日期范围要能看出它从哪天记到哪天。老文件没有小标题时退回
-    文件名日期与最近修改时间。
+    索引里的日期范围要能看出它从哪天记到哪天。没有小标题时退回文件名
+    日期与最近修改时间。
     """
     dates = heading_dates(text)
     file_date = journal_date(name)
@@ -102,7 +99,7 @@ def entry_span(name: str, text: str, updated: float) -> tuple[str, str]:
         # 有日期小标题：这篇日志跨了好几天，结束日期取最近一次更新
         end = _updated_date(updated) or max(dates)
     else:
-        # 老式 daily-*.md 没有小标题：文件名日期就是它记的那一天
+        # 没有日期小标题：文件名日期就是它记的那一天
         end = file_date or _updated_date(updated)
     if not start:
         start = end
@@ -205,7 +202,7 @@ def split_index(
     """把索引行拆成（非日志行, 日志行）；两边都保持原顺序。
 
     journal_files 是当前在册日志的文件名集合，用来识别以 type: journal
-    标注、但文件名不带日期的日志；文件名符合日期规则的旧行也一并认出来。
+    标注、但文件名不带日期的日志；文件名符合日期规则的也一并认出来。
     """
     names = journal_files or set()
     kept: list[str] = []
@@ -223,8 +220,8 @@ def split_index(
 def fold_index(lines: list[str], entries: list[JournalEntry]) -> list[str]:
     """把索引里的日志行收拢到末尾：非日志行原样保序，日志块重新生成。
 
-    每次索引同步都调用它，因此升级后第一次同步就会把老格式（日志行散落
-    在索引里）改写成折叠格式，重复调用结果不变。
+    每次索引同步都调用它，把散落在索引里的日志行收拢到末尾，重复调用
+    结果不变。
     """
     kept, _ = split_index(lines, {entry.name for entry in entries})
     return kept + build_block(entries)

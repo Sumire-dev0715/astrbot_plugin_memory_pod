@@ -2197,7 +2197,7 @@ class ScopeStore:
 
         只动匹配行与末尾追加，其余行原样保留——用户手工整理过的索引
         （分组标题、排序）不会被破坏。日志不占单独一行，统一折进末尾的
-        日志块；这一步同时把升级前散落在索引里的老日志行改写成新格式。
+        日志块。
         返回注入视图的 (行数, 字节数) 供守门：注入时按紧凑行渲染，体积
         按紧凑后的文本算，避免用磁盘链接格式误报超限。
         """
@@ -2391,10 +2391,9 @@ class ScopeStore:
         使用统计在这里读一次，供超限时的丢行顺序使用；快照由调用方缓存，
         之后的轮次不再重读，记忆不变时注入文本逐字不变。
 
-        渲染前先按当前在册日志折叠一次：升级前散落在索引里的 daily 行
-        即使还没触发写入/删除，第一次注入也会按新格式显示，不会把每篇
-        日志逐条列给模型。真正把文件改写成新格式由 ensure_index_folded()
-        负责，本方法保持只读。
+        渲染前先按当前在册日志折叠一次：索引里散落的日志行不逐条列给
+        模型，日志块要么完整显示、要么在超限时整块让位。本方法保持只读，
+        磁盘上的索引文件由写入/删除/重建操作维护。
         """
         raw = await self.read(INDEX_FILENAME)
         if raw is None:
@@ -2410,43 +2409,6 @@ class ScopeStore:
         folded = "\n".join(lines).strip("\n")
         raw = folded + "\n" if folded else ""
         return _truncate_index(raw, journals, headers, usage)
-
-    async def ensure_index_folded(self) -> bool:
-        """把旧格式索引改写成折叠后的日志块，返回是否真的写了盘。
-
-        升级后第一次注入（或启动时）调用一次即可；写入与索引同步共用同一
-        把锁，并在锁内重读一次，避免把并发写入的记忆行覆盖掉。重复调用
-        结果不变，不会每次请求都写盘。
-        """
-        index_path = self.root / INDEX_FILENAME
-        raw = await self.read(INDEX_FILENAME)
-        if raw is None:
-            return False
-        headers = await asyncio.to_thread(self.headers)
-        entries = self._journal_entries(headers)
-        before = raw.splitlines()
-        folded = journal.fold_index(before, entries)
-        if folded == before:
-            return False
-        text = "\n".join(folded).strip("\n")
-        text = text + "\n" if text else ""
-        async with self._lock:
-            current = await asyncio.to_thread(self._read_if_exists, index_path)
-            if current is None:
-                return False
-            current_lines = current.splitlines()
-            # 锁内重新看一次在册文件：等待锁期间可能有新日志写入，
-            # 用锁外算好的 entries 会把刚同步进来的日志行折叠掉。
-            current_entries = await asyncio.to_thread(
-                self._journal_entries, self.headers()
-            )
-            current_folded = journal.fold_index(current_lines, current_entries)
-            current_text = "\n".join(current_folded).strip("\n")
-            current_text = current_text + "\n" if current_text else ""
-            if current_text == current:
-                return False
-            await asyncio.to_thread(self._write_atomic, index_path, current_text)
-        return True
 
     # ------------------------------------------------------------ 全文搜索
 

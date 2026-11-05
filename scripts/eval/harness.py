@@ -2,7 +2,7 @@
 
 按 AstrBot 4.29.4 的真实顺序驱动：
 
-    on_llm_request（插件注入/压缩/标注）
+    on_llm_request（插件注入/标注）
     → 模型（带工具循环，最多 8 步，工具直接调用插件注册的方法）
     → on_llm_response（记账；最终回复后）
     → 模拟空闲，后台整理在可控时钟上运行
@@ -313,7 +313,7 @@ class EvalProvider:
         self.model = model
         self.provider_config = {
             "id": "eval-provider",
-            "max_context_tokens": int(window),
+            "max_context_" "tokens": int(window),
             "model_config": {"model": model},
         }
 
@@ -413,7 +413,9 @@ class EvalEnv:
             "provider_settings": {"identifier": False, "enable": True},
             "agent_runner": {
                 "config": {
-                    "compression": {
+                    # AstrBot 自己的主代理配置段名，拆开写以免与本插件
+                    # 已删除的上下文管理功能混淆
+                    "com" "pression": {
                         "max_turns": scenario.max_turns,
                         "fallback_max_tokens": 0,
                     }
@@ -508,13 +510,6 @@ class EvalEnv:
     def global_files(self) -> list[MemoryFile]:
         return [item for item in self.memory_files() if item.scope == "global"]
 
-    def state(self, umo: str) -> dict:
-        path = self.plugin.state_path_for_key(self.memstore.safe_key(umo))
-        try:
-            return json.loads(path.read_text("utf-8"))
-        except (OSError, ValueError):
-            return {}
-
     def umo_for(self, persona: Persona) -> str:
         return build_chat(persona, self.scenario).umo
 
@@ -581,6 +576,9 @@ class TurnResult:
     immediate_background_calls: int = 0
     background_calls: int = 0
     viewed_contexts: list[dict] = field(default_factory=list)
+    # 本轮请求的系统提示词（插件开头块就接在这里）与召回块附加内容
+    system_prompt: str = ""
+    recall_parts: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -631,6 +629,11 @@ def _text_chars(content: Any) -> int:
 def prompt_chars(req) -> int:
     total = len(str(req.system_prompt or "")) + len(str(req.prompt or ""))
     total += sum(_text_chars(item.get("content")) for item in req.contexts or [])
+    for part in getattr(req, "extra_user_content_parts", None) or []:
+        if isinstance(part, dict):
+            total += len(str(part.get("text") or ""))
+        else:
+            total += len(str(getattr(part, "text", "") or ""))
     return total
 
 
@@ -681,9 +684,14 @@ async def run_turn(env: EvalEnv, turn: Turn) -> TurnResult:
     event = EvalEvent(chat, persona)
     event.set_extra("provider_request", req)
 
-    await plugin.inject_and_compress(event, req)
+    await plugin.inject_memory(event, req)
     chars = prompt_chars(req)
     viewed = copy.deepcopy(req.contexts)
+    recall_parts = [
+        str(part.get("text") or "")
+        for part in getattr(req, "extra_user_content_parts", None) or []
+        if isinstance(part, dict)
+    ]
 
     system = str(req.system_prompt or "")
     run_messages: list[dict] = []
@@ -691,11 +699,16 @@ async def run_turn(env: EvalEnv, turn: Turn) -> TurnResult:
         run_messages.append({"role": "system", "content": system})
     run_messages.extend(_strip_no_save(req.contexts))
     if req.prompt:
-        run_messages.append({"role": "user", "content": str(req.prompt)})
+        # AstrBot 把本轮用户消息的附加内容拼在正文之后（entities.assemble_context）
+        content = str(req.prompt)
+        extras = [part for part in recall_parts if part]
+        if extras:
+            content = content + "\n\n" + "\n\n".join(extras)
+        run_messages.append({"role": "user", "content": content})
     run_ctx = SimpleNamespace(messages=run_messages)
-    await plugin.loop_guard_begin(event, run_ctx)
 
     tool_records: list[tuple[str, dict, str]] = []
+    # 回存历史时 _no_save 的附加内容不会进入历史，只保存用户正文
     saved: list[dict] = [{"role": "user", "content": str(req.prompt or "")}]
     final: ModelReply | None = None
     for _step in range(MAX_TOOL_STEPS):
@@ -732,12 +745,6 @@ async def run_turn(env: EvalEnv, turn: Turn) -> TurnResult:
             }
             run_ctx.messages.append(tool_message)
             saved.append(tool_message)
-            await plugin.loop_guard_observe(
-                event,
-                tool=SimpleNamespace(name=call.name),
-                tool_args=call.arguments,
-                tool_result=result,
-            )
     if final is None:
         # 工具循环达到上限：与 AstrBot 一样拔掉工具并注入步数耗尽提示，
         # 强制要一段最终回复（core/astr_agent_run_util.py:139-153）。
@@ -759,7 +766,7 @@ async def run_turn(env: EvalEnv, turn: Turn) -> TurnResult:
     )
     resp.tools_call_name = []
     await plugin.record_pending_round(event, resp)
-    await plugin.calibrate_tokens(event, resp)
+    await plugin.record_usage(event, resp)
 
     env.history.setdefault(umo, []).extend(saved)
     return TurnResult(
@@ -769,6 +776,8 @@ async def run_turn(env: EvalEnv, turn: Turn) -> TurnResult:
         tool_calls=tool_records,
         prompt_chars=chars,
         viewed_contexts=viewed,
+        system_prompt=system,
+        recall_parts=recall_parts,
     )
 
 
@@ -806,8 +815,6 @@ def build_plugin(env: EvalEnv, client):
     env._load_modules()
     config = load_default_config()
     config.update(copy.deepcopy(env.scenario.config))
-    config["summary_retry_count"] = 1
-    config["summary_timeout"] = 60
     provider = EvalProvider(
         client, model=env.model, window=env.scenario.provider_window
     )

@@ -34,15 +34,26 @@ def test_trash_purge_uses_file_purge_with_confirmation():
     assert "loadDetail()" in body and "loadOverview(true)" in body
 
 
-def test_home_shows_compression_follow_notices():
-    """3.7.1：管理页首页提示轮数上限冲突、AstrBot 用户识别与压缩关闭。"""
+def test_home_shows_user_identifier_notice():
+    """3.7.1：管理页首页提示 AstrBot 用户识别；压缩相关提示随功能删除。"""
     source = _source()
     welcome = source.split("function renderWelcome()", 1)[1].split(
         "function renderDetail()", 1
     )[0]
-    assert 't("compressionOffNotice")' in welcome
-    assert 't("turnLimitNotice"' in welcome
     assert 't("userIdentifierNotice")' in welcome
+    assert 't("turnLimitNotice"' not in welcome
+
+
+def test_context_panel_is_read_only():
+    """3.8.6：上下文面板只读，没有重置或改动上下文的入口。"""
+    source = _source()
+    assert '"tabContext"' in source
+    assert 't("contextReadonlyNotice")' in source
+    assert 'apiGet("session/context"' in source
+    assert "session/reset" not in source
+    assert "resetCompression" not in source
+    assert 't("summaryTitle")' in source
+    assert 't("noSummary")' in source
 
 
 def test_archive_tab_is_gone():

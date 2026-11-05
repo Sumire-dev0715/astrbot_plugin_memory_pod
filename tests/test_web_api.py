@@ -34,7 +34,7 @@ def _load_web_api():
     if "astrbot.api.web" not in sys.modules:
         astrbot = types.ModuleType("astrbot")
         api = types.ModuleType("astrbot.api")
-        api.logger = logging.getLogger("memory_beyond_test")
+        api.logger = logging.getLogger("memory_pod_test")
         web = types.ModuleType("astrbot.api.web")
         web.request = REQUEST
         astrbot.api = api
@@ -51,7 +51,7 @@ def _load_web_api():
 
 
 web_api = _load_web_api()
-pkg_compress = importlib.import_module(f"{PACKAGE}.core.compress")
+pkg_context_stats = importlib.import_module(f"{PACKAGE}.core.context_stats")
 pkg_memstore = importlib.import_module(f"{PACKAGE}.core.memstore")
 pkg_registry = importlib.import_module(f"{PACKAGE}.core.registry")
 pkg_sharing = importlib.import_module(f"{PACKAGE}.core.sharing")
@@ -76,8 +76,8 @@ class FakeContext:
 
 
 class FakeRuntime:
-    def __init__(self, state):
-        self.state = state
+    def __init__(self, stats=None):
+        self.stats = stats or pkg_context_stats.ContextStats()
 
 
 class FakePlugin:
@@ -93,15 +93,13 @@ class FakePlugin:
             "enable_memory": True,
             "enable_global_memory": False,
         }
-        self.compression = {
-            "enabled": True,
+        self.context_info = {
             "window": 128000,
             "windowNote": "测试窗口",
             "turnLimit": -1,
-            "keepRecentTurns": 3,
-            "turnLimitWarning": False,
             "userIdentifier": False,
         }
+        self.summary = ""
         self.invalidated: list = []
         self.prompts: list = []
         self.summarizer_reply = ""
@@ -115,8 +113,11 @@ class FakePlugin:
     def _global_on(self):
         return self.config["enable_global_memory"]
 
-    async def compression_status(self, umo=None):
-        return dict(self.compression)
+    async def context_status(self, umo=None):
+        return dict(self.context_info)
+
+    async def astrbot_summary(self, umo):
+        return self.summary
 
     def _forgetting_on(self):
         return self.config.get("enable_forgetting", False)
@@ -150,17 +151,20 @@ class FakePlugin:
     def invalidate_for_key(self, key):
         self.invalidated.append(key)
 
-    def state_path_for_key(self, key):
-        return self._state_dir / f"{key}.json"
+    def stats_path_for_key(self, key):
+        return self._state_dir / "context" / f"{key}.json"
 
-    async def load_state_file(self, path):
+    async def load_stats_for_key(self, key):
+        path = self.stats_path_for_key(key)
         if path.is_file():
-            return pkg_compress.SessionState.from_dict(json.loads(path.read_text("utf-8")))
-        return pkg_compress.SessionState()
+            return pkg_context_stats.ContextStats.from_dict(
+                json.loads(path.read_text("utf-8"))
+            )
+        return None
 
-    async def save_state_file(self, path, state):
+    async def save_stats_file(self, path, stats):
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(state.to_dict()), "utf-8")
+        path.write_text(json.dumps(stats.to_dict()), "utf-8")
 
     async def call_consolidator(self, prompt):
         self.prompts.append(prompt)
@@ -526,32 +530,35 @@ def test_index_save_and_rebuild(plugin, dash):
 # ---------------------------------------------------------------- 会话
 
 
-def test_session_state_reads_disk_or_live(plugin, dash):
-    state = pkg_compress.SessionState(cid="c", watermark=12, summary="旧摘要", last_parts={"history": 5})
-    asyncio.run(plugin.save_state_file(plugin.state_path_for_key(KEY), state))
-    data = ok(call(dash, "session/state", {"key": KEY}))
+def test_session_context_reads_disk_or_live(plugin, dash):
+    stats = pkg_context_stats.ContextStats(
+        parts={"history": 5}, estimate=20, actual=18, cache_hit=3, request_at=1_700_000_000.0
+    )
+    asyncio.run(plugin.save_stats_file(plugin.stats_path_for_key(KEY), stats))
+    data = ok(call(dash, "session/context", {"key": KEY}))
     assert data["live"] is False
-    assert data["watermark"] == 12 and data["summary"] == "旧摘要"
-    assert data["lastParts"]["history"] == 5
+    assert data["estimate"] == 20 and data["actual"] == 18
+    assert data["cacheHit"] == 3 and data["parts"]["history"] == 5
     assert data["now"] > 0
+    assert data["hasSummary"] is False and data["summary"] == ""
+    assert data["context"] == plugin.context_info
 
-    plugin._sessions[UMO] = FakeRuntime(pkg_compress.SessionState(cid="c", watermark=30))
-    data = ok(call(dash, "session/state", {"key": KEY}))
-    assert data["live"] is True and data["watermark"] == 30
+    live = pkg_context_stats.ContextStats(parts={"recall": 7}, estimate=30)
+    plugin._sessions[UMO] = FakeRuntime(live)
+    data = ok(call(dash, "session/context", {"key": KEY}))
+    assert data["live"] is True and data["estimate"] == 30
 
 
-def test_session_reset(plugin, dash):
-    assert "还没有压缩状态" in ok(call(dash, "session/reset", body={"key": KEY}))["message"]
-    assert not plugin.state_path_for_key(KEY).exists()  # 不凭空创建状态文件
+def test_session_context_shows_astrbot_summary(plugin, dash):
+    plugin._registry.touch(KEY, UMO, "开黑群")
+    plugin.summary = "之前的对话摘要正文"
+    data = ok(call(dash, "session/context", {"key": KEY}))
+    assert data["hasSummary"] is True
+    assert data["summary"] == "之前的对话摘要正文"
 
-    path = plugin.state_path_for_key(KEY)
-    state = pkg_compress.SessionState(cid="c", watermark=12, summary="s", fail_count=3, fail_until=9e12)
-    asyncio.run(plugin.save_state_file(path, state))
-    ok(call(dash, "session/reset", body={"key": KEY}))
-    saved = json.loads(path.read_text("utf-8"))
-    assert saved["watermark"] == 0 and saved["summary"] == ""
-    assert saved["fail_count"] == 0
-    assert plugin.invalidated == [KEY]
+    plugin.summary = ""
+    data = ok(call(dash, "session/context", {"key": KEY}))
+    assert data["hasSummary"] is False and data["summary"] == ""
 
 
 def test_session_remark(plugin, dash):
@@ -565,9 +572,9 @@ def test_session_purge_memories_then_all(plugin, dash):
     store = session_store(plugin)
     asyncio.run(store.write("a.md", memory("a", "d")))
     plugin._registry.touch(KEY, UMO, "开黑群")
-    path = plugin.state_path_for_key(KEY)
-    asyncio.run(plugin.save_state_file(path, pkg_compress.SessionState(cid="c")))
-    plugin._sessions[UMO] = FakeRuntime(pkg_compress.SessionState())
+    path = plugin.stats_path_for_key(KEY)
+    asyncio.run(plugin.save_stats_file(path, pkg_context_stats.ContextStats()))
+    plugin._sessions[UMO] = FakeRuntime()
 
     assert ok(call(dash, "session/purge", body={"key": KEY}))["removed"] == 1
     assert store.list_files() == []
@@ -1339,24 +1346,21 @@ def test_file_purge_clears_tidy_only_residual(plugin, dash):
 # ---------------------------------------------------------------- 3.7 压缩跟随与归档删除
 
 
-def test_overview_reports_compression_follow_status(plugin, dash):
-    plugin.compression = {
-        "enabled": False,
+def test_overview_reports_context_status(plugin, dash):
+    plugin.context_info = {
         "window": 64000,
         "windowNote": "跟随 AstrBot 的上下文窗口兜底值",
         "turnLimit": 5,
-        "keepRecentTurns": 3,
-        "turnLimitWarning": True,
         "userIdentifier": True,
     }
     data = ok(call(dash, "overview"))
-    assert data["compression"] == plugin.compression
+    assert data["context"] == plugin.context_info
 
 
 def test_archive_routes_are_gone(dash):
     paths = {path for path, _, _, _ in dash._routes()}
     assert "archives" not in paths and "archive" not in paths
-    assert "session/state" in paths
+    assert "session/context" in paths and "session/state" not in paths
 
 
 # ---------------------------------------------------------------- 审查回归（待整理与迁移）

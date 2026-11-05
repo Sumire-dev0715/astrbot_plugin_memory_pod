@@ -55,8 +55,6 @@ class Filter:
 
     on_llm_request = _noop
     on_llm_response = _noop
-    on_agent_begin = _noop
-    on_llm_tool_respond = _noop
     permission_type = _noop
     command = _noop
 

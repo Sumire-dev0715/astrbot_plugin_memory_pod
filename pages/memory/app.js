@@ -5,7 +5,7 @@
   const I18N_PREFIX = "pages.memory.";
   const SVG_NS = "http://www.w3.org/2000/svg";
   const TYPES = ["user", "feedback", "project", "reference", "journal"];
-  const PARTS = ["overhead", "tools", "index", "summary", "recall", "history"];
+  const PARTS = ["system", "tools", "history", "prompt", "recall"];
   const FILE_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,120}\.md$/;
   const FRONT_RE = /^---\s*\n([\s\S]*?)\n---\s*\n?/;
   const LINK_RE = /\[\[([^\[\]\n]{1,120})\]\]/g;
@@ -67,13 +67,13 @@
     consolidate: "整理记忆",
     purge: "清除数据",
     memoryOffNotice: "长期记忆已在插件配置中关闭：机器人不会读写记忆，这里只是保留在磁盘上的内容。",
-    compressionOffNotice: "上下文压缩已停用：本插件不压缩，交给 AstrBot 自带的压缩。",
-    turnLimitNotice: "AstrBot 的轮数上限为 {limit}，不大于本插件保留轮数 + 2（{keep}）：插件来不及抢先压缩，旧轮次会由 AstrBot 直接截断。可在 AstrBot 调大轮数上限，或调小「保留原文的最近轮数」。",
+    contextReadonlyNotice: "这个面板只读。上下文的截断与摘要由 AstrBot 自己的上下文设置处理，本插件不再改动对话历史。",
     userIdentifierNotice: "AstrBot 的「用户识别」开着：本插件也会标注发送者，模型会看到两次。可以关掉 AstrBot 的「用户识别」，由本插件接管。",
     globalOffNotice: "全局记忆未启用：机器人当前不会读取或写入这里的内容。如需使用，请在插件配置中开启「启用全局记忆」。",
     tabMemories: "记忆",
     tabIndex: "索引",
-    tabCompression: "上下文压缩",
+    tabContext: "上下文",
+    contextWindow: "上下文窗口",
     searchPlaceholder: "全文搜索记忆",
     newMemory: "新建记忆",
     typeAll: "全部",
@@ -139,23 +139,13 @@
     indexDangling: "索引里有 {n} 行指向已不存在的文件：",
     indexHealthy: "索引与记忆文件一致。",
     indexEditorHint: "对话开始时发给模型的就是这份索引。保存记忆文件时插件会自动维护对应的行；你可以在这里调整顺序、添加分组标题。",
-    watermark: "水位线",
-    watermarkSub: "此前的消息已由摘要代替",
-    summaryChars: "摘要长度",
-    summaryCharsSub: "最近压缩：{time}",
     chars: "{n} 字",
     lastEstimate: "最近一次估算",
-    ratioSub: "校准比例 {ratio}",
     lastActual: "提供商实际用量",
     lastActualSub: "最近一次 usage 上报",
     cacheHit: "提示词缓存命中",
     cacheHitSub: "最近一次请求",
     notReported: "未上报",
-    chain: "摘要链路",
-    chainOk: "正常",
-    chainOkSub: "最近没有失败",
-    chainCooling: "退避中",
-    chainCoolingSub: "剩余 {left}，已连续失败 {n} 次",
     pending: "后台整理",
     pendingNone: "暂无待整理记录",
     pendingRounds: "待整理 {n} 轮",
@@ -167,17 +157,14 @@
     tokens: "{n} tokens",
     partsTitle: "上下文构成（最近一次请求，估算）",
     noEstimate: "还没有请求记录",
-    part_overhead: "固定开销",
+    part_system: "系统提示词",
     part_tools: "工具声明",
-    part_index: "记忆索引",
-    part_summary: "摘要",
+    part_history: "历史",
+    part_prompt: "本轮输入",
     part_recall: "召回记忆",
-    part_history: "历史原文",
-    summaryTitle: "当前摘要",
-    noSummary: "这个会话还没有发生过压缩。",
-    resetCompression: "重置压缩状态",
-    resetMessage: "将清空这个会话的摘要与水位线。已经被压缩卸下的旧对话不会回来；之后超过阈值时会基于当前历史重新摘要。",
-    reset: "重置",
+    systemPromptSub: "其中插件开头块 {n} tokens",
+    summaryTitle: "AstrBot 压缩后的摘要",
+    noSummary: "AstrBot 还没有压缩过这段对话。",
     liveTag: "实时",
     liveHint: "插件内存中的当前状态",
     diskTag: "磁盘记录",
@@ -240,7 +227,7 @@
     remarkTitle: "会话备注",
     remarkHint: "备注只在管理页显示，方便认出这个会话。留空则显示群名或昵称。",
     purgeTitle: "清除会话数据",
-    purgeMessage: "「只删记忆」把该会话的记忆目录移入 memories/.trash-scopes 归档（在回收站保留期内可人工取回）；「删除全部」还会立即删除压缩状态和会话登记。平台上的聊天记录不受影响。",
+    purgeMessage: "「只删记忆」把该会话的记忆目录移入 memories/.trash-scopes 归档（在回收站保留期内可人工取回）；「删除全部」还会立即删除上下文统计和会话登记。平台上的聊天记录不受影响。",
     purgeMemories: "只删记忆",
     purgeAll: "删除全部",
     consolidateTitle: "整理记忆",
@@ -332,7 +319,7 @@
     tabExport: "导出备份",
     tabImport: "导入备份",
     tabPlatform: "平台改名",
-    exportHint: "把记忆原文连同写入时间、使用次数存成一个文件。压缩状态不在备份里。",
+    exportHint: "把记忆原文连同写入时间、使用次数存成一个文件。上下文统计不在备份里。",
     exportScopes: "要导出的地方",
     includeForgotten: "包含已遗忘的记忆",
     exportButton: "导出",
@@ -839,8 +826,8 @@
     searchResults: null,
     editor: null,
     indexDraft: null,
-    compression: null,
-    compressionLoading: false,
+    context: null,
+    contextLoading: false,
     history: null,
     trash: null,
     trashLoading: false,
@@ -879,8 +866,8 @@
     state.searchResults = null;
     state.editor = null;
     state.indexDraft = null;
-    state.compression = null;
-    state.compressionLoading = false;
+    state.context = null;
+    state.contextLoading = false;
     state.history = null;
     invalidateTrash();
   }
@@ -1005,7 +992,7 @@
     if (!(await confirmDiscard())) {
       return;
     }
-    state.compression = null;
+    state.context = null;
     state.history = null;
     invalidateTrash();
     state.searchResults = null;
@@ -1310,21 +1297,7 @@
       if (!ov.memoryEnabled) {
         box.append(notice("warn", t("memoryOffNotice")));
       }
-      const cs = ov.compression || {};
-      if (cs.enabled === false) {
-        box.append(notice("info", t("compressionOffNotice")));
-      }
-      if (cs.turnLimitWarning) {
-        box.append(
-          notice(
-            "warn",
-            t("turnLimitNotice", {
-              limit: cs.turnLimit,
-              keep: (cs.keepRecentTurns || 0) + 2,
-            })
-          )
-        );
-      }
+      const cs = ov.context || {};
       if (cs.userIdentifier) {
         box.append(notice("info", t("userIdentifierNotice")));
       }
@@ -1481,7 +1454,7 @@
 
     const tabs = [["memories", "tabMemories", d.files.length], ["index", "tabIndex", null]];
     if (isSession) {
-      tabs.push(["compression", "tabCompression", null]);
+      tabs.push(["context", "tabContext", null]);
     }
     const forgotten = d.forgotten || [];
     if (d.forgettingEnabled || forgotten.length) {
@@ -1530,8 +1503,8 @@
       body.append(renderMemoryTab());
     } else if (state.tab === "index") {
       body.append(renderIndexTab());
-    } else if (state.tab === "compression") {
-      body.append(renderCompressionTab());
+    } else if (state.tab === "context") {
+      body.append(renderContextTab());
     } else if (state.tab === "forgotten") {
       body.append(renderForgottenTab());
     } else if (state.tab === "trash") {
@@ -2735,17 +2708,17 @@
     });
   }
 
-  // ------------------------------------------------------------ 压缩标签页
+  // ------------------------------------------------------------ 上下文标签页
 
-  async function loadCompression() {
-    if (state.compressionLoading) {
+  async function loadContext() {
+    if (state.contextLoading) {
       return;
     }
     const sel = state.selected;
-    state.compressionLoading = true;
+    state.contextLoading = true;
     let result;
     try {
-      result = await apiGet("session/state", { key: sel.key });
+      result = await apiGet("session/context", { key: sel.key });
     } catch (err) {
       result = { error: err.message };
     }
@@ -2753,28 +2726,27 @@
       // 已切到别的会话：那边的加载标记归它自己管
       return;
     }
-    state.compressionLoading = false;
-    state.compression = result;
-    if (state.tab === "compression") {
+    state.contextLoading = false;
+    state.context = result;
+    if (state.tab === "context") {
       renderTab();
     }
   }
 
-  function renderCompressionTab() {
-    const c = state.compression;
+  function renderContextTab() {
+    const c = state.context;
     if (!c) {
-      loadCompression();
+      loadContext();
       return spinnerBlock();
     }
     if (c.error) {
       return errorBlock(c.error, function () {
-        state.compression = null;
+        state.context = null;
         renderTab();
       });
     }
-    const now = c.now || Date.now() / 1000;
-    const cooling = c.failUntil > now;
-    const parts = c.lastParts || {};
+    const parts = c.parts || {};
+    const info = c.context || {};
     const total = PARTS.reduce(function (sum, key) { return sum + (parts[key] || 0); }, 0);
     const partsBody = [];
     if (total > 0) {
@@ -2788,7 +2760,7 @@
                   style: "width:" + ((parts[key] / total) * 100).toFixed(2) + "%;background:var(--p-" + key + ")",
                   title: t("part_" + key) + " " + fmtNum(parts[key]),
                 })
-              : null;
+              : null
           })
         ),
         h(
@@ -2803,18 +2775,12 @@
       partsBody.push(h("span", { style: "color:var(--text-3)" }, t("noEstimate")));
     }
 
-    const resetBtn = h(
-      "button",
-      { class: "btn danger small", onclick: function () { resetCompression(resetBtn); } },
-      icon("rotate"),
-      t("resetCompression")
-    );
     const refreshBtn = h(
       "button",
       {
         class: "btn small",
         onclick: function () {
-          state.compression = null;
+          state.context = null;
           renderTab();
         },
       },
@@ -2832,28 +2798,30 @@
           { class: "tag " + (c.live ? "ok" : ""), title: c.live ? t("liveHint") : t("diskHint") },
           c.live ? t("liveTag") : t("diskTag")
         ),
-        h("div", { class: "actions" }, refreshBtn, resetBtn)
+        h("div", { class: "actions" }, refreshBtn)
       ),
+      notice("info", t("contextReadonlyNotice")),
       h(
         "div",
         { class: "stats" },
-        stat(t("watermark"), fmtNum(c.watermark), t("watermarkSub")),
-        stat(t("summaryChars"), t("chars", { n: fmtNum((c.summary || "").length) }), t("summaryCharsSub", { time: relTime(c.compressedAt) })),
-        stat(t("lastEstimate"), t("tokens", { n: fmtNum(c.lastEstimate) }), t("ratioSub", { ratio: Number(c.ratio || 1).toFixed(2) })),
-        stat(t("lastActual"), c.lastActual > 0 ? t("tokens", { n: fmtNum(c.lastActual) }) : "—", t("lastActualSub")),
-        stat(t("cacheHit"), c.cacheHitTokens >= 0 ? t("tokens", { n: fmtNum(c.cacheHitTokens) }) : t("notReported"), t("cacheHitSub")),
+        stat(t("lastEstimate"), t("tokens", { n: fmtNum(c.estimate) }), t("lastRequest")),
         stat(
-          t("chain"),
-          cooling ? t("chainCooling") : t("chainOk"),
-          cooling ? t("chainCoolingSub", { left: fmtDuration(c.failUntil - now), n: c.failCount }) : t("chainOkSub")
+          t("part_system"),
+          t("tokens", { n: fmtNum(parts.system || 0) }),
+          t("systemPromptSub", { n: fmtNum(parts.plugin || 0) })
+        ),
+        stat(t("lastActual"), c.actual > 0 ? t("tokens", { n: fmtNum(c.actual) }) : "—", t("lastActualSub")),
+        stat(t("cacheHit"), c.cacheHit >= 0 ? t("tokens", { n: fmtNum(c.cacheHit) }) : t("notReported"), t("cacheHitSub")),
+        stat(
+          t("lastRequest"),
+          c.requestAt ? relTime(c.requestAt) : "—",
+          c.requestAt ? fmtTime(c.requestAt) : ""
         ),
         stat(
-          t("pending"),
-          c.pendingCount ? t("pendingRounds", { n: c.pendingCount }) : t("pendingNone"),
-          t("pendingSub", { time: c.lastWriteAt ? relTime(c.lastWriteAt) : "—", result: c.lastWriteResult || "—" })
-            + (c.pendingFailures ? "；" + t("pendingFailures", { n: c.pendingFailures }) : "")
-        ),
-        stat(t("lastRequest"), relTime(c.lastRequestAt), fmtTime(c.lastRequestAt))
+          t("contextWindow"),
+          info.window > 0 ? t("tokens", { n: fmtNum(info.window) }) : "—",
+          info.windowNote || ""
+        )
       ),
       h(
         "section",
@@ -2865,33 +2833,9 @@
         "section",
         { class: "panel" },
         h("div", { class: "panel-head" }, h("h3", null, t("summaryTitle"))),
-        h("div", { class: "panel-body" }, c.summary ? h("pre", { class: "pre" }, c.summary) : emptyState("inbox", t("noSummary")))
+        h("div", { class: "panel-body" }, c.hasSummary ? h("pre", { class: "pre" }, c.summary) : emptyState("inbox", t("noSummary")))
       )
     );
-  }
-
-  async function resetCompression(button) {
-    const ok = await confirmDialog({
-      title: t("resetCompression"),
-      message: t("resetMessage"),
-      confirm: t("reset"),
-      danger: true,
-    });
-    if (!ok) {
-      return;
-    }
-    await withBusy(button, async function () {
-      try {
-        const res = await apiPost("session/reset", { key: state.selected.key });
-        toast(res.message || t("saved"));
-        state.compression = null;
-        if (state.tab === "compression") {
-          renderTab();
-        }
-      } catch (err) {
-        toast(err.message, "error");
-      }
-    });
   }
 
   // ------------------------------------------------------------ 会话操作

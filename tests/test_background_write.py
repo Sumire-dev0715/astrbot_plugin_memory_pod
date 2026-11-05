@@ -19,7 +19,7 @@ from test_sharing_tools import (
 )
 
 main = importlib.import_module(f"{PACKAGE}.main")
-pkg_compress = importlib.import_module(f"{PACKAGE}.core.compress")
+pkg_context_stats = importlib.import_module(f"{PACKAGE}.core.context_stats")
 pkg_memstore = importlib.import_module(f"{PACKAGE}.core.memstore")
 pkg_pending = importlib.import_module(f"{PACKAGE}.core.pending")
 pkg_prompts = importlib.import_module(f"{PACKAGE}.core.prompts")
@@ -473,7 +473,7 @@ def test_three_consecutive_failures_give_up(tmp_path):
     async def failing(umo, prompt, **kwargs):
         return None, ["模型不可用"]
 
-    plugin._call_summarizer = failing
+    plugin._call_model = failing
     for _ in range(3):
         run(plugin._write_pending(key, umo, "idle", now=NOW))
     state = plugin._pending.load(key)
@@ -605,7 +605,7 @@ def test_pending_records_are_invisible_to_memory_channels(tmp_path):
     read = run(plugin.memory_read(event, "session", "../state/pending/x.md"))
     assert "不合法" in read or "不存在" in read
     assert "没有找到" in run(plugin.memory_search(event, marker))
-    rt = main.RuntimeSession(state=pkg_compress.SessionState())
+    rt = main.RuntimeSession()
     assert run(plugin._index_block(rt, event)) is None
     assert run(plugin._recall_message(event, umo, marker, rt)) is None
     # 记录确实在 state/pending 下
@@ -614,40 +614,6 @@ def test_pending_records_are_invisible_to_memory_channels(tmp_path):
 
 
 # ---------------------------------------------------------------- 旧摘要
-
-
-def test_old_summary_block_in_history_is_kept(tmp_path):
-    plugin = make_plugin(tmp_path, [])
-    plugin._resolve_window_for = lambda umo: _async_value((1_000_000, "测试窗口"))
-    plugin._index_block = lambda *args, **kwargs: _async_value(None)
-    plugin._recall_message = lambda *args, **kwargs: _async_value(None)
-    plugin._maybe_forget = lambda *args, **kwargs: None
-    plugin._maybe_tidy = lambda *args, **kwargs: None
-    event = FakeEvent("Bot-A")
-    old_summary = {
-        "role": "user",
-        "content": pkg_prompts.SUMMARY_BLOCK_OPEN
-        + "\n旧格式摘要正文\n"
-        + pkg_prompts.SUMMARY_BLOCK_CLOSE,
-    }
-    req = types.SimpleNamespace(
-        contexts=[
-            {"role": "system", "content": "人格"},
-            old_summary,
-            {"role": "user", "content": "新问题"},
-        ],
-        prompt="新问题",
-        system_prompt="",
-        func_tool=None,
-        conversation=types.SimpleNamespace(cid="conv-1"),
-        image_urls=[],
-    )
-    run(plugin._process_request(event, req))
-    assert any(
-        isinstance(message, dict)
-        and pkg_prompts.SUMMARY_BLOCK_OPEN in str(message.get("content", ""))
-        for message in req.contexts
-    )
 
 
 def _async_value(value):
@@ -682,7 +648,7 @@ def test_write_pending_runs_model_and_clears_processed_records(tmp_path):
             [],
         )
 
-    plugin._call_summarizer = fake_model
+    plugin._call_model = fake_model
     message = run(plugin._write_pending(key, umo, "idle", now=NOW + 2))
     assert "写入 1 / 1" in message and "日志" in message
     session = plugin._store.session_scope(umo)
@@ -794,7 +760,6 @@ def test_background_prompt_contains_link_and_long_file_hints(tmp_path):
 
 def test_web_state_and_page_show_pending_status():
     pkg_web = importlib.import_module(f"{PACKAGE}.web_api")
-    pkg_compress_mod = importlib.import_module(f"{PACKAGE}.core.compress")
 
     state = pkg_pending.PendingState(
         umo="Bot-A:FriendMessage:1",
@@ -804,7 +769,7 @@ def test_web_state_and_page_show_pending_status():
         last_result="模型不可用",
         last_success=NOW - 10,
     )
-    data = pkg_web._state_dict(pkg_compress_mod.SessionState(), state)
+    data = pkg_web._context_dict(pkg_context_stats.ContextStats(), state)
     assert data["pendingCount"] == 1
     assert data["pendingFailures"] == 1
     assert data["lastWriteAt"] == NOW - 10
@@ -848,7 +813,7 @@ def test_mixed_batch_cannot_use_last_turn_as_admin(tmp_path):
             [],
         )
 
-    plugin._call_summarizer = fake_model
+    plugin._call_model = fake_model
     run(plugin._write_pending(key, umo, "idle", now=NOW + 3))
     # 整批并非全是管理员：不写 global，记录保留并计一次失败
     assert not plugin._global_scope().exists("rules.md")
@@ -917,7 +882,7 @@ def test_clear_during_model_call_aborts_write(tmp_path):
                 [],
             )
 
-        plugin._call_summarizer = slow
+        plugin._call_model = slow
         plugin._schedule_write(umo, "idle")
         await started.wait()
         plugin._pending.clear(key)
@@ -941,7 +906,7 @@ def test_stop_pending_write_cancels_running_task(tmp_path):
             await asyncio.sleep(10)
             return "", []
 
-        plugin._call_summarizer = slow
+        plugin._call_model = slow
         plugin._schedule_write(umo, "idle")
         await started.wait()
         await plugin.stop_pending_write(umo)
@@ -975,7 +940,7 @@ def test_journal_only_output_is_written(tmp_path):
     async def fake_model(umo_arg, prompt, **kwargs):
         return ("<journal>今天聊了天气</journal>", [])
 
-    plugin._call_summarizer = fake_model
+    plugin._call_model = fake_model
     run(plugin._write_pending(key, umo, "idle", now=NOW + 2))
     journals = [
         name for name in plugin._store.session_scope(umo).list_files()
@@ -1001,7 +966,7 @@ def test_all_rejected_operations_keep_records(tmp_path):
             [],
         )
 
-    plugin._call_summarizer = fake_model
+    plugin._call_model = fake_model
     run(plugin._write_pending(key, umo, "idle", now=NOW + 2))
     state = plugin._pending.load(key)
     assert state.count == 1 and state.failures == 1
@@ -1063,7 +1028,7 @@ def test_journal_write_failure_is_reported(tmp_path, monkeypatch):
     async def failing_journal(*args, **kwargs):
         return "", False
 
-    plugin._call_summarizer = fake_model
+    plugin._call_model = fake_model
     monkeypatch.setattr(pkg_writer, "write_journal", failing_journal)
     message = run(plugin._write_pending(key, umo, "idle", now=NOW + 2))
     # 日志失败＝整理失败：记录保留，下次重试，不能连模型给的流水一起丢
@@ -1080,14 +1045,14 @@ def test_journal_write_invalidates_open_snapshot(tmp_path):
     key = pkg_memstore.safe_key(umo)
     plugin._record_pending_user(event, _request("聊点事"), NOW)
     plugin._record_pending_reply(event, _response("好"), NOW + 1)
-    rt = main.RuntimeSession(state=pkg_compress.SessionState())
+    rt = main.RuntimeSession()
     run(plugin._index_block(rt, event))
     plugin._sessions[umo] = rt
 
     async def fake_model(umo_arg, prompt, **kwargs):
         return ("<journal>一段流水</journal>", [])
 
-    plugin._call_summarizer = fake_model
+    plugin._call_model = fake_model
     run(plugin._write_pending(key, umo, "idle", now=NOW + 2))
     assert rt.index_loaded is False
 
@@ -1152,7 +1117,7 @@ def test_unrendered_records_are_kept_after_success(tmp_path, monkeypatch):
             [],
         )
 
-    plugin._call_summarizer = fake_model
+    plugin._call_model = fake_model
     run(plugin._write_pending(key, umo, "idle", now=NOW + 3))
     state = book.load(key)
     # 只删模型实际看到的第 1 轮，第 2 轮留到下次
@@ -1184,7 +1149,7 @@ def test_partial_operation_failure_keeps_records(tmp_path):
             [],
         )
 
-    plugin._call_summarizer = fake_model
+    plugin._call_model = fake_model
     message = run(plugin._write_pending(key, umo, "idle", now=NOW + 2))
     # 部分成功按失败处理：不返回成功文案，记录保留重试
     assert message == ""
@@ -1211,7 +1176,7 @@ def test_malformed_operations_with_journal_keep_records(tmp_path):
             [],
         )
 
-    plugin._call_summarizer = fake_model
+    plugin._call_model = fake_model
     message = run(plugin._write_pending(key, umo, "idle", now=NOW + 2))
     assert message == ""
     state = plugin._pending.load(key)
@@ -1265,7 +1230,7 @@ def test_purged_file_operation_is_skipped(tmp_path):
             [],
         )
 
-    plugin._call_summarizer = fake_model
+    plugin._call_model = fake_model
     run(plugin._write_pending(key, umo, "idle", now=NOW + 3))
     session = plugin._store.session_scope(umo)
     assert not session.exists("user-9.md")
@@ -1397,9 +1362,7 @@ def test_summarizer_errors_do_not_echo_provider_text(tmp_path):
 
     plugin._provider_by_id = no_provider
     plugin._current_provider = current
-    text, attempts = run(
-        plugin._call_summarizer("Bot-A:FriendMessage:1", "p", attempts=1)
-    )
+    text, attempts = run(plugin._call_model("Bot-A:FriendMessage:1", "p"))
     assert text is None
     joined = "；".join(attempts)
     assert "secret-token" not in joined
@@ -1448,7 +1411,7 @@ def test_store_oserror_keeps_records_and_reports_type(tmp_path):
             [],
         )
 
-    plugin._call_summarizer = fake_model
+    plugin._call_model = fake_model
     message = run(plugin._write_pending(key, umo, "idle", now=NOW + 2))
     assert message == ""
     state = plugin._pending.load(key)

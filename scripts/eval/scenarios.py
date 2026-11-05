@@ -496,7 +496,7 @@ def index_detail_read() -> Scenario:
     return Scenario(
         name="index_detail_read",
         title="问到索引细节时先读文件",
-        config={"recall_mode": "off"},
+        config={"recall_max_files": 0},
         turns=[Turn("我们项目的代号是什么？", ALICE, settle=False)],
         settle_after=False,
         setup=setup,
@@ -531,7 +531,7 @@ def search_uncertain() -> Scenario:
     return Scenario(
         name="search_uncertain",
         title="不确定时先搜索",
-        config={"recall_mode": "off"},
+        config={"recall_max_files": 0},
         turns=[
             Turn("我的备份脚本放在哪儿了？我不确定你有没有记过，搜一下。", ALICE,
                  settle=False)
@@ -727,51 +727,6 @@ def shared_read_only() -> Scenario:
     )
 
 
-def compression_follow_window() -> Scenario:
-    """窗口跟随 AstrBot 时压缩照常触发（桩里窗口设小）。"""
-
-    long_turns = [
-        "今天我们把项目第一阶段的接口都梳理了一遍，主要是用户登录、记忆读取和后台整理三条链路，大家逐条确认了边界条件，也把之前遗留的两个问题列进了清单。",
-        "接着讨论了第二阶段的安排，决定先把记忆索引的展示做稳定，再处理召回分档和压缩状态的对齐，负责人分别领了任务，时间点定在下周中。",
-        "然后把测试方案过了一遍，重点覆盖后台写入的权限判断、快照冲突和连续失败重试，大家认为这些是上线前必须验证的地方。",
-        "中途又回到接口细节，确认工具返回的内容太长时要有提示，避免模型一次读入过多无关信息，讨论持续了挺久。",
-        "最后确认了上线时间和回滚方案，决定先在小范围会话里试运行，观察日志和失败次数，没有问题再扩大范围。",
-        "散会后我把接口命名、字段类型、错误码、重试策略和回滚步骤分别整理成小节，又把每个人领取的任务和对应的时间点补进任务清单，最后把完整记录发到群里请大家核对，免得下次讨论还要翻聊天记录找上下文。",
-        "第二天大家陆续在文档里留言，确认了其中大部分内容，只对两处细节提出修改意见：登录失败时的提示文案，以及后台整理失败后的重试间隔；讨论之后都按新的写法定了下来。",
-        "评审之前大家又把任务清单从头到尾过了一遍，逐项确认接口文档、测试用例、错误码表和回滚脚本都已经存档，也核对了每个人负责的部分与时间点是否一致。剩下的事项按优先级排进下一轮迭代，没有再增加新的范围，避免这一阶段继续拖长；如果评审时发现新的风险，就单独记进清单，留到下一次讨论统一处理，不在这次评审里临时改方案。",
-    ]
-
-    async def check(env: EvalEnv):
-        umo = env.umo_for(ALICE)
-        status = await env.plugin.compression_status(umo)
-        if status.get("window") != 1500:
-            return False, f"窗口是 {status.get('window')}，没有跟随桩里的提供商配置"
-        state = env.state(umo)
-        if not str(state.get("summary") or "").strip():
-            return False, "上下文超过阈值后没有生成摘要"
-        has_summary_block = any(
-            "<memory_beyond_summary>" in str(message.get("content") or "")
-            for turn in env.turns
-            for message in turn.viewed_contexts
-        )
-        if not has_summary_block:
-            return False, "后续请求视图里没有摘要块"
-        return True, ""
-
-    turns = [
-        Turn(text, ALICE, settle=False) for text in long_turns
-    ]
-    return Scenario(
-        name="compression_follow_window",
-        title="窗口跟随 AstrBot 时压缩照常触发",
-        config={"keep_recent_turns": 2, "compress_threshold": 0.7},
-        provider_window=1500,
-        turns=turns,
-        settle_after=False,
-        checks=[Check("compression_triggered", check, category="compression")],
-    )
-
-
 def group_role_session() -> Scenario:
     """群内角色放 session，不放 people。"""
 
@@ -866,27 +821,16 @@ def private_profile_pinned() -> Scenario:
         )
 
     def check(env: EvalEnv):
-        contexts = env.turns[0].viewed_contexts
-        index_block = next(
-            (
-                str(message.get("content") or "")
-                for message in contexts
-                if str(message.get("content") or "").startswith(
-                    "<memory_beyond_index>"
-                )
-            ),
-            "",
-        )
+        turn = env.turns[0]
+        index_block = turn.system_prompt
         if "美式咖啡" not in index_block:
             return False, "私聊人物档案没有钉进开头块"
         if "# 发送者人物档案（私聊）" not in index_block:
             return False, "开头块里缺少人物档案区标题"
         duplicated = any(
-            "美式咖啡" in str(message.get("content") or "")
-            for message in contexts
-            if str(message.get("content") or "").startswith(
-                "<memory_beyond_recall>"
-            )
+            "美式咖啡" in str(part)
+            for part in turn.recall_parts
+            if str(part).startswith("<memory_pod_recall>")
         )
         if duplicated:
             return False, "已经钉在开头块的人物档案又出现在召回块里"
@@ -966,7 +910,6 @@ def all_scenarios() -> list[Scenario]:
         shared_edit_cross_bot(),
         shared_append_limits(),
         shared_read_only(),
-        compression_follow_window(),
         group_role_session(),
         admin_global_memory(),
         non_admin_global_refused(),

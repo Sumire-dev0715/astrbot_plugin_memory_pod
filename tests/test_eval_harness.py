@@ -33,7 +33,7 @@ def _results(model_mode: str, tmp_path: Path):
 
 
 def test_good_fake_model_passes_every_check(tmp_path):
-    """好模型让全部 25 个场景的所有检查通过。"""
+    """好模型让全部场景的所有检查通过。"""
     runs = _results("good", tmp_path)
     failed = [
         (scenario.name, outcome.name, outcome.detail)
@@ -43,7 +43,7 @@ def test_good_fake_model_passes_every_check(tmp_path):
     ]
     assert failed == []
     checks = [outcome for _, run in runs for outcome in run.outcomes]
-    assert len(checks) == 25
+    assert len(checks) == 24
     assert sum(1 for item in checks if item.critical) == 12
 
 

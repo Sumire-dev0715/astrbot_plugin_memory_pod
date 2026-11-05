@@ -59,14 +59,6 @@ def make_stores(tmp_path, files):
     return stores, candidates
 
 
-def pick(candidates, *files):
-    """按给定顺序取候选，便于验证"选中顺序"而不受文件名排序影响。"""
-    by_file = {}
-    for cand in candidates:
-        by_file.setdefault(cand.header.file, cand)
-    return [by_file[name] for name in files if name in by_file]
-
-
 def test_full_files_quota_only_covers_non_identity_files(tmp_path):
     stores, candidates = make_stores(
         tmp_path,
@@ -76,7 +68,6 @@ def test_full_files_quota_only_covers_non_identity_files(tmp_path):
             ("people", "user-123.md", "阿杰，群主", "喜欢开黑"),
         ],
     )
-    chosen = pick(candidates, "user-123.md", "a.md", "b.md")
     plan = run(
         recall.assemble_recall(
             stores,
@@ -85,7 +76,6 @@ def test_full_files_quota_only_covers_non_identity_files(tmp_path):
             forced_files=["user-123.md"],
             limit=5,
             data_notice=prompts.DATA_NOTICE,
-            model_choice=chosen,
             shared_people=True,
             full_files=1,
             now=NOW,
@@ -107,7 +97,6 @@ def test_pointer_line_format_and_description_only_when_not_indexed(tmp_path):
             ("session", "c.md", "开黑活动名单", "固定成员"),
         ],
     )
-    chosen = pick(candidates, "a.md", "b.md", "c.md")
     plan = run(
         recall.assemble_recall(
             stores,
@@ -116,7 +105,6 @@ def test_pointer_line_format_and_description_only_when_not_indexed(tmp_path):
             forced_files=[],
             limit=5,
             data_notice=prompts.DATA_NOTICE,
-            model_choice=chosen,
             full_files=1,
             indexed_refs={"session/b.md"},
             now=NOW,
@@ -140,7 +128,6 @@ def test_identity_files_never_count_against_quota(tmp_path):
             ("session", "b.md", "开黑活动记录", "周日下午"),
         ],
     )
-    chosen = pick(candidates, "user-123.md", "a.md", "b.md")
     plan = run(
         recall.assemble_recall(
             stores,
@@ -149,7 +136,6 @@ def test_identity_files_never_count_against_quota(tmp_path):
             forced_files=["user-123.md"],
             limit=5,
             data_notice=prompts.DATA_NOTICE,
-            model_choice=chosen,
             full_files=0,
             now=NOW,
         )
@@ -168,7 +154,6 @@ def test_full_files_at_least_limit_keeps_all_selected_in_order(tmp_path):
             ("session", "c.md", "开黑活动名单", "固定成员"),
         ],
     )
-    chosen = pick(candidates, "c.md", "a.md", "b.md")
     plan = run(
         recall.assemble_recall(
             stores,
@@ -177,12 +162,11 @@ def test_full_files_at_least_limit_keeps_all_selected_in_order(tmp_path):
             forced_files=[],
             limit=3,
             data_notice=prompts.DATA_NOTICE,
-            model_choice=chosen,
             full_files=3,
             now=NOW,
         )
     )
-    assert plan.full_files == ["session/c.md", "session/a.md", "session/b.md"]
+    assert plan.full_files == ["session/a.md", "session/b.md", "session/c.md"]
     assert plan.pointers == []
     # 未分档（None）时选中文件与顺序同样不变
     plain = run(
@@ -193,7 +177,6 @@ def test_full_files_at_least_limit_keeps_all_selected_in_order(tmp_path):
             forced_files=[],
             limit=3,
             data_notice=prompts.DATA_NOTICE,
-            model_choice=chosen,
             now=NOW,
         )
     )

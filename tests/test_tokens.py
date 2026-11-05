@@ -46,31 +46,13 @@ def test_estimate_messages_skips_non_dict():
         tokens.estimate_message({"role": "user", "content": "hi"})
 
 
-def test_estimator_calibrate_moves_toward_observed():
+def test_estimator_text_messages_and_scale():
     est = tokens.TokenEstimator()
-    est.calibrate(estimated=100, actual=200)
-    assert 1.0 < est.ratio <= 2.0
-
-
-def test_estimator_calibrate_clamped():
-    est = tokens.TokenEstimator()
-    for _ in range(50):
-        est.calibrate(estimated=1, actual=10_000)
-    assert est.ratio <= tokens.CALIBRATION_MAX
-    est2 = tokens.TokenEstimator()
-    for _ in range(50):
-        est2.calibrate(estimated=10_000, actual=1)
-    assert est2.ratio >= tokens.CALIBRATION_MIN
-
-
-def test_estimator_bad_init_ratio_resets():
-    assert tokens.TokenEstimator(float("nan")).ratio == 1.0
-    assert tokens.TokenEstimator(-5).ratio == 1.0
-
-
-def test_estimator_scales_text():
-    est = tokens.TokenEstimator(2.0)
-    assert est.text("hello") == math.ceil(tokens.estimate_text("hello") * 2.0)
+    assert est.text("hello") == tokens.estimate_text("hello")
+    assert est.messages([{"role": "user", "content": "hi"}]) == tokens.estimate_messages(
+        [{"role": "user", "content": "hi"}]
+    )
+    assert est.scale(800) == 800
 
 
 # ---------------------------------------------------------------- 缓存命中提取
@@ -99,22 +81,6 @@ def test_extract_cache_hit_absent_or_invalid():
     assert tokens.extract_cache_hit({"prompt_tokens": 100}) is None
     assert tokens.extract_cache_hit({"prompt_cache_hit_tokens": "junk"}) is None
     assert tokens.extract_cache_hit({"prompt_cache_hit_tokens": -3}) == 0
-
-
-def test_calibrate_converges_to_absolute_ratio():
-    # 真实用量恒为原始估算的 1.37 倍时，比例应收敛到 1.37 本身。
-    # 回归防护：若拿 真实/已校准估算 直接做 EMA，收敛点会是 sqrt(1.37)≈1.17
-    # （残差因子等于比例本身时即停），估算永远系统性偏低约 15%。
-    est = tokens.TokenEstimator(1.0)
-    raw = 5000
-    for _ in range(40):
-        est.calibrate(est.scale(raw), int(raw * 1.37))
-    assert abs(est.ratio - 1.37) < 0.02
-
-
-def test_scale_applies_ratio():
-    assert tokens.TokenEstimator(1.5).scale(800) == 1200
-    assert tokens.TokenEstimator(1.0).scale(800) == 800
 
 
 def test_estimate_messages_skips_platform_internal_records():

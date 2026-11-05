@@ -282,9 +282,9 @@ def test_search_ranking_non_journal_then_matched_then_updated(tmp_path):
     )
     write_file(
         tmp_path,
-        "daily-2026-01-01.md",
+        "journal-2026-01-01.md",
         memory_md(
-            "daily-2026-01-01",
+            "journal-2026-01-01",
             "日志",
             "project",
             body="alpha beta",
@@ -297,22 +297,22 @@ def test_search_ranking_non_journal_then_matched_then_updated(tmp_path):
         "both.md",  # 命中两个词，非日志，排最前
         "alpha.md",  # 命中一个词，updated 比 beta 新
         "beta.md",
-        "daily-2026-01-01.md",  # 日志永远排在非日志后面
+        "journal-2026-01-01.md",  # 日志永远排在非日志后面
     ]
     assert [hit.matched for hit in hits] == [2, 1, 1, 2]
     assert [hit.journal for hit in hits] == [False, False, False, True]
 
 
 def test_search_is_not_crowded_out_by_daily_files(tmp_path):
-    """回归：旧实现按文件名取前 8 条，daily-* 会把真正的记忆挤掉。"""
+    """回归：旧实现按文件名取前 8 条，journal-* 会把真正的记忆挤掉。"""
     write_file(
         tmp_path, "important.md", memory_md("important", body="项目 事实")
     )
     for day in range(1, 10):
         write_file(
             tmp_path,
-            f"daily-2026-01-{day:02d}.md",
-            memory_md(f"daily-2026-01-{day:02d}", "日志", "project", body="项目 日志"),
+            f"journal-2026-01-{day:02d}.md",
+            memory_md(f"journal-2026-01-{day:02d}", "日志", "project", body="项目 日志"),
         )
     store = ScopeStore(tmp_path)
 
@@ -359,8 +359,8 @@ def test_search_forgotten_ranks_like_active_results(tmp_path):
     for day in range(1, 10):
         write_file(
             tmp_path,
-            f"daily-2026-01-{day:02d}.md",
-            memory_md(f"daily-2026-01-{day:02d}", "日志", "project", body="项目 日志"),
+            f"journal-2026-01-{day:02d}.md",
+            memory_md(f"journal-2026-01-{day:02d}", "日志", "project", body="项目 日志"),
         )
     names = store.list_files()
 
@@ -424,9 +424,9 @@ def test_long_file_size_threshold_is_strict_and_journal_ignores_dates():
     assert reasons == ["正文里有 20 个日期"]
 
     # 日志只看体积，日期再多也不提示
-    assert insights.long_file_reasons("daily-2026-11-03.md", "project", body, 100) == []
+    assert insights.long_file_reasons("journal-2026-11-03.md", "project", body, 100) == []
     journal_reasons = insights.long_file_reasons(
-        "daily-2026-11-03.md", "project", body, 8 * 1024 + 1
+        "journal-2026-11-03.md", "project", body, 8 * 1024 + 1
     )
     assert len(journal_reasons) == 1 and "超过 8KB" in journal_reasons[0]
 
@@ -452,9 +452,9 @@ def test_long_files_lists_only_over_threshold(tmp_path):
     )
     write_file(
         tmp_path,
-        "daily-2026-11-03.md",
+        "journal-2026-11-03.md",
         memory_md(
-            "daily-2026-11-03",
+            "journal-2026-11-03",
             "日志",
             "project",
             body="2026-01-01 " * 20,
@@ -468,10 +468,11 @@ def test_long_files_lists_only_over_threshold(tmp_path):
     long_files = run(store.long_files())
     assert [item.file for item in long_files] == ["dense.md", "long.md"]
     # 日志的日期不触发；它的体积也没超过阈值
-    assert all(item.file != "daily-2026-11-03.md" for item in long_files)
+    assert all(item.file != "journal-2026-11-03.md" for item in long_files)
     assert INDEX_FILENAME not in [item.file for item in long_files]
 
 
 
 def test_is_journal_names_still_used_for_ordering():
-    assert journal.is_journal("daily-2026-11-03.md", "project")
+    assert journal.is_journal("journal-2026-11-03.md", "project")
+    assert not journal.is_journal("daily-2026-11-03.md", "project")

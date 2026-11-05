@@ -70,7 +70,7 @@ def test_entry_target_accepts_both_formats():
 def test_journal_block_is_dropped_before_any_normal_entry():
     normal = lines(*(f"m{i}.md" for i in range(4)))
     entries = [
-        journal.JournalEntry(f"daily-2026-11-0{day}.md", f"{day} 的日志")
+        journal.JournalEntry(f"journal-2026-11-0{day}.md", f"{day} 的日志")
         for day in (1, 2, 3, 4, 5)
     ]
     raw = "\n".join(normal + journal.build_block(entries))
@@ -137,7 +137,7 @@ def test_remaining_lines_keep_original_order():
 def test_byte_limit_drops_journal_block_first():
     normal = lines(*(f"m{i}.md" for i in range(6)))
     block = journal.build_block(
-        [journal.JournalEntry(f"daily-2026-11-0{day}.md", "日志") for day in (1, 2)]
+        [journal.JournalEntry(f"journal-2026-11-0{day}.md", "日志") for day in (1, 2)]
     )
     # 只够装下正常行和"还有 N 条"说明，日志块一条都装不下
     max_bytes = sum(len(line.encode("utf-8")) + 1 for line in normal)
@@ -172,7 +172,7 @@ def test_byte_limit_drops_oldest_normal_entries():
 def test_mixed_journal_and_normal_counts():
     normal = lines(*(f"m{i}.md" for i in range(10)))
     entries = [
-        journal.JournalEntry(f"daily-2026-11-0{day}.md", "日志")
+        journal.JournalEntry(f"journal-2026-11-0{day}.md", "日志")
         for day in (1, 2, 3)
     ]
     raw = "\n".join(normal + journal.build_block(entries))
@@ -196,7 +196,7 @@ def test_mixed_journal_and_normal_counts():
 def test_journal_block_before_manual_line_is_dropped_whole():
     normal = lines(*(f"m{i}.md" for i in range(3)))
     entries = [
-        journal.JournalEntry(f"daily-2026-11-0{day}.md", "日志")
+        journal.JournalEntry(f"journal-2026-11-0{day}.md", "日志")
         for day in (1, 2, 3, 4, 5)
     ]
     raw = "\n".join(normal + journal.build_block(entries) + ["# 手工补充"])
@@ -205,7 +205,7 @@ def test_journal_block_before_manual_line_is_dropped_whole():
     )
     # 汇总行后面有手工行，也按一个完整的日志块丢掉，不留半截；
     # 上限里的 1 行留给"还有 N 条"说明。
-    assert "daily-2026" not in view.text and "日志共" not in view.text
+    assert "journal-2026" not in view.text and "日志共" not in view.text
     assert "# 手工补充" in view.text
     assert all(
         index_view.compact_index_line(line) in view.text for line in normal

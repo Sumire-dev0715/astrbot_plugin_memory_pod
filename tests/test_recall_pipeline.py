@@ -125,7 +125,7 @@ def test_keyword_recall_matches_pre_refactor(tmp_path):
         [
             ("session", "weekend-game.md", "每周六晚上的开黑活动", "晚上八点集合"),
             ("session", "deadline.md", "项目截止日", "八月十五日之前交"),
-            ("session", "daily-2026-11-01.md", "流水账", "周六开黑"),
+            ("session", "journal-2026-11-01.md", "流水账", "周六开黑"),
             ("people", "user-123456.md", "阿杰，群主", "喜欢开黑"),
             ("people", "user-654321.md", "小鱼", "也喜欢开黑"),
             ("global", "self.md", "机器人自我设定", "开黑话题不主动插话"),
@@ -137,7 +137,7 @@ def test_keyword_recall_matches_pre_refactor(tmp_path):
             stores,
             candidates,
             # 上游 v1.4.1 在同一批数据上的选择：weekend-game 得分 6；
-            # daily 得分 2（低于门槛）、people 的其他人不按关键词扩散
+            # 日志得分 2（低于门槛）、people 的其他人不按关键词扩散
             ["people/user-123456.md", "session/weekend-game.md"],
             query="这周六还开黑吗",
             forced_files=["user-123456.md"],
@@ -148,69 +148,12 @@ def test_keyword_recall_matches_pre_refactor(tmp_path):
     )
     # 身份必选在前；日志不参与；people 里的其他人不按关键词扩散
     assert plan.files[0] == "people/user-123456.md"
-    assert "session/daily-2026-11-01.md" not in plan.files
+    assert "session/journal-2026-11-01.md" not in plan.files
     assert "people/user-654321.md" not in plan.files
     assert len(plan.files) >= 2
     # 被选中且读到内容的文件都记进 used（含被预算挤掉的）
     assert "user-123456.md" in plan.used["people"]
     assert plan.block.startswith(recall.RECALL_BLOCK_OPEN)
-
-
-def test_model_choice_merge_matches_pre_refactor(tmp_path):
-    store, stores = make_store(
-        tmp_path,
-        [
-            ("session", "a.md", "开黑活动", "周六晚上"),
-            ("session", "b.md", "点歌清单", "周杰伦"),
-            ("people", "user-123456.md", "阿杰，群主", "喜欢开黑"),
-        ],
-    )
-    candidates = candidates_of(stores)
-    # 模型挑了 b（以及不在本轮清单里的条目由调用方过滤，这里不构造）
-    model_choice = [c for c in candidates if c.header.file == "b.md"]
-    plan, chosen = run(
-        compare(
-            stores,
-            candidates,
-            # 上游 v1.4.1：身份必选 user-123456 在前，再按模型挑的顺序接 b
-            ["people/user-123456.md", "session/b.md"],
-            query="周六开黑",
-            forced_files=["user-123456.md"],
-            limit=5,
-            model_choice=model_choice,
-            data_notice=prompts.DATA_NOTICE,
-            now=NOW,
-        )
-    )
-    # 模型模式只带身份必选与模型挑的，不按关键词补 a
-    assert plan.files == ["people/user-123456.md", "session/b.md"]
-    assert [c.ref for c in chosen] == plan.files
-
-
-def test_model_empty_choice_falls_back_to_forced_only(tmp_path):
-    store, stores = make_store(
-        tmp_path,
-        [
-            ("session", "a.md", "开黑活动", "周六晚上"),
-            ("people", "user-123456.md", "阿杰，群主", "喜欢开黑"),
-        ],
-    )
-    candidates = candidates_of(stores)
-    plan, _ = run(
-        compare(
-            stores,
-            candidates,
-            # 上游 v1.4.1：模型明确回答"没有相关的"时只留身份必选
-            ["people/user-123456.md"],
-            query="周六开黑",
-            forced_files=["user-123456.md"],
-            limit=5,
-            model_choice=[],
-            data_notice=prompts.DATA_NOTICE,
-            now=NOW,
-        )
-    )
-    assert plan.files == ["people/user-123456.md"]
 
 
 def test_budget_truncation_matches_pre_refactor(tmp_path):
@@ -325,7 +268,6 @@ def test_shared_people_marks_only_people_scope(tmp_path):
 
 
 def test_zero_limit_and_empty_candidates():
-    assert recall.choose_candidates([], "x", [], 0) == []
     assert run(
         recall.assemble_recall(
             {},

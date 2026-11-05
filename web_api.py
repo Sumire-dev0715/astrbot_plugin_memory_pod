@@ -1,7 +1,7 @@
 """WebUI 记忆管理页的后端接口。
 
 页面（pages/memory）经 AstrBot 的插件页面桥接调用这里注册的接口，
-管理员可以查看并编辑每个会话的记忆、整理记忆、查看压缩状态，
+管理员可以查看并编辑每个会话的记忆、整理记忆、查看只读的上下文统计，
 设置定期整理并确认它给出的方案、撤销最近的整理，以及导出导入备份、
 在会话之间或平台改名后迁移记忆。
 
@@ -29,6 +29,7 @@ from astrbot.api import logger
 
 from .core import (
     consolidate,
+    context_stats,
     history,
     insights,
     memstore,
@@ -38,7 +39,6 @@ from .core import (
     tidy,
     transfer,
 )
-from .core.compress import SessionState
 
 if TYPE_CHECKING:
     from .main import MemoryBeyondPlugin
@@ -203,19 +203,16 @@ def _record_dict(key: str, record: registry.SessionRecord | None) -> dict:
     }
 
 
-def _state_dict(state: SessionState, pending_state: pending.PendingState | None = None) -> dict:
+def _context_dict(
+    stats: context_stats.ContextStats,
+    pending_state: pending.PendingState | None = None,
+) -> dict:
     data = {
-        "watermark": state.watermark,
-        "summary": state.summary,
-        "ratio": state.ratio,
-        "lastEstimate": state.last_estimate,
-        "lastActual": state.last_actual,
-        "lastParts": dict(state.last_parts or {}),
-        "cacheHitTokens": state.cache_hit_tokens,
-        "failCount": state.fail_count,
-        "failUntil": state.fail_until,
-        "compressedAt": state.compressed_at,
-        "lastRequestAt": state.last_request_at,
+        "parts": dict(stats.parts or {}),
+        "estimate": stats.estimate,
+        "actual": stats.actual,
+        "cacheHit": stats.cache_hit,
+        "requestAt": stats.request_at,
     }
     if pending_state is not None:
         data.update(
@@ -301,7 +298,7 @@ class MemoryDashboard:
             ("scope", "GET", self.scope_detail, "记忆管理：作用域详情"),
             ("file", "GET", self.file_detail, "记忆管理：读取记忆文件"),
             ("search", "GET", self.search, "记忆管理：全文搜索"),
-            ("session/state", "GET", self.session_state, "记忆管理：压缩状态"),
+            ("session/context", "GET", self.session_context, "记忆管理：上下文统计"),
             ("forgotten/file", "GET", self.forgotten_file, "记忆管理：读取已遗忘的文件"),
             ("file/save", "POST", self.file_save, "记忆管理：保存记忆文件"),
             ("file/delete", "POST", self.file_delete, "记忆管理：删除记忆文件"),
@@ -318,7 +315,6 @@ class MemoryDashboard:
             ("file/purge", "POST", self.file_purge, "记忆管理：彻底删除文件及其历史"),
             ("index/save", "POST", self.index_save, "记忆管理：保存索引"),
             ("index/rebuild", "POST", self.index_rebuild, "记忆管理：重建索引"),
-            ("session/reset", "POST", self.session_reset, "记忆管理：重置压缩状态"),
             ("session/remark", "POST", self.session_remark, "记忆管理：会话备注"),
             ("session/purge", "POST", self.session_purge, "记忆管理：清除会话数据"),
             (
@@ -385,7 +381,7 @@ class MemoryDashboard:
                 logger.error(LOG_PREFIX + "记忆管理接口出错", exc_info=True)
                 return _error("服务器内部错误，详情见 AstrBot 日志")
 
-        view.__name__ = f"memory_beyond_{handler.__name__}"
+        view.__name__ = f"memory_pod_{handler.__name__}"
         return view
 
     # ------------------------------------------------------------ 定位
@@ -516,7 +512,7 @@ class MemoryDashboard:
                 item.update(
                     fileCount=count,
                     updatedAt=latest,
-                    hasState=plugin.state_path_for_key(key).is_file(),
+                    hasContext=plugin.stats_path_for_key(key).is_file(),
                     tidyPending=pending(SCOPE_SESSION, key),
                 )
                 sessions.append(item)
@@ -563,7 +559,7 @@ class MemoryDashboard:
                 "memoryEnabled": plugin._bool("enable_memory", True),
                 "global": global_info,
                 "people": people_info,
-                "compression": await plugin.compression_status(None),
+                "context": await plugin.context_status(None),
                 "sessions": sessions,
                 "autoTidy": self._autotidy_settings(settings),
             }
@@ -673,19 +669,27 @@ class MemoryDashboard:
             results.append({"file": file, "excerpt": excerpt})
         return _ok({"results": results})
 
-    async def _session_state(self, key: str) -> tuple[SessionState, bool]:
-        """(压缩状态, 是否正被插件持有)；持有中的以内存为准。"""
+    async def _session_stats(self, key: str) -> tuple[context_stats.ContextStats, bool]:
+        """(上下文统计, 是否正被插件持有)；持有中的以内存为准。"""
         found = self.plugin.runtime_for_key(key)
         if found is not None:
-            return found[1].state, True
-        return await self.plugin.load_state_file(self.plugin.state_path_for_key(key)), False
+            return found[1].stats, True
+        stats = await self.plugin.load_stats_for_key(key)
+        return stats or context_stats.ContextStats(), False
 
-    async def session_state(self) -> dict:
+    async def session_context(self) -> dict:
+        """只读的上下文面板：最近一次请求的构成、用量上报与 AstrBot 摘要。"""
         key = self._session_key(_query("key"))
-        state, live = await self._session_state(key)
-        data = _state_dict(state, self.plugin._pending.load(key))
+        stats, live = await self._session_stats(key)
+        record = self.plugin._registry.get(key)
+        umo = record.umo if record is not None else registry.umo_from_key(key)
+        summary = await self.plugin.astrbot_summary(umo) if umo else ""
+        data = _context_dict(stats, self.plugin._pending.load(key))
         data["live"] = live
         data["now"] = time.time()
+        data["summary"] = summary
+        data["hasSummary"] = bool(summary)
+        data["context"] = await self.plugin.context_status(umo or None)
         return _ok(data)
 
     # ------------------------------------------------------------ 记忆编辑
@@ -1014,24 +1018,6 @@ class MemoryDashboard:
 
     # ------------------------------------------------------------ 会话管理
 
-    async def session_reset(self) -> dict:
-        body = await _body()
-        key = self._session_key(body.get("key"))
-        plugin = self.plugin
-        found = plugin.runtime_for_key(key)
-        path = plugin.state_path_for_key(key)
-        if found is not None:
-            state = found[1].state
-        elif path.is_file():
-            state = await plugin.load_state_file(path)
-        else:
-            return _ok({}, "该会话还没有压缩状态")
-        state.reset_compression()
-        state.record_success()
-        plugin.invalidate_for_key(key)
-        await plugin.save_state_file(path, state)
-        return _ok({}, "已清空该会话的摘要与水位线")
-
     async def session_remark(self) -> dict:
         body = await _body()
         key = self._session_key(body.get("key"))
@@ -1043,7 +1029,7 @@ class MemoryDashboard:
         """清除会话数据。
 
         target=memories（默认）：只删该会话的记忆目录；
-        target=all：连同压缩状态、登记记录一并删除。
+        target=all：连同上下文统计、登记记录一并删除。
         """
         body = await _body()
         key = self._session_key(body.get("key"))
@@ -1073,7 +1059,7 @@ class MemoryDashboard:
             plugin._sessions.pop(found[0], None)
 
         def wipe() -> None:
-            path = plugin.state_path_for_key(key)
+            path = plugin.stats_path_for_key(key)
             if path.is_file():
                 path.unlink()
             plugin._registry.remove(key)
@@ -1081,7 +1067,7 @@ class MemoryDashboard:
         await asyncio.to_thread(wipe)
         return _ok(
             {"removed": removed},
-            "已删除该会话的记忆与压缩状态；会话再次发言时会重新登记",
+            "已删除该会话的记忆与上下文统计；会话再次发言时会重新登记",
         )
 
     # ------------------------------------------------------------ 记忆整理

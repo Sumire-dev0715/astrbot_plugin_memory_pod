@@ -1,8 +1,5 @@
-import asyncio
-import time
-
 from core import recall
-from core.memstore import MemoryHeader, ScopeStore
+from core.memstore import MemoryHeader
 from core.recall import Candidate, Recalled
 
 NOW = 1_800_000_000.0
@@ -97,76 +94,6 @@ def test_select_by_keywords_ignores_weak_body_matches():
     assert recall.select_by_keywords([weak], "开黑", [], 5) == []
 
 
-# ---------------------------------------------------------------- 模型挑选
-
-
-def test_selector_prompt_lists_refs_and_write_date():
-    cands = [cand("user-1.md", "阿杰", mtime=NOW - 3 * DAY)]
-    prompt = recall.build_selector_prompt(cands, "你好", 3)
-    expected_date = time.strftime("%Y-%m-%d", time.localtime(NOW - 3 * DAY))
-    assert f"1. session/user-1.md｜user｜写入 {expected_date}｜阿杰" in prompt
-    assert "最多 3 条" in prompt
-    # 写入日期用绝对日期，不随"现在"变成"3 天前"
-    assert "天前" not in prompt
-    # 候选清单在前、本轮消息在后：清单是稳定的前缀
-    assert prompt.index("记忆清单") < prompt.index("新消息：")
-    assert prompt.endswith("你好")
-
-
-def test_selector_prompt_is_stable_while_memories_are_unchanged():
-    cands = [
-        cand("a.md", "每周六开黑"),
-        cand("b.md", scope="global", mtime=NOW - 40 * DAY),
-    ]
-    first = recall.build_selector_prompt(cands, "这周六开黑吗", 5)
-    later = recall.build_selector_prompt(cands, "这周六开黑吗", 5)
-    assert first == later
-    # 清单部分不随"现在"变化；换一条消息只改清单之后的部分
-    other_query = recall.build_selector_prompt(cands, "今天吃什么", 5)
-    manifest = first.split("新消息：", 1)[0]
-    assert other_query.split("新消息：", 1)[0] == manifest
-    # 候选顺序就是调用方给它的顺序，不因时间重新排序
-    assert manifest.index("session/a.md") < manifest.index("global/b.md")
-
-
-def test_selector_prompt_ignores_usage_changes(tmp_path):
-    """真实 store 里召回记下使用统计后，挑选清单仍逐字不变。"""
-    store = ScopeStore(tmp_path)
-    content = (
-        "---\n"
-        "name: a\n"
-        "description: 每周六开黑\n"
-        "metadata:\n"
-        "  type: project\n"
-        "---\n\n"
-        "正文\n"
-    )
-    asyncio.run(store.write("a.md", content))
-    before = recall.build_selector_prompt(
-        [Candidate("session", header) for header in store.headers()], "开黑", 5
-    )
-    store.note_used(["a.md"], 123.0)
-    after = recall.build_selector_prompt(
-        [Candidate("session", header) for header in store.headers()], "开黑", 5
-    )
-    assert after == before
-
-
-def test_parse_selector_response_accepts_refs_and_bare_names():
-    cands = [cand("a.md"), cand("b.md", scope="global")]
-    chosen = recall.parse_selector_response(
-        '好的：["session/a.md", "b.md", "missing.md", "session/a.md"]', cands
-    )
-    assert [c.ref for c in chosen] == ["session/a.md", "global/b.md"]
-    # 答非所问 / 不是数组 / 空回复：返回 None，调用方退回关键词模式
-    assert recall.parse_selector_response("没有 JSON", cands) is None
-    assert recall.parse_selector_response("抱歉，我无法判断。", cands) is None
-    assert recall.parse_selector_response('{"a": 1}', cands) is None
-    assert recall.parse_selector_response("", cands) is None
-    # 明确选了空数组：模型认为没有相关的，不退回关键词
-    assert recall.parse_selector_response("[]", cands) == []
-
-
 # ---------------------------------------------------------------- 注入块
 
 
@@ -212,8 +139,3 @@ def test_build_recall_block_structure_and_budget():
 
 def test_build_recall_block_empty():
     assert recall.build_recall_block([], "[数据]") is None
-
-
-def test_build_recall_message_is_not_saved():
-    msg = recall.build_recall_message("block")
-    assert msg == {"role": "user", "content": "block", "_no_save": True}
