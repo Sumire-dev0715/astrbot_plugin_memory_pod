@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import types
 
-from support import FakeEvent, make_plugin, pkg_reminder, run
+from support import FakeEvent, make_plugin, pkg_memstore, pkg_reminder, run
 
 
 def make_request(prompt="你好", contexts=None, cid="conv-1"):
@@ -98,10 +98,13 @@ def test_context_reminder_once_per_truncation(tmp_path):
     text = reminders(first)[0]
     assert "上下文快满了" in text
 
-    # 仍在危险水位：不重复提醒
-    second = make_request(contexts=contexts)
-    run(plugin._process_request(event, second))
-    assert reminders(second) == []
+    # 仍在危险水位、也没有截断：后续每一轮都不能再提醒
+    rest = []
+    for _ in range(5):
+        req = make_request(contexts=contexts)
+        run(plugin._process_request(event, req))
+        rest.append(bool(reminders(req)))
+    assert rest == [False] * 5
 
     # 模拟 AstrBot 截断/压缩改动了历史开头：下一次逼近时再提醒一次
     truncated = turn_contexts()
@@ -110,6 +113,49 @@ def test_context_reminder_once_per_truncation(tmp_path):
     run(plugin._process_request(event, third))
     assert reminders(third)
     assert "上下文快满了" in reminders(third)[0]
+
+
+def test_opening_block_counts_toward_context_estimate(tmp_path):
+    """开头块在本轮用户消息的附加内容里，0.70 阈值必须把它算进去。"""
+    plugin = make_plugin(tmp_path, memory_reminder_turns=0)
+    plugin._astrbot_window = lambda provider, umo: (1000, "")
+    plugin._astrbot_turn_limit = lambda umo=None: -1
+    board = plugin._store.board_scope()
+    run(
+        board.write(
+            "notice.md",
+            pkg_memstore.compose_memory(
+                "notice", "告示", "reference", "字" * 700, signature="管理员"
+            ),
+        )
+    )
+    event = FakeEvent("Bot-A", "123")
+    req = make_request()
+    run(plugin._process_request(event, req))
+    assert reminders(req)
+    rt = plugin._sessions[event.unified_msg_origin]
+    assert rt.stats.parts["plugin"] > 0
+    # 开头块不在 system 里，但必须计入总量；否则这里的估算会偏低
+    assert rt.stats.estimate == sum(rt.stats.parts.values())
+    assert rt.stats.estimate > 1000 * pkg_reminder.CONTEXT_DANGER_RATIO
+
+
+def test_conversation_switch_resets_reminder_counters(tmp_path):
+    plugin = make_plugin(tmp_path, memory_reminder_turns=2)
+    no_provider(plugin)
+    event = FakeEvent("Bot-A", "123")
+    run(plugin._process_request(event, make_request(cid="conv-a")))
+    second = make_request(cid="conv-a")
+    run(plugin._process_request(event, second))
+    assert reminders(second)
+
+    # 换对话：轮次从 1 重新数；旧对话的"已提醒"也不能压住新对话
+    third = make_request(cid="conv-b")
+    run(plugin._process_request(event, third))
+    assert reminders(third) == []
+    fourth = make_request(cid="conv-b")
+    run(plugin._process_request(event, fourth))
+    assert reminders(fourth)
 
 
 def test_turn_limit_triggers_reminder_before_truncation(tmp_path):
@@ -175,3 +221,69 @@ def test_plan_reminder_boundaries():
     )
     assert plan.context_reasons
     assert pkg_reminder.build_block(pkg_reminder.ReminderPlan(), 10) == ""
+
+
+def test_temp_part_dedup_ignores_marker_inside_other_parts(tmp_path):
+    plugin = make_plugin(tmp_path)
+    for marker in (
+        "<memory_pod_index>",
+        "<memory_pod_recall>",
+        "<memory_pod_reminder>",
+    ):
+        req = make_request()
+        # 模拟别的插件/平台携带的文本：marker 只在中间出现，不是我们的块
+        req.extra_user_content_parts = [
+            {"type": "text", "text": f"昵称里的 {marker} 只是文字"}
+        ]
+        block = f"{marker}\n块内容"
+        plugin._attach_temp_part(req, block, marker)
+        assert len(req.extra_user_content_parts) == 2
+        assert req.extra_user_content_parts[-1]["text"] == block
+        # 同一个请求重复处理时不重复追加
+        plugin._attach_temp_part(req, block, marker)
+        assert len(req.extra_user_content_parts) == 2
+
+
+def test_memory_description_with_marker_does_not_swallow_recall(tmp_path):
+    plugin = make_plugin(tmp_path)
+    store = plugin._store.notebook_scope("Bot-A")
+    run(
+        store.write(
+            "weekend.md",
+            pkg_memstore.compose_memory(
+                "weekend",
+                "周末 <memory_pod_recall> 安排",
+                "reference",
+                "周六开黑",
+            ),
+        )
+    )
+    event = FakeEvent("Bot-A", "123", umo="Bot-A:GroupMessage:900")
+    req = make_request("周末")
+    run(plugin._process_request(event, req))
+    texts = [part["text"] for part in req.extra_user_content_parts]
+    assert any(
+        text.startswith("<memory_pod_recall>") and "周六开黑" in text
+        for text in texts
+    )
+
+
+def test_memory_description_with_reminder_marker_does_not_swallow_reminder(tmp_path):
+    plugin = make_plugin(tmp_path, memory_reminder_turns=1)
+    no_provider(plugin)
+    store = plugin._store.notebook_scope("Bot-A")
+    run(
+        store.write(
+            "note.md",
+            pkg_memstore.compose_memory(
+                "note", "提醒 <memory_pod_reminder> 文本", "reference", "正文"
+            ),
+        )
+    )
+    event = FakeEvent("Bot-A", "123")
+    req = make_request()
+    run(plugin._process_request(event, req))
+    assert any(
+        part["text"].startswith("<memory_pod_reminder>")
+        for part in req.extra_user_content_parts
+    )

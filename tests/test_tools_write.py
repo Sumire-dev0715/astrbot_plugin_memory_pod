@@ -52,6 +52,14 @@ def read_audit(store):
     return [json.loads(line) for line in path.read_text("utf-8").splitlines()]
 
 
+def opening_text(req):
+    return "\n".join(
+        part["text"]
+        for part in req.extra_user_content_parts
+        if part["text"].startswith("<memory_pod_index>")
+    )
+
+
 # ---------------------------------------------------------------- memory_write
 
 
@@ -574,3 +582,222 @@ def test_rewrite_saves_previous_version_for_undo(tmp_path):
     versions = store.history_versions("note.md")
     assert versions
     assert "第一版" in store.read_history("note.md", versions[0].version)
+
+
+# ------------------------------------------------- 写入后开头块快照刷新
+
+
+def test_delete_person_profile_removed_from_opening_block(tmp_path):
+    plugin = make_plugin(tmp_path)
+    store = notebook(plugin)
+    run(store.write("user-123.md", person_file("123", "隐私内容XYZ")))
+    event = FakeEvent("Bot-A", "123", umo="Bot-A:FriendMessage:123")
+    first = make_request("你好")
+    run(plugin._process_request(event, first))
+    assert "隐私内容XYZ" in opening_text(first)
+
+    receipt = run(plugin.memory_delete(event, "notebook", "user-123.md", "忘掉"))
+    assert "已删除 notebook/user-123.md" in receipt
+    second = make_request("你好")
+    run(plugin._process_request(event, second))
+    assert "隐私内容XYZ" not in opening_text(second)
+    assert run(store.read("user-123.md")) is None
+
+
+def test_delete_board_notice_removed_from_opening_block(tmp_path):
+    plugin = make_plugin(tmp_path)
+    board = plugin._store.board_scope()
+    run(
+        board.write(
+            "old.md",
+            thing("old", body="SENSITIVE 告示", signature="管理员"),
+        )
+    )
+    event = FakeEvent("Bot-A", "1", admin=True, umo="Bot-A:GroupMessage:900")
+    first = make_request("你好")
+    run(plugin._process_request(event, first))
+    assert "SENSITIVE 告示" in opening_text(first)
+
+    run(plugin.memory_delete(event, "board", "old.md", "过期"))
+    second = make_request("你好")
+    run(plugin._process_request(event, second))
+    assert "SENSITIVE 告示" not in opening_text(second)
+
+
+def test_board_write_visible_to_other_bot_next_turn(tmp_path):
+    plugin = make_plugin(tmp_path)
+    bot_b = FakeEvent("Bot-B", "2", umo="Bot-B:GroupMessage:20")
+    before = make_request("你好")
+    run(plugin._process_request(bot_b, before))
+    assert "11 月 11 日入职" not in opening_text(before)
+
+    admin = FakeEvent("Bot-A", "1", admin=True, umo="Bot-A:GroupMessage:10")
+    run(
+        plugin.memory_write(
+            admin, "board", "new.md", "reference", "告示", "11 月 11 日入职"
+        )
+    )
+    after = make_request("你好")
+    run(plugin._process_request(bot_b, after))
+    assert "11 月 11 日入职" in opening_text(after)
+
+
+def test_notebook_write_updates_opening_index_next_turn(tmp_path):
+    plugin = make_plugin(tmp_path)
+    event = FakeEvent("Bot-A", "123", umo="Bot-A:GroupMessage:900")
+    before = make_request("你好")
+    run(plugin._process_request(event, before))
+    assert "weekend.md" not in opening_text(before)
+
+    run(
+        plugin.memory_write(
+            event, "notebook", "weekend.md", "reference", "周末", "周六开黑"
+        )
+    )
+    after = make_request("你好")
+    run(plugin._process_request(event, after))
+    assert "weekend.md" in opening_text(after)
+
+
+# ------------------------------------------------- 其他审查问题的回归
+
+
+def test_read_with_leading_slash_still_counts_as_read(tmp_path):
+    plugin = make_plugin(tmp_path)
+    store = notebook(plugin)
+    event = FakeEvent("Bot-A", "123")
+    run(store.write("note.md", thing("note", body="第一版")))
+    assert "第一版" in run(plugin.memory_read(event, "notebook", "/note.md"))
+    receipt = run(
+        plugin.memory_write(
+            event, "notebook", "note.md", "reference", "摘要", "第二版"
+        )
+    )
+    assert "整篇重写" in receipt
+    assert "第二版" in run(store.read("note.md"))
+
+
+def test_memory_delete_can_remove_a_journal_file(tmp_path):
+    plugin = make_plugin(tmp_path)
+    store = notebook(plugin)
+    event = FakeEvent("Bot-A", "123")
+    run(plugin.memory_edit(event, "notebook", "journal", "append", "", "日记内容"))
+    name = next(item for item in store.list_files() if item.startswith("journal-"))
+    receipt = run(plugin.memory_delete(event, "notebook", name, "过期"))
+    assert f"已删除 notebook/{name}" in receipt
+    assert run(store.read(name)) is None
+    assert store.trash_entries()[0].file == name
+
+
+def test_board_signature_falls_back_to_bot_account_id(tmp_path):
+    plugin = make_plugin(tmp_path)
+    event = FakeEvent("Bot-A", "123", admin=True, name="小明")
+    run(
+        plugin.memory_write(
+            event, "board", "notice.md", "reference", "告示", "内容"
+        )
+    )
+    doc = pkg_memstore.parse_memory(
+        run(plugin._store.board_scope().read("notice.md"))
+    )
+    # FakeEvent 没有平台实例名称，机器人名回退到账号 ID，而不是平台类型
+    assert doc.signature == "小明（由 机器人 999 代发）"
+
+
+def test_bot_name_prefers_platform_instance_name(tmp_path):
+    plugin = make_plugin(tmp_path)
+
+    class Inst:
+        bot_name = "鲸群"
+
+        def meta(self):
+            return types.SimpleNamespace(id="Bot-A")
+
+    plugin.context.platform_manager = types.SimpleNamespace(
+        get_insts=lambda: [Inst()]
+    )
+    assert plugin._bot_name(FakeEvent("Bot-A", "1")) == "鲸群"
+
+
+# ------------------------------------------------- 不算"看过全文"的反例
+
+
+def test_board_overflow_title_only_does_not_count_as_read(tmp_path):
+    plugin = make_plugin(tmp_path)
+    board = plugin._store.board_scope()
+    run(
+        board.write(
+            "new.md",
+            thing("new", body="新" * 1200, signature="管理员"),
+            now=200.0,
+        )
+    )
+    run(
+        board.write(
+            "old.md",
+            thing("old", body="旧" * 1200, signature="管理员"),
+            now=100.0,
+        )
+    )
+    admin = FakeEvent("Bot-A", "1", admin=True, umo="Bot-A:GroupMessage:900")
+    req = make_request("你好")
+    run(plugin._process_request(admin, req))
+    opening = opening_text(req)
+    assert "### new.md" in opening
+    assert "- old.md —" in opening  # 超出 2000 字，只列标题
+    assert "旧" * 10 not in opening
+
+    receipt = run(
+        plugin.memory_write(
+            admin, "board", "old.md", "reference", "告示", "整篇重写"
+        )
+    )
+    assert "必须先读过" in receipt
+
+
+def test_recall_pointer_only_does_not_count_as_read(tmp_path):
+    plugin = make_plugin(tmp_path, recall_max_files=5, recall_full_files=0)
+    store = notebook(plugin)
+    for index in range(3):
+        run(
+            store.write(
+                f"weekend-{index}.md",
+                thing(
+                    f"weekend-{index}",
+                    description=f"周末安排 {index}",
+                    body=f"周末开黑 {index}",
+                ),
+            )
+        )
+    event = FakeEvent("Bot-A", "123", umo="Bot-A:GroupMessage:900")
+    req = make_request("周末")
+    run(plugin._process_request(event, req))
+    texts = [part["text"] for part in req.extra_user_content_parts]
+    recall_text = next(t for t in texts if t.startswith("<memory_pod_recall>"))
+    assert "可能也相关" in recall_text
+    assert "### notebook/weekend-0.md" not in recall_text
+
+    receipt = run(
+        plugin.memory_write(
+            event, "notebook", "weekend-0.md", "reference", "周末安排", "重写"
+        )
+    )
+    assert "必须先读过" in receipt
+
+
+def test_trimmed_pinned_profile_does_not_count_as_read(tmp_path):
+    plugin = make_plugin(tmp_path)
+    store = notebook(plugin)
+    run(store.write("user-123.md", person_file("123", "隐私" * 2000)))
+    event = FakeEvent("Bot-A", "123", umo="Bot-A:FriendMessage:123")
+    req = make_request("你好")
+    run(plugin._process_request(event, req))
+    opening = opening_text(req)
+    assert "中间省略" in opening
+
+    receipt = run(
+        plugin.memory_write(
+            event, "notebook", "user-123.md", "user", "我", "重写后的档案"
+        )
+    )
+    assert "必须先读过" in receipt

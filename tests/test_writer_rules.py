@@ -165,6 +165,24 @@ def test_journal_target_only_append():
         assert not ops and "只能通过 memory_edit 的 append 写入" in skipped[0]
 
 
+def test_delete_of_real_journal_file_is_allowed():
+    # 日记文件可以按真实文件名删除进回收站；写仍然只能走 file=journal。
+    name = "journal-2026-11-06.md"
+    ops, skipped = validate(
+        [{"op": "delete", "scope": "notebook", "file": name, "reason": "过期"}],
+        sender="123",
+        notebook=[name],
+    )
+    assert skipped == [] and ops[0].file == name
+    ops, skipped = validate(
+        [{"op": "write", "scope": "notebook", "file": name,
+          "type": "reference", "description": "x", "content": "y"}],
+        sender="123",
+        notebook=[name],
+    )
+    assert not ops and "日记由插件决定写到哪" in skipped[0]
+
+
 def test_apply_writes_keep_history_and_delete_goes_to_trash(tmp_path):
     store = tmp_path_store(tmp_path)
     run(store.write("note.md", thing("note", body="第一版")))
@@ -280,3 +298,40 @@ def test_delegated_signature_format():
         == "小明（由 鲸群 代发）"
     )
     assert pkg_writer.delegated_signature("", "").endswith("（由 机器人 代发）")
+
+
+def test_redact_paths_hides_absolute_paths():
+    text = pkg_writer.redact_paths(
+        "读取失败：'/tmp/tmplej/memories/notebook/Bot-A/secret.md'"
+    )
+    assert text == "读取失败：'<路径>'"
+    # 相对文件名与 URL 不能被误伤
+    assert pkg_writer.redact_paths("已写入 board/notice.md") == "已写入 board/notice.md"
+    assert (
+        pkg_writer.redact_paths("http://example.com/a/b")
+        == "http://example.com/a/b"
+    )
+
+
+def test_apply_result_redacts_paths_in_store_failure_messages():
+    class FailingStore:
+        async def edit(self, *args, **kwargs):
+            return pkg_memstore.WriteReport(
+                False, "读取失败：'/tmp/data/memories/notebook/a.md'"
+            )
+
+    op = pkg_writer.Operation(
+        op=pkg_writer.OP_EDIT,
+        scope="notebook",
+        file="a.md",
+        mode="append",
+        new="x",
+    )
+    result = run(
+        pkg_writer.apply_operations(
+            {"notebook": FailingStore()}, [op], actor="Bot-A", source="123"
+        )
+    )
+    assert not result.ok
+    assert "/tmp/data" not in result.skipped[0]
+    assert "<路径>" in result.skipped[0]

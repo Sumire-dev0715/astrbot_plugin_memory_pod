@@ -53,6 +53,16 @@ WRITE_RULES = """写在哪里（必须遵守）：
 
 _PERSON_RE = re.compile(r"^user-(\d+)\.md$", re.I)
 _INDEX_NAME = memstore.INDEX_FILENAME.lower()
+# 绝对路径（含 Windows 盘符）。底层 OSError 的原文可能带数据目录与会话
+# 目录名，回执给聊天模型前要一并抹掉；相对文件名（如 board/x.md）不动。
+_ABS_PATH_RE = re.compile(
+    r"(?<![\w:/])(?:[A-Za-z]:[\\/]|/)(?:[^\s'\"，。；：（）<>]+)"
+)
+
+
+def redact_paths(text: str) -> str:
+    """把文本里的绝对路径替换成占位符；用于工具回执。"""
+    return _ABS_PATH_RE.sub("<路径>", text or "")
 
 
 @dataclass
@@ -214,7 +224,7 @@ def validate_operations(
         if problem:
             skipped.append(f"{label}：{problem}")
             continue
-        if journal.is_journal_name(file):
+        if journal.is_journal_name(file) and op != OP_DELETE:
             skipped.append(f"{label}：日记由插件决定写到哪，请用 file=journal 追加")
             continue
         # 规则 2：留言板只有管理员能写
@@ -381,11 +391,13 @@ async def apply_operations(
             applied += 1
             actual = report.file or op.file
             changes.append((op.scope, actual, op.op))
-            messages.append(report.message)
+            messages.append(redact_paths(report.message))
             if report.content:
                 written[f"{op.scope}/{actual}"] = report.content
         else:
-            skipped.append(f"{op.scope}/{op.file}：{report.message}")
+            skipped.append(
+                f"{op.scope}/{op.file}：{redact_paths(report.message)}"
+            )
     result = ApplyResult(
         ok=applied == len(ops),
         applied=applied,

@@ -555,13 +555,16 @@ class MemoryPodPlugin(Star):
         # 只读地看一眼 AstrBot 交给我们的历史：插件不改写 req.contexts
         contexts = [m for m in (req.contexts or []) if isinstance(m, dict)]
 
-        # ---- 对话切换 / 重置：开头块快照与"看过"记录作废，本轮从磁盘重读 ----
+        # ---- 对话切换 / 重置：快照、"看过"记录与提醒轮次都从零开始 ----
         cid = await self._conversation_id(event, req)
         if cid != rt.cid or not contexts:
             rt.cid = cid
             rt.clear_index()
             # 新对话的模型没有上一段对话的记忆，整篇重写前要重新读
             rt.seen.clear()
+            # "每隔 N 轮"按对话计数；旧对话的上下文提醒也不该压住新对话
+            rt.turn_count = 0
+            rt.reminder_sent = False
 
         # ---- AstrBot 截断或压缩改动了历史开头：快照同样作废 ----
         # 这时提示词缓存本来就已经失效，重建开头块不会额外损失缓存。
@@ -635,10 +638,10 @@ class MemoryPodPlugin(Star):
         }
         rt.stats = context_stats.ContextStats(
             parts=parts,
-            # plugin 是 system 的子集，只用于展示，不重复计入总量
-            estimate=sum(
-                value for key, value in parts.items() if key != "plugin"
-            ),
+            # 开头块是本轮用户消息的 _no_save 附加内容，并不在 system_prompt
+            # 里；AstrBot 计数时会算上它，这里也必须计入总量，否则上下文快到
+            # 截断/压缩时估算偏低（PLAN 3.8.5）。
+            estimate=sum(parts.values()),
             actual=rt.stats.actual,
             cache_hit=rt.stats.cache_hit,
             request_at=now,
@@ -684,17 +687,20 @@ class MemoryPodPlugin(Star):
             turns=turns.conversation_turns(req.contexts or []),
             turn_limit=self._astrbot_turn_limit(umo),
         )
-        if plan.context_reasons and rt.reminder_sent:
-            # 这次截断/压缩之前已经提醒过，只保留每 N 轮的提醒
+        at_risk = bool(plan.context_reasons)
+        if at_risk and rt.reminder_sent:
+            # 这次截断/压缩之前已经提醒过：只保留每 N 轮的提醒，并且
+            # 不能因为抑制掉上下文原因就把"已提醒"标志清掉，否则下一轮
+            # 仍在水位之上时会再次提醒。
             plan = reminder.ReminderPlan(periodic=plan.periodic)
-        if not plan.context_reasons:
+        elif not at_risk:
             rt.reminder_sent = False
         if not plan.wanted:
             return
         block = reminder.build_block(plan, every)
         if block:
             self._attach_temp_part(req, block, REMINDER_MARKER)
-        if plan.context_reasons:
+        if at_risk:
             rt.reminder_sent = True
 
     @staticmethod
@@ -708,8 +714,17 @@ class MemoryPodPlugin(Star):
         """
         parts = list(getattr(req, "extra_user_content_parts", None) or [])
         for part in parts:
-            text = part.get("text") if isinstance(part, dict) else getattr(part, "text", "")
-            if isinstance(text, str) and marker in text:
+            # 只认我们自己追加的、以 marker 开头的 _no_save 块。不能用
+            # "text 里包含 marker"来判断：开头块索引里的记忆描述、别的
+            # 插件/平台追加的提醒文本都可能在中间带上同样的字符串，
+            # 那样会把召回块或提醒块静默吞掉。
+            if isinstance(part, dict):
+                text = part.get("text")
+                no_save = bool(part.get("_no_save"))
+            else:
+                text = getattr(part, "text", "")
+                no_save = bool(getattr(part, "_no_save", False))
+            if no_save and isinstance(text, str) and text.lstrip().startswith(marker):
                 return
         parts.append({"type": "text", "text": block, "_no_save": True})
         req.extra_user_content_parts = parts
@@ -1442,10 +1457,11 @@ class MemoryPodPlugin(Star):
         if not restored:
             # 恢复时已经记过一次使用
             await asyncio.to_thread(store.note_used, [file])
-        # 读过最新版本：整篇重写前校验用（PLAN 3.8.4）
+        # 读过最新版本：整篇重写前校验用（PLAN 3.8.4）。键与写入层一样
+        # 去掉前导斜杠，避免 memory_read("/note.md") 与 note.md 对不上。
         umo = str(getattr(event, "unified_msg_origin", "") or "")
         rt = await self._runtime(umo)
-        rt.seen[f"{scope}/{file}"] = _content_sha1(content)
+        rt.seen[f"{scope}/{(file or '').strip().lstrip('/')}"] = _content_sha1(content)
         # 时效按 frontmatter 的 updated 戳算；老文件没有戳才退回 mtime
         written = memstore.parse_stamp(
             memstore.parse_memory(content).updated
@@ -1604,6 +1620,29 @@ class MemoryPodPlugin(Star):
                 return item
         return ""
 
+    def _refresh_after_tool_write(self, umo: str, scope: str) -> None:
+        """聊天工具改了记忆后，作废受影响的会话开头块快照。
+
+        与管理页改动走同一条 invalidate_scope：删除某人的档案后若继续用
+        旧快照，已删内容还会发给模型；管理员在对话里代发的留言板告示也
+        必须让所有会话下一轮就能看到。
+        """
+        key = memstore.safe_key(umo) if scope == memstore.SCOPE_WHISPER and umo else None
+        self.invalidate_scope(scope, key)
+
+    @staticmethod
+    def _seen_digest(rt: RuntimeSession, scope: str, name: str) -> str:
+        """取出这个文件被看过时的内容摘要；大小写不敏感文件系统上也对得上。"""
+        ref = f"{scope}/{name}"
+        digest = rt.seen.get(ref)
+        if digest:
+            return digest
+        lowered = ref.lower()
+        for key, value in rt.seen.items():
+            if key.lower() == lowered:
+                return value
+        return ""
+
     async def _rewrite_problem(
         self,
         event: AstrMessageEvent,
@@ -1629,7 +1668,7 @@ class MemoryPodPlugin(Star):
             )
         umo = str(getattr(event, "unified_msg_origin", "") or "")
         rt = await self._runtime(umo)
-        if rt.seen.get(f"{scope}/{existing}") != _content_sha1(content):
+        if self._seen_digest(rt, scope, existing) != _content_sha1(content):
             return (
                 f"整篇重写 {scope}/{existing} 前必须先读过它的最新版本："
                 f"请先调用 memory_read（scope={scope}，file={existing}）确认当前内容；"
@@ -1638,7 +1677,12 @@ class MemoryPodPlugin(Star):
         return ""
 
     def _bot_name(self, event: AstrMessageEvent) -> str:
-        """留言板代发署名里的机器人名：优先平台实例上的名称，取不到用平台名。"""
+        """留言板代发署名里的机器人名。
+
+        AstrBot 4.29.4 的事件没有公开的机器人昵称接口；先找平台实例上
+        适配器自己提供的名称字段，取不到就用机器人账号 ID（比平台类型名
+        更能区分多台机器人），最后退回"机器人"。
+        """
         try:
             getter = getattr(event, "get_platform_id", None)
             platform_id = str(getter() if callable(getter) else "")
@@ -1653,13 +1697,13 @@ class MemoryPodPlugin(Star):
                     value = str(getattr(inst, attr, "") or "").strip()
                     if value:
                         return value
-        except Exception:  # noqa: BLE001 - 平台实现不可控，取不到就退回平台名
+        except Exception:  # noqa: BLE001 - 平台实现不可控，取不到就退回账号 ID
             pass
         try:
-            name = str(event.get_platform_name() or "").strip()
+            self_id = str(event.get_self_id() or "").strip()
         except Exception:  # noqa: BLE001
-            name = ""
-        return name or "机器人"
+            self_id = ""
+        return f"机器人 {self_id}" if self_id else "机器人"
 
     async def _visible_files(self, event: AstrMessageEvent) -> set[str]:
         """当前这条消息能看到的记忆文件：留言板、小本本与本对话悄悄话。"""
@@ -1772,6 +1816,10 @@ class MemoryPodPlugin(Star):
         if not result.ok:
             return self._failed_receipt(result)
         actual = result.changes[0][1]
+        # 记忆已经变了：作废受影响的开头块快照，下一轮重读
+        self._refresh_after_tool_write(
+            str(getattr(event, "unified_msg_origin", "") or ""), scope
+        )
         new_file = not self._existing_name(files, name)
         head = f"已写入 {scope}/{actual}（{'新建' if new_file else '整篇重写'}）"
         detail = result.messages[0] if result.messages else result.message
@@ -1849,6 +1897,9 @@ class MemoryPodPlugin(Star):
         if not result.ok:
             return self._failed_receipt(result)
         actual = result.changes[0][1]
+        self._refresh_after_tool_write(
+            str(getattr(event, "unified_msg_origin", "") or ""), scope
+        )
         head = f"已写日记 {scope}/{actual}" if is_journal else f"已修改 {scope}/{actual}"
         detail = result.messages[0] if result.messages else result.message
         lines = [head + "。" + detail]
@@ -1907,6 +1958,9 @@ class MemoryPodPlugin(Star):
         if not result.ok:
             return self._failed_receipt(result)
         actual = result.changes[0][1]
+        self._refresh_after_tool_write(
+            str(getattr(event, "unified_msg_origin", "") or ""), scope
+        )
         lines = [
             f"已删除 {scope}/{actual}，已移入回收站，可恢复；"
             "对应索引行已同步移除。"
