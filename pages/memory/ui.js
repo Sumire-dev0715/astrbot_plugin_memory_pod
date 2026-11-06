@@ -303,26 +303,37 @@
     }
   }
 
-  /** 下载接口返回的内容：优先由面板代为下载（不受 iframe 沙箱限制），
-   *  旧版本没有这个能力时在页面里用 Blob 链接下载。 */
+  /**
+   * 下载接口返回的内容。先经 apiGet 取回来再保存：接口出错（备份令牌过期、被新备份挤掉、
+   * 服务器内部错误）时后端返回 HTTP 200 加 {status:"error"}，apiGet 会把它当错误抛出；
+   * 面板代下载（bridge.download，对应面板的 files:download）只存响应体、不看 status，
+   * 会把错误 JSON 存成备份文件，页面还照样提示「备份已生成」。
+   * 取到内容后在页面里用 Blob 链接保存（面板的沙箱 iframe 带 allow-downloads）；
+   * Blob 链接用不了时才退回面板代下载。
+   */
   async function download(endpoint, params, filename) {
-    if (bridge && typeof bridge.download === "function") {
-      try {
-        await bridge.download(endpoint, cleanParams(params), filename);
-        return;
-      } catch (err) {
-        // 面板代下载失败时退回页面内下载
+    const data = await apiGet(endpoint, params);
+    try {
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const link = h("a", { href: url, download: filename, class: "sr-only" });
+      document.body.append(link);
+      link.click();
+      link.remove();
+      setTimeout(function () {
+        URL.revokeObjectURL(url);
+      }, 1000);
+      return;
+    } catch (err) {
+      if (!bridge || typeof bridge.download !== "function") {
+        throw toError(err);
       }
     }
-    const data = await apiGet(endpoint, params);
-    const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
-    const link = h("a", { href: URL.createObjectURL(blob), download: filename, class: "sr-only" });
-    document.body.append(link);
-    link.click();
-    link.remove();
-    setTimeout(function () {
-      URL.revokeObjectURL(link.href);
-    }, 1000);
+    try {
+      await bridge.download(endpoint, cleanParams(params), filename);
+    } catch (err) {
+      throw toError(err);
+    }
   }
 
   // ------------------------------------------------------------ 提示

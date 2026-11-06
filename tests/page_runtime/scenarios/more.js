@@ -132,8 +132,8 @@ const { boot, assert, until, sleep, section, summary } = require("../harness.js"
   click(find("[role=tab]", "导出"));
   await sleep(60);
   click(find(".pane-detail button", "导出备份"));
-  await until(() => p.downloads.length >= 1, "导出");
-  const bundle = await p.getJson(`/export/file?token=${p.downloads[0].params.token}`);
+  await until(() => p.saved.length >= 1, "导出");
+  const bundle = JSON.parse(await p.saved[0].blob.text());
   click(find("[role=tab]", "导入"));
   await sleep(40);
   const fi = $("input[type=file]");

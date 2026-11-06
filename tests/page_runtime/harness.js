@@ -119,6 +119,9 @@ async function boot(opts) {
   (opts.hold || []).forEach(hold);
   const fakeURL = {
     createObjectURL(blob) {
+      if (opts.blobFails) {
+        throw new Error("页面内保存不可用（测试里模拟）");
+      }
       blobs.push(blob);
       return "blob:page-runtime/" + blobs.length;
     },

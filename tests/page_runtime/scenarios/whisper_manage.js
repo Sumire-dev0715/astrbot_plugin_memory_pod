@@ -175,16 +175,18 @@ const { boot, assert, until, sleep, section, summary } = require("../harness.js"
   const boxes = $$(".checklist input[type=checkbox]");
   assert(boxes.length >= 5, "导出可选各处: " + boxes.length);
   click(find(".pane-detail button", "导出备份"));
-  await until(() => p.downloads.length === 1, "触发下载");
-  assert(p.downloads[0].endpoint === "export/file" && p.downloads[0].params.token && /^memory-backup-/.test(p.downloads[0].filename), "下载参数: " + JSON.stringify(p.downloads[0]));
+  await until(() => p.saved.length === 1, "触发保存");
+  const exportCall = p.lastCall("export/file");
+  assert(exportCall && exportCall.params.token && /^memory-backup-/.test(p.saved[0].filename), "保存参数: " + JSON.stringify([exportCall, p.saved[0].filename]));
+  assert(p.downloads.length === 0, "先经 apiGet 取回再在页面里保存，没有走面板代下载");
   // 取到备份内容，用于导入
   const exp = p.lastCall("export/prepare");
   assert(exp.body.scopes.length >= 5 && exp.body.includeForgotten === true, "export/prepare payload");
 
   click(find("[role=tab]", "导入"));
   await sleep(30);
-  const bundle = await p.getJson(`/export/file?token=${p.downloads[0].params.token}`);
-  assert(bundle.format === "memory-pod-backup", "备份格式");
+  const bundle = JSON.parse(await p.saved[0].blob.text());
+  assert(bundle.format === "memory-pod-backup", "保存下来的是备份内容，格式正确");
   const fileInput = $("input[type=file]");
   p.setFile(fileInput, "b.json", JSON.stringify(bundle));
   change(fileInput);
