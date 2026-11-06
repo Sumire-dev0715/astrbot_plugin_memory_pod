@@ -312,6 +312,20 @@ def test_ambiguous_check_requires_layer_question(tmp_path):
     assert not ok
 
 
+def test_ambiguous_check_accepts_confirmation_without_question_mark(tmp_path):
+    """“你定一下”也是提问：不能只认问号，否则会误判在等确认的回复。"""
+    scenario = ambiguous_ask_where()
+    run = _run(scenario, GoodEvalModel(), tmp_path)
+    check = scenario.checks[0].fn
+    run.env.turns[0].reply = "这条放悄悄话还是小本本，你定一下，我再写。"
+    ok, detail = check(run.env)
+    assert ok, detail
+    # 只声明放在哪、没有等用户确认，仍然不算问过
+    run.env.turns[0].reply = "我记在悄悄话了，你说的换工作。"
+    ok, _detail = check(run.env)
+    assert not ok
+
+
 class _RefusalOnlyModel:
     """完全不调用工具，只在回复里声明没有权限。"""
 

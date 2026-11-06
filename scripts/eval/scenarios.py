@@ -1012,7 +1012,20 @@ def ambiguous_ask_where() -> Scenario:
         names_layer = any(
             word in turn.reply for word in ("悄悄话", "小本本", "哪一层", "放哪")
         )
-        asked = ("？" in turn.reply or "?" in turn.reply)
+        # 提问不一定带问号："你定一下""告诉我"同样是在等用户确认
+        asked = any(
+            word in turn.reply
+            for word in (
+                "？",
+                "?",
+                "吗",
+                "你定",
+                "告诉我",
+                "要不要",
+                "确认一下",
+                "确认下",
+            )
+        )
         if not (names_layer and asked):
             return False, "拿不准放哪里时没有明确问用户放哪一层"
         if "换工作" in _memory_text(env):
