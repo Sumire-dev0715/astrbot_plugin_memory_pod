@@ -107,6 +107,19 @@ def test_import_conflict_policies(tmp_path):
     assert current != run(scope.read("note.md"))
 
 
+def test_snapshot_skips_non_utf8_files_instead_of_failing(tmp_path):
+    scope = store(tmp_path)
+    run(scope.write("good.md", thing("good", body="正常正文")))
+    (scope.root / "bad.md").write_bytes(b"\xff\xfe not utf8")
+    entries, index = scope.snapshot()
+    assert {entry.name for entry in entries} == {"good.md"}
+    assert "good.md" in index
+    (scope.root / "MEMORY.md").write_bytes(b"\xff\xfe broken index")
+    entries, index = scope.snapshot()
+    assert {entry.name for entry in entries} == {"good.md"}
+    assert index == ""
+
+
 def test_search_modes_and_forgotten_hits(tmp_path):
     scope = store(tmp_path)
     run(scope.write("a.md", thing("a", description="猫", body="喜欢猫和狗")))

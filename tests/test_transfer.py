@@ -42,6 +42,18 @@ def test_export_and_import_three_layers(tmp_path):
     assert all(report["counts"]["same"] == 1 for report in reports)
 
 
+def test_export_survives_non_utf8_file_in_one_scope(tmp_path):
+    transfer, mover, store, _ = make(tmp_path)
+    run(store.board_scope().write("notice.md", thing("notice", body="告示", signature="管理员")))
+    run(store.notebook_scope("Bot-A").write("good.md", thing("good", body="正常")))
+    (store.notebook_scope("Bot-A").root / "bad.md").write_bytes(b"\xff\xfe not utf8")
+    bundle = run(mover.export())
+    scopes = {item["scope"]: item for item in bundle["scopes"]}
+    assert set(scopes) == {"board", "notebook"}
+    names = {entry["name"] for entry in scopes["notebook"]["files"]}
+    assert names == {"good.md"}
+
+
 def test_import_whisper_lands_only_in_selected_key(tmp_path):
     transfer, mover, store, _ = make(tmp_path)
     run(store.whisper_scope("a").write("secret.md", thing("secret", body="A 的秘密")))

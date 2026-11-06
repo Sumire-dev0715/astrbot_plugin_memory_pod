@@ -2118,7 +2118,8 @@ class ScopeStore:
                 try:
                     content = path.read_text("utf-8")
                     mtime = path.stat().st_mtime
-                except OSError:
+                except (OSError, UnicodeDecodeError):
+                    # 非 UTF-8 文件读不成文本；跳过这一份，别让整个导出失败
                     continue
                 entries.append(
                     ImportEntry(
@@ -2132,7 +2133,7 @@ class ScopeStore:
         index_path = self.root / INDEX_FILENAME
         try:
             index = index_path.read_text("utf-8") if index_path.is_file() else ""
-        except OSError:
+        except (OSError, UnicodeDecodeError):
             index = ""
         return entries, index
 
