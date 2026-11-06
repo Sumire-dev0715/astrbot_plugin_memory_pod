@@ -123,6 +123,32 @@ def test_forgotten_board_notice_only_restored_by_admin(tmp_path):
     assert not board.has_forgotten("notice.md")
 
 
+def test_history_cleanup_only_runs_when_memory_enabled(tmp_path):
+    event = FakeEvent("Bot-A", "123")
+
+    def request():
+        return types.SimpleNamespace(
+            prompt="你好",
+            contexts=[{"role": "user", "content": "早"}],
+            system_prompt="你是测试机器人。",
+            conversation=types.SimpleNamespace(cid="conv-1"),
+            func_tool=None,
+            image_urls=[],
+            extra_user_content_parts=[],
+        )
+
+    disabled = make_plugin(tmp_path, enable_memory=False)
+    calls = []
+    disabled._schedule_history_cleanup = lambda: calls.append("cleanup")
+    run(disabled._process_request(event, request()))
+    assert calls == []
+
+    enabled = make_plugin(tmp_path, enable_memory=True)
+    enabled._schedule_history_cleanup = lambda: calls.append("cleanup")
+    run(enabled._process_request(event, request()))
+    assert calls == ["cleanup"]
+
+
 def test_manual_consolidation_uses_default_chat_provider(tmp_path):
     plugin = make_plugin(tmp_path)
     calls = []

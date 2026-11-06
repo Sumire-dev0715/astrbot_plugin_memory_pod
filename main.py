@@ -543,7 +543,6 @@ class MemoryPodPlugin(Star):
         umo = str(getattr(event, "unified_msg_origin", "") or "")
         if not umo:
             return
-        self._schedule_history_cleanup()
         # 其他插件自行发起的模型调用（event.request_llm，不带对话也没有历史）
         # 同样经过这个钩子：它不是本会话的对话请求，不注入也不碰快照
         if getattr(req, "conversation", None) is None and not (req.contexts or []):
@@ -593,6 +592,8 @@ class MemoryPodPlugin(Star):
         memory_on = self._bool("enable_memory", True)
 
         if memory_on:
+            # 关闭记忆后不再动磁盘：历史与回收站的保留期清理也不跑
+            self._schedule_history_cleanup()
             # ---- 遗忘扫描：长期没用到的记忆退出索引与召回（后台，按目录节流） ----
             self._maybe_forget(event, now)
 
