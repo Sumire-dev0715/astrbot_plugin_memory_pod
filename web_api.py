@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import secrets
 import time
 from pathlib import Path
@@ -311,6 +312,32 @@ def _context_dict(stats: context_stats.ContextStats) -> dict:
     }
 
 
+# main.py 的 _astrbot_window 给上下文窗口写的来源说明（中文句子）→ 稳定的来源代码。
+# 页面按界面语言自己写说明，不显示这句中文；认不出来的说明原样交给页面兜底。
+_WINDOW_NOTE_PREFIXES = (
+    ("跟随 AstrBot 的提供商配置", "provider"),
+    ("跟随 AstrBot 的内置模型表", "builtin"),
+    ("跟随 AstrBot 的上下文窗口兜底值", "fallback"),
+)
+
+
+def _context_info(status: dict) -> dict:
+    """上下文状态（窗口、轮数上限、用户识别）加上窗口来源代码与模型名。"""
+    data = dict(status or {})
+    note = str(data.get("windowNote") or "")
+    source, model = "", ""
+    for prefix, code in _WINDOW_NOTE_PREFIXES:
+        if note.startswith(prefix):
+            source = code
+            if code == "builtin":
+                match = re.search(r"[（(](.+)[）)]\s*$", note)
+                model = match.group(1) if match else ""
+            break
+    data["windowSource"] = source
+    data["windowModel"] = model
+    return data
+
+
 def _scan_scope(store: memstore.ScopeStore) -> tuple[int, float]:
     """(记忆文件数, 最近写入时间)；同步，放进线程执行。"""
     count = 0
@@ -587,7 +614,7 @@ class MemoryDashboard:
                 },
                 "notebooks": notebooks,
                 "whispers": whispers,
-                "context": await plugin.context_status(None),
+                "context": _context_info(await plugin.context_status(None)),
             }
         )
 
@@ -737,7 +764,7 @@ class MemoryDashboard:
         data["now"] = time.time()
         data["summary"] = summary
         data["hasSummary"] = bool(summary)
-        data["context"] = await self.plugin.context_status(umo or None)
+        data["context"] = _context_info(await self.plugin.context_status(umo or None))
         return _ok(data)
 
     # ------------------------------------------------------------ 记忆编辑

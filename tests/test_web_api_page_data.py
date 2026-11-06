@@ -158,3 +158,41 @@ def test_scope_detail_reports_retention_days(tmp_path):
     retention = raw(route(dashboard, "scope_detail"))["retention"]
     assert retention["historyDays"] == 0
     assert retention["trashDays"] == pkg_history.DEFAULT_KEEP_DAYS
+
+
+def test_context_status_carries_window_source_code(tmp_path):
+    """上下文窗口的来源说明是中文句子；接口另给稳定的来源代码，页面按语言自己写说明。"""
+    plugin, dashboard = setup(tmp_path)
+    umo = "Bot-A:FriendMessage:1"
+    key = pkg_memstore.safe_key(umo)
+    cases = [
+        ("跟随 AstrBot 的提供商配置", "provider", ""),
+        ("跟随 AstrBot 的内置模型表（claude-sonnet-4）", "builtin", "claude-sonnet-4"),
+        ("跟随 AstrBot 的内置模型表(gpt-4o)", "builtin", "gpt-4o"),
+        ("跟随 AstrBot 的上下文窗口兜底值", "fallback", ""),
+        ("", "", ""),
+        ("以后新增的别的说明", "", ""),
+    ]
+    for note, source, model in cases:
+
+        async def status(_umo=None, note=note):
+            return {
+                "window": 200000 if note else 0,
+                "windowNote": note,
+                "turnLimit": -1,
+                "userIdentifier": False,
+            }
+
+        plugin.context_status = status
+        context = raw(route(dashboard, "overview"))["context"]
+        assert context["windowSource"] == source, note
+        assert context["windowModel"] == model, note
+        # 原来的说明文字仍然带着，页面认不出来源代码时拿它兜底
+        assert context["windowNote"] == note
+        assert context["window"] == (200000 if note else 0)
+
+        query(key=key)
+        panel = raw(route(dashboard, "whisper_context"))["context"]
+        assert panel["windowSource"] == source, note
+        assert panel["windowModel"] == model, note
+        assert panel["windowNote"] == note
