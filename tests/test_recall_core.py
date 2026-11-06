@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from support import pkg_injection, pkg_memstore, pkg_recall, run, thing
+from support import pkg_injection, pkg_memstore, pkg_origin, pkg_recall, run, thing
 
 
 def header(file, description="", body="", mem_type="reference", updated=1.0):
@@ -111,14 +111,29 @@ def test_indexed_refs_hide_description_in_pointer_line():
     assert "摘要" not in line
 
 
-def test_prepare_view_trims_and_keeps_source_note():
+def test_prepare_view_trims_and_keeps_origin_note():
+    now = 1_700_000_000.0
+    content = pkg_memstore.compose_memory("user-123", "我", "user", "身份", source="456")
+    content = pkg_memstore.stamp_memory(
+        content,
+        now,
+        origin_record=pkg_origin.Origin(
+            "group",
+            "456",
+            "小明",
+            now - 3 * 86400,
+            pkg_origin.session_hash("Bot-A:GroupMessage:900"),
+        ),
+    )
     view = pkg_injection.prepare_view(
         "notebook/user-123.md",
-        pkg_memstore.compose_memory("user-123", "我", "user", "身份", source="456"),
+        content,
         1.0,
+        current_session=pkg_origin.session_hash("Bot-A:FriendMessage:123"),
+        now=now,
     )
     assert "身份" in view.body
-    assert "来源 456" in pkg_injection.render_title(view, now=1.0)
+    assert "小明在群聊里说的，3 天前" in view.origin_note
 
 
 def test_forced_profile_does_not_consume_full_text_quota(tmp_path):

@@ -48,6 +48,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import history, index_view, insights, journal
+from . import origin as origin_mod
 
 INDEX_FILENAME = "MEMORY.md"
 INDEX_MAX_LINES = 200
@@ -215,6 +216,8 @@ class MemoryDoc:
     source: str = ""
     # 留言板告示的署名，由插件写进 metadata.signature
     signature: str = ""
+    # 来源记录（PLAN 3.9.1）：会话类型、说话人、时间与会话键短哈希
+    origin: str = ""
 
 
 def parse_memory(content: str) -> MemoryDoc:
@@ -238,7 +241,9 @@ def parse_memory(content: str) -> MemoryDoc:
             value = value.strip().strip("'\"")
             if line[:1] in (" ", "\t"):
                 if in_metadata and (
-                    key == "type" or key in STAMP_KEYS or key == "signature"
+                    key == "type"
+                    or key in STAMP_KEYS
+                    or key in ("signature", "origin")
                 ):
                     nested.setdefault(key, value)
                 continue
@@ -257,6 +262,7 @@ def parse_memory(content: str) -> MemoryDoc:
         updated=nested.get("updated", ""),
         source=nested.get("source", ""),
         signature=nested.get("signature", ""),
+        origin=nested.get("origin", ""),
     )
 
 
@@ -390,14 +396,19 @@ def rewrite_description(content: str, description: str) -> str:
 
 
 def stamp_memory(
-    content: str, now: float, source: str = "", previous: str | None = None
+    content: str,
+    now: float,
+    source: str = "",
+    previous: str | None = None,
+    origin_record: origin_mod.Origin | None = None,
 ) -> str:
-    """补齐 metadata 下的 created / updated / source，其余内容一个字不动。
+    """补齐 metadata 下的 created / updated / source / origin，其余内容一字不动。
 
     created 先取已有文件的（改写、整理都不会把老记忆变"新"），没有才取
     内容里写的，再没有才取现在；updated 一律取现在；source 取内容里写的
-    （没写则继承已有文件的），再并入本次的来源 ID。没有 frontmatter 的
-    内容原样返回。
+    （没写则继承已有文件的），再并入本次的来源 ID。origin 同样继承已有
+    记录，并在这次是工具写入时并入新的一条（PLAN 3.9.1）。没有 frontmatter
+    的内容原样返回。
     """
     match = _FRONTMATTER_RE.match(content or "")
     if not match:
@@ -416,6 +427,11 @@ def stamp_memory(
     sources = merge_sources(doc.source or (prev.source if prev else ""), source)
     if sources:
         fields["source"] = sources
+    origin_text = doc.origin or (prev.origin if prev else "")
+    if origin_record is not None:
+        origin_text = origin_mod.merge(origin_text, origin_record)
+    if origin_text:
+        fields["origin"] = origin_text
     head = _rewrite_metadata(match.group(1), fields)
     return content[: match.start(1)] + head + content[match.end(1):]
 
@@ -501,6 +517,8 @@ class MemoryHeader:
     source: str = ""
     # 留言板告示的署名
     signature: str = ""
+    # 来源记录（PLAN 3.9.1）：召回、开头块与搜索列表按它标注来源
+    origin: str = ""
     # 使用统计（来自 .usage.json）：最近一次被召回或读取的时间、累计次数
     last_used: float = 0.0
     uses: int = 0
@@ -865,6 +883,7 @@ class ScopeStore:
             created=parse_stamp(doc.created) or 0.0,
             source=doc.source,
             signature=doc.signature,
+            origin=doc.origin,
         )
 
     # ------------------------------------------------------------ 写 / 删
@@ -876,11 +895,14 @@ class ScopeStore:
         source: str = "",
         actor: str = "",
         now: float | None = None,
+        origin_record: origin_mod.Origin | None = None,
+        audit: history.AuditContext | None = None,
     ) -> WriteReport:
         """写入记忆文件并自动同步索引行（钩子取自 frontmatter description）。
 
         source 是本次写入的来源 ID（通常是当前发送者），并入文件的 source 戳；
-        actor 是这次变更的执行者（聊天工具记平台 ID），写进审计。
+        actor 是这次变更的执行者（聊天工具记平台 ID），写进审计；origin_record
+        是工具写入的来源记录，并进 metadata.origin。audit 只进审计日志。
         """
         # 与 _resolve 同样的归一化：索引守门与索引行都要用整理后的名字，
         # 否则 " MEMORY.md" / "/MEMORY.md" 能绕过守门，索引行也会写错
@@ -920,6 +942,8 @@ class ScopeStore:
                 actor=actor,
                 active_before=active,
                 now=now,
+                origin_record=origin_record,
+                audit=audit,
             )
 
     # ------------------------------------------------------------ 日记
@@ -931,6 +955,8 @@ class ScopeStore:
         now: float,
         actor: str = "",
         source: str = "",
+        origin_record: origin_mod.Origin | None = None,
+        audit: history.AuditContext | None = None,
     ) -> WriteReport:
         """把一段流水写进日记，写到哪一篇由插件决定（PLAN 3.8.3）。
 
@@ -938,6 +964,9 @@ class ScopeStore:
         更新已经过了 JOURNAL_MAX_AGE_DAYS 天、或还没有日记，就新开一篇
         journal-<当天日期>.md，同一天重名时加序号。每天第一次写进某篇时
         补一个 `## YYYY-MM-DD` 小标题。模型不需要知道文件名。
+
+        追加的段落前由插件加一行来源，如"08:30 小明（群聊）"，只写时间和
+        "群聊/私聊"，不写群名（PLAN 3.9.1 第 3 条）。
         """
         text = (text or "").strip()
         if not text:
@@ -947,6 +976,9 @@ class ScopeStore:
                 False,
                 f"日记内容超过单次 {MAX_JOURNAL_APPEND_CHARS} 字上限，请精简后重写",
             )
+        stamp_line = origin_mod.journal_line(origin_record)
+        if stamp_line:
+            text = f"{stamp_line}\n{text}"
         date = time.strftime("%Y-%m-%d", time.localtime(now))
         headers = await asyncio.to_thread(self.headers)
         journals = [
@@ -993,6 +1025,8 @@ class ScopeStore:
                     actor=actor,
                     source=source,
                     now=now,
+                    origin_record=origin_record,
+                    audit=audit,
                 )
                 report.file = latest.file
                 report.new = False
@@ -1005,7 +1039,15 @@ class ScopeStore:
             f"## {date}\n\n{text}",
             source=source,
         )
-        report = await self.write(name, content, actor=actor, source=source, now=now)
+        report = await self.write(
+            name,
+            content,
+            actor=actor,
+            source=source,
+            now=now,
+            origin_record=origin_record,
+            audit=audit,
+        )
         report.file = name
         report.new = report.ok
         return report
@@ -1065,6 +1107,8 @@ class ScopeStore:
         mode: str = "replace",
         description: str | None = None,
         now: float | None = None,
+        origin_record: origin_mod.Origin | None = None,
+        audit: history.AuditContext | None = None,
     ) -> WriteReport:
         """局部修改：默认 replace 把 old 替换成 new；append 追加内容；section 换小节正文。
 
@@ -1140,6 +1184,8 @@ class ScopeStore:
                     actor=actor,
                     active_before=content,
                     now=now,
+                    origin_record=origin_record,
+                    audit=audit,
                 )
             if mode == "section":
                 if not old.strip():
@@ -1162,6 +1208,8 @@ class ScopeStore:
                     actor=actor,
                     active_before=content,
                     now=now,
+                    origin_record=origin_record,
+                    audit=audit,
                 )
             # 精确替换只作用于正文：frontmatter 由插件生成，模型不能借
             # replace 改 type、created、source 这些字段
@@ -1200,6 +1248,9 @@ class ScopeStore:
                 action=history.ACTION_EDIT,
                 actor=actor,
                 active_before=content,
+                now=now,
+                origin_record=origin_record,
+                audit=audit,
             )
 
     async def _commit(
@@ -1215,10 +1266,16 @@ class ScopeStore:
         actor: str = "",
         active_before: str | None = None,
         now: float | None = None,
+        origin_record: origin_mod.Origin | None = None,
+        audit: history.AuditContext | None = None,
     ) -> WriteReport:
         """持锁落盘：补戳 → 体积守门 → 存旧版 → 原子写 → 失效头缓存 → 同步索引行。"""
         content = stamp_memory(
-            content, time.time() if now is None else now, source, previous
+            content,
+            time.time() if now is None else now,
+            source,
+            previous,
+            origin_record=origin_record,
         )
         if len(content.encode("utf-8")) > MAX_FILE_BYTES:
             return WriteReport(
@@ -1250,6 +1307,7 @@ class ScopeStore:
             history.content_sha1(active_before) if active_before is not None else "",
             history.content_sha1(content),
             ts=version.ts if version is not None else None,
+            audit=audit,
         )
         await asyncio.to_thread(self._discard_forgotten, name, actor, source)
         lines, size = await asyncio.to_thread(
@@ -1267,7 +1325,12 @@ class ScopeStore:
         return WriteReport(True, message, content, name)
 
     async def delete(
-        self, name: str, actor: str = "", reason: str = ""
+        self,
+        name: str,
+        actor: str = "",
+        reason: str = "",
+        source: str = "",
+        audit: history.AuditContext | None = None,
     ) -> WriteReport:
         name = (name or "").strip().lstrip("/")
         path = self._resolve(name)
@@ -1288,7 +1351,9 @@ class ScopeStore:
                     name,
                     history.ACTION_DELETE,
                     actor,
+                    source,
                     reason=reason,
+                    audit=audit,
                 )
             except OSError as exc:
                 return WriteReport(False, f"删除前保存到回收站失败，未删除 {name}：{exc}")
@@ -1818,6 +1883,10 @@ class ScopeStore:
             pass
 
     # ------------------------------------------------------------ 历史与回收站
+
+    def audit_entries(self) -> list[dict]:
+        """本作用域的全部审计行；管理页按文件显示来源（含群名）时用。"""
+        return self._history.audit_entries()
 
     def history_versions(self, name: str) -> list[history.HistoryVersion]:
         """某个文件的历史版本（新的在前）；同步方法，管理页放进线程调用。"""

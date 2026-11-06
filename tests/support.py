@@ -145,6 +145,7 @@ pkg_history = importlib.import_module(f"{PACKAGE}.core.history")
 pkg_injection = importlib.import_module(f"{PACKAGE}.core.injection")
 pkg_journal = importlib.import_module(f"{PACKAGE}.core.journal")
 pkg_memstore = importlib.import_module(f"{PACKAGE}.core.memstore")
+pkg_origin = importlib.import_module(f"{PACKAGE}.core.origin")
 pkg_prompts = importlib.import_module(f"{PACKAGE}.core.prompts")
 pkg_recall = importlib.import_module(f"{PACKAGE}.core.recall")
 pkg_registry = importlib.import_module(f"{PACKAGE}.core.registry")
@@ -174,6 +175,10 @@ class FakeEvent:
         admin=False,
         name="测试用户",
         role="member",
+        group_id="",
+        group_name="",
+        card="",
+        nickname=None,
     ):
         self._platform_id = platform_id
         self._sender_id = sender_id
@@ -182,7 +187,14 @@ class FakeEvent:
         self._name = name
         self.role = role
         self.message_obj = types.SimpleNamespace(
-            group_id="", raw_message={"sender": {"nickname": name, "card": ""}}
+            group_id=group_id,
+            group=types.SimpleNamespace(group_name=group_name),
+            raw_message={
+                "sender": {
+                    "nickname": name if nickname is None else nickname,
+                    "card": card,
+                }
+            },
         )
 
     def get_platform_id(self):

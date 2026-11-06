@@ -11,6 +11,7 @@ from support import (
     pkg_context_stats,
     pkg_injection,
     pkg_memstore,
+    pkg_origin,
     pkg_prompts,
     run,
 )
@@ -109,15 +110,58 @@ def test_trim_body_keeps_head_and_tail():
     assert "中间省略 3000 字" in trimmed
 
 
-def test_prepare_view_strips_frontmatter_and_renders_source_note():
+def test_prepare_view_strips_frontmatter_and_renders_origin_note():
+    now = 1_700_000_000.0
     content = pkg_memstore.compose_memory(
         "user-123", "阿杰", "user", "身份：工程师", source="456"
     )
-    view = pkg_injection.prepare_view("notebook/user-123.md", content, 100.0)
+    content = pkg_memstore.stamp_memory(
+        content,
+        now,
+        origin_record=pkg_origin.Origin(
+            "group",
+            "456",
+            "小明",
+            now - 3 * 86400,
+            pkg_origin.session_hash("Bot-A:GroupMessage:900"),
+        ),
+    )
+    view = pkg_injection.prepare_view(
+        "notebook/user-123.md",
+        content,
+        now,
+        current_session=pkg_origin.session_hash("Bot-A:FriendMessage:123"),
+        now=now,
+    )
     assert "---" not in view.body and "身份：工程师" in view.body
-    title = pkg_injection.render_title(view, now=100.0)
+    title = pkg_injection.render_title(view, now=now)
     assert "notebook/user-123.md" in title
-    assert "来源 456" in title
+    # 来源标注只写群聊/私聊和显示名；本文件记的不是说话人本人
+    assert "小明在群聊里说的，3 天前" in view.origin_note
+
+
+def test_prepare_view_origin_note_absent_without_origin_or_same_conversation():
+    now = 1_700_000_000.0
+    plain = pkg_memstore.compose_memory("a", "摘要", "reference", "正文", source="456")
+    view = pkg_injection.prepare_view("notebook/a.md", plain, now, now=now)
+    assert view.origin_note == ""
+
+    current = origin_for_test("Bot-A:GroupMessage:900", now)
+    content = pkg_memstore.stamp_memory(plain, now, origin_record=current)
+    view = pkg_injection.prepare_view(
+        "notebook/a.md",
+        content,
+        now,
+        current_session=pkg_origin.session_hash("Bot-A:GroupMessage:900"),
+        now=now,
+    )
+    assert view.origin_note == ""
+
+
+def origin_for_test(umo, now, speaker="456", name="小明"):
+    return pkg_origin.Origin(
+        "group", speaker, name, now - 3 * 86400, pkg_origin.session_hash(umo)
+    )
 
 
 def test_indexed_names_reads_both_index_formats():

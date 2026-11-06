@@ -161,6 +161,19 @@ def append_audit(path: Path, record: dict) -> None:
 
 
 @dataclass(frozen=True)
+class AuditContext:
+    """一次变更的会话上下文，只写进审计，不进记忆文件。
+
+    session 是会话键（群聊的键里有群号），group 是群名；这两项只在管理页
+    从审计日志里读取，绝不交给模型（PLAN 3.9.1 第 2、6 条）。
+    """
+
+    session: str = ""
+    group: str = ""
+    admin: bool = False
+
+
+@dataclass(frozen=True)
 class HistoryVersion:
     """一个历史版本；管理页按时间、动作、actor、大小展示。"""
 
@@ -258,9 +271,15 @@ class HistoryLog:
         after_sha1: str = "",
         ts: float | None = None,
         reason: str = "",
+        audit: AuditContext | None = None,
     ) -> None:
-        """追加一行审计：ts、动作、文件、actor、来源、前后内容哈希与原因。"""
+        """追加一行审计：时间、动作、文件、actor、来源、前后哈希与原因。
+
+        会话键、群名与"说话人是不是管理员"只在这里留档，供管理页显示来源；
+        记忆文件与交给模型的内容里没有这些字段（PLAN 3.9.1 第 1、2 条）。
+        """
         ts = _now() if ts is None else ts
+        context = audit or AuditContext()
         record = {
             "ts": round(ts, 3),
             "action": action,
@@ -269,6 +288,9 @@ class HistoryLog:
             "source": source,
             "before_sha1": before_sha1,
             "after_sha1": after_sha1,
+            "session": context.session,
+            "group": context.group,
+            "admin": bool(context.admin),
         }
         if reason:
             record["reason"] = reason
@@ -651,6 +673,7 @@ class HistoryLog:
         actor: str = "",
         source: str = "",
         reason: str = "",
+        audit: AuditContext | None = None,
     ) -> TrashEntry:
         """把文件移进回收站并记审计；返回回收站条目。"""
         before_sha1 = _file_sha1(path)
@@ -666,7 +689,15 @@ class HistoryLog:
             os.replace(path, dest)
             st = dest.stat()
             self.record(
-                action, file, actor, source, before_sha1, "", ts=ts, reason=reason
+                action,
+                file,
+                actor,
+                source,
+                before_sha1,
+                "",
+                ts=ts,
+                reason=reason,
+                audit=audit,
             )
         return TrashEntry(
             entry=entry,
@@ -687,6 +718,7 @@ class HistoryLog:
         actor: str = "",
         source: str = "",
         reason: str = "",
+        audit: AuditContext | None = None,
     ) -> TrashEntry:
         """把文件复制一份进回收站并记审计（原文件保持不动）。
 
@@ -705,7 +737,15 @@ class HistoryLog:
             shutil.copy2(path, dest)
             st = dest.stat()
             self.record(
-                action, file, actor, source, before_sha1, "", ts=ts, reason=reason
+                action,
+                file,
+                actor,
+                source,
+                before_sha1,
+                "",
+                ts=ts,
+                reason=reason,
+                audit=audit,
             )
         return TrashEntry(
             entry=entry,

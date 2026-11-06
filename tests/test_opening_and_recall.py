@@ -214,3 +214,28 @@ def test_board_notice_from_one_bot_visible_to_another_with_signature(tmp_path):
         opening = run(plugin._index_block(main.RuntimeSession(), event))
         assert "11 月 11 日新员工 teto 入职" in opening
         assert "署名：管理员" in opening
+
+
+def test_opening_with_origin_note_stays_byte_stable(tmp_path):
+    """开头块的来源标注在快照生成时算好，记忆不变时逐轮逐字不变。"""
+    plugin = make_plugin(tmp_path)
+    group = FakeEvent(
+        "Bot-A",
+        "123",
+        umo="Bot-A:GroupMessage:900",
+        name="小明",
+        group_id="900",
+        group_name="合成群名-甲子园",
+    )
+    run(
+        plugin.memory_write(
+            group, "notebook", "user-123.md", "user", "小明档案", "身份：工程师"
+        )
+    )
+    private = FakeEvent("Bot-A", "123", umo="Bot-A:FriendMessage:123", name="小明")
+    rt = main.RuntimeSession()
+    first = run(plugin._index_block(rt, private))
+    second = run(plugin._index_block(rt, private))
+    assert first == second
+    assert "（本人说的）" in first
+    assert "合成群名-甲子园" not in first

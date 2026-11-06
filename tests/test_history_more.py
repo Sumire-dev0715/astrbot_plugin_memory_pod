@@ -379,7 +379,12 @@ def test_audit_records_every_change(tmp_path):
             "source",
             "before_sha1",
             "after_sha1",
+            "session",
+            "group",
+            "admin",
         }
+        # 不经聊天工具写入时没有会话上下文：字段留空，不虚报
+        assert row["session"] == "" and row["group"] == "" and row["admin"] is False
 
 
 def test_import_refuses_non_utf8_existing_file_without_aborting_batch(tmp_path):

@@ -210,6 +210,8 @@ class RecallSection:
 
 def plan_sections(
     items: list[Recalled],
+    current_session: str = "",
+    now: float | None = None,
 ) -> tuple[list[RecallSection], list[Recalled]]:
     """按字符预算决定哪些条目真正带全文。
 
@@ -218,6 +220,8 @@ def plan_sections(
     字数，模型仍知道有这些记忆可读；顺序保持"相关度高的在前"，不会出现
     排在后面但更短的文件插队带全文。第一个条目总是保留（可能是快照后
     更新的人物档案），和改造前的行为一致。
+
+    current_session 用来给来自别的对话的条目加来源标注；标注本身也进预算。
     """
     sections: list[RecallSection] = []
     dropped: list[Recalled] = []
@@ -228,12 +232,15 @@ def plan_sections(
             item.content,
             item.written,
             note=item.note,
+            current_session=current_session,
+            now=now,
         )
-        # 标题与 description 也真的进了块，预算不能只算正文
+        # 标题、来源标注与 description 也真的进了块，预算不能只算正文
         cost = (
             len(view.body)
             + len(view.description)
             + len(view.note)
+            + len(view.origin_note)
             + len(injection.render_title(view))
         )
         if sections and used + cost > TOTAL_CHARS:
@@ -358,6 +365,7 @@ async def assemble_recall(
     full_files: int | None = None,
     extra_items: list[Recalled] | None = None,
     indexed_refs: set[str] | None = None,
+    current_session: str = "",
 ) -> RecallPlan:
     """挑文件、读正文、分档、按预算瘦身并渲染召回块（不依赖 AstrBot 事件）。
 
@@ -402,7 +410,9 @@ async def assemble_recall(
     extras = list(extra_items or [])
     # 快照后更新的人物档案优先进入块首；同一文件不再按普通候选重复出现
     extra_refs = {item.ref for item in extras}
-    sections, dropped = plan_sections(extras + full_items)
+    sections, dropped = plan_sections(
+        extras + full_items, current_session=current_session, now=now
+    )
     pointers = [item for item in dropped if item.ref not in extra_refs] + pointer_items
     return RecallPlan(
         items=extras + items,

@@ -52,6 +52,7 @@ from .core import (
     injection,
     insights,
     memstore,
+    origin,
     prompts,
     recall,
     registry,
@@ -380,6 +381,52 @@ class MemoryPodPlugin(Star):
             return str(event.get_platform_id() or "").strip()
         except Exception:  # noqa: BLE001
             return ""
+
+    def _origin_for(self, event: AstrMessageEvent) -> origin.Origin | None:
+        """这次工具写入的来源记录（PLAN 3.9.1 第 1 条）。
+
+        显示名优先用群名片，没有就用 QQ 名；先按发送者标注的规则清洗，
+        再去掉方括号、尖括号这类可能冒充格式的字符。只记会话键的短哈希，
+        群号与群名不进记忆文件。
+        """
+        umo = str(getattr(event, "unified_msg_origin", "") or "")
+        sender_id, sender_name = self._sender_identity(event)
+        qq_name, group_card, is_group = self._sender_raw_fields(event)
+        if is_group:
+            kind = origin.KIND_GROUP
+        else:
+            _, session_kind, _ = registry.parse_umo(umo)
+            kind = (
+                origin.KIND_GROUP
+                if session_kind == registry.KIND_GROUP
+                else origin.KIND_PRIVATE
+            )
+        name = sender_name
+        if qq_name is not None:
+            name = (group_card or "").strip() or (qq_name or "").strip() or sender_name
+        display = prompts.clean_origin_name(name)
+        if not umo or (not sender_id and not display):
+            return None
+        return origin.Origin(
+            kind=kind,
+            speaker=sender_id,
+            name=display,
+            ts=time.time(),
+            session=origin.session_hash(umo),
+        )
+
+    def _audit_context(self, event: AstrMessageEvent) -> history.AuditContext:
+        """审计用的会话上下文：会话键、群名与发送者是否管理员。
+
+        这些字段只进 .audit.jsonl，供管理页显示来源；记忆文件与交给模型的
+        内容里都没有它们（PLAN 3.9.1 第 1、2 条）。
+        """
+        umo = str(getattr(event, "unified_msg_origin", "") or "")
+        msg_obj = getattr(event, "message_obj", None)
+        group = self._session_label(event) if getattr(msg_obj, "group_id", "") else ""
+        return history.AuditContext(
+            session=umo, group=group, admin=self._is_admin_event(event)
+        )
 
     @staticmethod
     def _sender_raw_fields(
@@ -920,6 +967,8 @@ class MemoryPodPlugin(Star):
         umo = str(getattr(event, "unified_msg_origin", "") or "")
         views: list[injection.MemoryView] = []
         pinned: dict[str, str] = {}
+        current_session = origin.session_hash(umo)
+        now = time.time()
         pairs: list[tuple[str, memstore.ScopeStore]] = [
             (memstore.SCOPE_NOTEBOOK, self._notebook_scope(event)),
             (memstore.SCOPE_WHISPER, self._whisper_scope(umo)),
@@ -934,6 +983,8 @@ class MemoryPodPlugin(Star):
                 memstore.parse_stamp(memstore.parse_memory(content).updated)
                 or store.mtime(name)
                 or 0.0,
+                current_session=current_session,
+                now=now,
             )
             views.append(view)
             pinned[view.ref] = _content_sha1(content)
@@ -1014,6 +1065,7 @@ class MemoryPodPlugin(Star):
                 full_files=max(0, self._int("recall_full_files", recall.DEFAULT_FULL_FILES)),
                 extra_items=updates,
                 indexed_refs=rt.index_refs if rt is not None else None,
+                current_session=origin.session_hash(umo),
             )
             # 被召回就算用到：使用统计是遗忘与整理的依据；快照后更新、本轮
             # 实际附上的档案同样算用到
@@ -1501,15 +1553,27 @@ class MemoryPodPlugin(Star):
         if not restored:
             # 恢复时已经记过一次使用
             await asyncio.to_thread(store.note_used, [file])
+        umo = str(getattr(event, "unified_msg_origin", "") or "")
+        name = (file or "").strip().lstrip("/")
+        # "看过"记的是磁盘上的原文摘要，不能把来源标注算进去
+        raw_digest = _content_sha1(content)
+        # 来源原始字段不交给模型（PLAN 3.9.1 第 4 条）；小本本里的条目
+        # 出现在别的对话里时，换成"（小明在群聊里说的，3 天前）"这样的标注。
+        doc = memstore.parse_memory(content)
+        origin_note = ""
+        if scope == memstore.SCOPE_NOTEBOOK:
+            origin_note = origin.note(
+                f"{scope}/{name}", doc.origin, origin.session_hash(umo)
+            )
+        content = origin.annotate(
+            origin.strip_from_frontmatter(content), origin_note
+        )
         # 读过最新版本：整篇重写前校验用（PLAN 3.8.4）。键与写入层一样
         # 去掉前导斜杠，避免 memory_read("/note.md") 与 note.md 对不上。
-        umo = str(getattr(event, "unified_msg_origin", "") or "")
         rt = await self._runtime(umo)
-        rt.seen[f"{scope}/{(file or '').strip().lstrip('/')}"] = _content_sha1(content)
+        rt.seen[f"{scope}/{name}"] = raw_digest
         # 时效按 frontmatter 的 updated 戳算；老文件没有戳才退回 mtime
-        written = memstore.parse_stamp(
-            memstore.parse_memory(content).updated
-        ) or store.mtime(file)
+        written = memstore.parse_stamp(doc.updated) or store.mtime(file)
         notes = []
         if forgotten_read:
             notes.append(
@@ -1610,7 +1674,8 @@ class MemoryPodPlugin(Star):
             - len(shown_forgotten)
         )
         if not lines and not forgotten:
-            return f"没有找到匹配「{query}」的记忆。"
+            # 不回显 query：它可能包含群名或群号，结果文本不能再把它们带回来
+            return "没有找到匹配的记忆。"
         text = "搜索结果（用 memory_read 读取完整内容）：\n" + "\n".join(lines + forgotten)
         if hidden:
             text += (
@@ -1654,6 +1719,12 @@ class MemoryPodPlugin(Star):
     async def _tool_files(store: memstore.ScopeStore) -> set[str]:
         """作用域里当前在册的文件名；写入层据此判断"新建"还是"已有"。"""
         return set(await asyncio.to_thread(store.list_files))
+
+    @staticmethod
+    async def _tool_file_types(store: memstore.ScopeStore) -> dict[str, str]:
+        """作用域里在册文件的现有类型；feedback 规则按它判断修改/删除对象。"""
+        headers = await asyncio.to_thread(store.headers)
+        return {header.file: header.type for header in headers}
 
     @staticmethod
     def _existing_name(files: set[str], name: str) -> str:
@@ -1724,8 +1795,8 @@ class MemoryPodPlugin(Star):
         """留言板代发署名里的机器人名。
 
         AstrBot 4.29.4 的事件没有公开的机器人昵称接口；先找平台实例上
-        适配器自己提供的名称字段，取不到就用机器人账号 ID（比平台类型名
-        更能区分多台机器人），最后退回"机器人"。
+        适配器自己提供的名称字段，取不到就用这个机器人在这个 AstrBot 里的
+        platform_id（如 Bot-深海小鲸），不再退回 QQ 号（PLAN 3.9.5）。
         """
         try:
             getter = getattr(event, "get_platform_id", None)
@@ -1741,13 +1812,9 @@ class MemoryPodPlugin(Star):
                     value = str(getattr(inst, attr, "") or "").strip()
                     if value:
                         return value
-        except Exception:  # noqa: BLE001 - 平台实现不可控，取不到就退回账号 ID
+        except Exception:  # noqa: BLE001 - 平台实现不可控，取不到就退回 platform_id
             pass
-        try:
-            self_id = str(event.get_self_id() or "").strip()
-        except Exception:  # noqa: BLE001
-            self_id = ""
-        return f"机器人 {self_id}" if self_id else "机器人"
+        return platform_id.strip() or "机器人"
 
     async def _visible_files(self, event: AstrMessageEvent) -> set[str]:
         """当前这条消息能看到的记忆文件：留言板、小本本与本对话悄悄话。"""
@@ -1825,6 +1892,7 @@ class MemoryPodPlugin(Star):
             )
         name = writer.normalize_file(raw_file)
         files = await self._tool_files(store)
+        file_types = await self._tool_file_types(store)
         problem = await self._rewrite_problem(event, store, scope, name, files)
         if problem:
             return problem
@@ -1847,6 +1915,7 @@ class MemoryPodPlugin(Star):
             files_by_scope={scope: files},
             sender=sender_id,
             admin=self._is_admin_event(event),
+            file_types_by_scope={scope: file_types},
         )
         if not ops:
             return skipped[0] if skipped else "写入未通过校验。"
@@ -1855,6 +1924,8 @@ class MemoryPodPlugin(Star):
             ops,
             actor=self._event_actor(event),
             source=sender_id,
+            origin_record=self._origin_for(event),
+            audit=self._audit_context(event),
         )
         if not result.ok:
             return self._failed_receipt(result)
@@ -1909,6 +1980,7 @@ class MemoryPodPlugin(Star):
         is_journal = raw_file.lower() == writer.JOURNAL_TARGET
         name = writer.JOURNAL_TARGET if is_journal else writer.normalize_file(raw_file)
         files = await self._tool_files(store)
+        file_types = await self._tool_file_types(store)
         op = {
             "op": writer.OP_EDIT,
             "scope": scope,
@@ -1927,6 +1999,7 @@ class MemoryPodPlugin(Star):
             files_by_scope={scope: files},
             sender=sender_id,
             admin=self._is_admin_event(event),
+            file_types_by_scope={scope: file_types},
         )
         if not ops:
             return skipped[0] if skipped else "修改未通过校验。"
@@ -1935,6 +2008,8 @@ class MemoryPodPlugin(Star):
             ops,
             actor=self._event_actor(event),
             source=sender_id,
+            origin_record=self._origin_for(event),
+            audit=self._audit_context(event),
         )
         if not result.ok:
             return self._failed_receipt(result)
@@ -1975,6 +2050,7 @@ class MemoryPodPlugin(Star):
             return refused
         name = writer.normalize_file((file or "").strip())
         files = await self._tool_files(store)
+        file_types = await self._tool_file_types(store)
         sender_id, _ = self._sender_identity(event)
         ops, skipped = writer.validate_operations(
             [
@@ -1988,6 +2064,7 @@ class MemoryPodPlugin(Star):
             files_by_scope={scope: files},
             sender=sender_id,
             admin=self._is_admin_event(event),
+            file_types_by_scope={scope: file_types},
         )
         if not ops:
             return skipped[0] if skipped else "删除未通过校验。"
@@ -1996,6 +2073,7 @@ class MemoryPodPlugin(Star):
             ops,
             actor=self._event_actor(event),
             source=sender_id,
+            audit=self._audit_context(event),
         )
         if not result.ok:
             return self._failed_receipt(result)

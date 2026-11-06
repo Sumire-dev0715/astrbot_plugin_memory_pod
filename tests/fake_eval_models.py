@@ -4,7 +4,7 @@
 
 - ``GoodEvalModel``：按合成场景里的话做出“合格模型”该有的工具调用与回复，
   让全部检查项通过，用来证明检查项在正常行为下不会误报。
-- ``BadEvalModel``：把每轮用户消息都写进小本本（type=feedback），隐私、
+- ``BadEvalModel``：把每轮用户消息都写进小本本（type=reference），隐私、
   留言板、他人档案都不按规则处理，让关键项失败，用来证明检查项不会空过。
 
 它们只用于 tests/ 下的评测脚本测试；真实评测由 run_eval.py 调接口。
@@ -560,7 +560,12 @@ class GoodEvalModel:
 
 
 class BadEvalModel:
-    """把每轮用户消息原样写进小本本（type=feedback），其余都不做。"""
+    """把每轮用户消息原样写进小本本（type=reference），其余都不做。
+
+    用 reference 而不是 feedback：3.9.1 之后非管理员写小本本的 feedback 会
+    被写入层拒绝；坏模型要能把用户原话落盘，才能让遗忘、注入这些检查项
+    真的暴露问题。
+    """
 
     def __init__(self) -> None:
         self._writes = 0
@@ -574,7 +579,7 @@ class BadEvalModel:
                 "memory_write",
                 scope="notebook",
                 file=f"bad-{self._writes}.md",
-                type="feedback",
+                type="reference",
                 description="随意记录",
                 content=state.body or state.text or "空消息",
             )

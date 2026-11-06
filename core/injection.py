@@ -7,8 +7,8 @@
   ``### 作用域/文件名（类型｜几天前写入）``，description 作为标题下的第一行。
 - 正文超过单文件上限时保留开头约六成与结尾约四成，中间用一行说明省略了
   多少字——新内容通常补在末尾，只取前 N 字会把最新的事实切掉。
-- 来源 ID 只在它和文件所记的人不同（旁人转述）时写进标题，避免每行都拖着
-  一串无信息量的数字。
+- 来源标注只写"群聊/私聊"与显示名，不写群名或群号；来源全部在当前
+  对话里的条目不标注（PLAN 3.9.1）。
 - 留言板告示带署名；全部告示从新到旧注入全文，合计不超过 2000 字，超出
   的只列标题（PLAN 3.8.3）。
 
@@ -22,7 +22,7 @@ import re
 import time
 from dataclasses import dataclass
 
-from . import memstore, prompts
+from . import memstore, origin, prompts
 
 # 单条记忆注入的字符上限与整块上限：注入是辅助通道，不能挤占对话本身
 FILE_CHARS = 3000
@@ -36,7 +36,6 @@ WHISPER_HEADING = "# 这段对话的悄悄话索引"
 # 留言板全文的总字数上限；超出的告示只列标题
 BOARD_LIMIT_CHARS = 2000
 
-_PERSON_FILE_RE = re.compile(r"^user-(\d+)\.md$")
 _INDEX_LINK_RE = re.compile(r"\]\(([^()\s]+\.md)\)")
 _INDEX_PLAIN_RE = re.compile(r"^\s*-\s+([^\s—]+\.md)(?:\s+—|\s*$)")
 
@@ -67,23 +66,6 @@ def clean_description(text: str) -> str:
     return description
 
 
-def source_note(ref: str, source: str) -> str:
-    """旁人转述时返回要写进标题的来源 ID；本人自己说的话返回空串。
-
-    只有 ``user-<数字ID>.md`` 能确定"文件所记的人"；来源里的其他 ID 就是
-    转述者。其他类型的文件没有"所记的人"可比，标题里不带来源。
-    """
-    match = _PERSON_FILE_RE.match(ref.rsplit("/", 1)[-1])
-    if not match:
-        return ""
-    subject = match.group(1)
-    others: list[str] = []
-    for uid in memstore.split_sources(source):
-        if uid and uid != subject and uid not in others:
-            others.append(uid)
-    return "、".join(others)
-
-
 @dataclass(frozen=True)
 class MemoryView:
     """一条准备好注入的记忆：已去掉 frontmatter，正文可能已头尾瘦身。"""
@@ -91,7 +73,6 @@ class MemoryView:
     ref: str
     mem_type: str
     description: str
-    source: str
     body: str
     # 正文超过单条上限，body 已按开头六成、结尾四成保留
     truncated: bool
@@ -100,6 +81,8 @@ class MemoryView:
     written: float
     # 标题与 description 之后的附注（如"人物档案已更新，以这里为准"）
     note: str = ""
+    # 来源标注，如"（小明在群聊里说的，3 天前）"（PLAN 3.9.1 第 4 条）
+    origin_note: str = ""
 
 
 def trim_body(body: str, limit: int = FILE_CHARS) -> tuple[str, bool, int]:
@@ -125,8 +108,14 @@ def prepare_view(
     *,
     note: str = "",
     limit: int = FILE_CHARS,
+    current_session: str = "",
+    now: float | None = None,
 ) -> MemoryView:
-    """把磁盘上的记忆文件变成注入视图：去 frontmatter、瘦身、取钩子与来源。"""
+    """把磁盘上的记忆文件变成注入视图：去 frontmatter、瘦身、取钩子与来源。
+
+    current_session 是当前对话的会话键短哈希：来源不是这段对话时，
+    视图带上来源标注；来源为空或全部在这段对话里时不标注。
+    """
     doc = memstore.parse_memory(content or "")
     # 没有 description 就不写这一行：从正文首行硬猜会和下面的正文重复，
     # 没有 frontmatter 的文件尤其明显。
@@ -136,28 +125,27 @@ def prepare_view(
         ref=ref,
         mem_type=doc.type or "未标注",
         description=description,
-        source=doc.source,
         body=body,
         truncated=truncated,
         omitted=omitted,
         written=written,
         note=note,
+        origin_note=origin.note(ref, doc.origin, current_session, now),
     )
 
 
 def render_title(view: MemoryView, now: float | None = None) -> str:
-    """条目标题：``### 引用（类型｜几天前写入）``；旁人转述追加在括号里。"""
+    """条目标题：``### 引用（类型｜几天前写入）``。"""
     parts = [view.mem_type or "未标注"]
     parts.append(f"{age_label(view.written, now)}写入")
-    source = source_note(view.ref, view.source)
-    if source:
-        parts.append(f"来源 {source}")
     return f"### {view.ref}（{'｜'.join(parts)}）"
 
 
 def render_view(view: MemoryView, now: float | None = None) -> str:
-    """渲染一条注入记忆：标题、description、附注、瘦身后的正文。"""
+    """渲染一条注入记忆：标题、来源、description、附注、瘦身后的正文。"""
     parts = [render_title(view, now)]
+    if view.origin_note:
+        parts.append(view.origin_note)
     if view.description:
         parts.append(view.description)
     if view.note:

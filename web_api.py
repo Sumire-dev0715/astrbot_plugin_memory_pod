@@ -35,6 +35,7 @@ from .core import (
     history,
     insights,
     memstore,
+    origin,
     registry,
     tidy,
     transfer,
@@ -149,6 +150,43 @@ def _file_flags(
                 "long": reasons,
             }
     return flags
+
+
+def _origin_info(
+    store: memstore.ScopeStore, name: str, origin_text: str
+) -> list[dict]:
+    """文件详情里的来源：origin 记录加上审计里的群名与会话键。
+
+    群名只在管理页显示，记忆文件里没有；同一说话人取最近一次审计行。
+    """
+    records = origin.parse(origin_text)
+    if not records:
+        return []
+    rows = [
+        row for row in store.audit_entries() if str(row.get("file") or "") == name
+    ]
+    latest: dict = {}
+    latest_by_source: dict[str, dict] = {}
+    for row in rows:
+        latest = row
+        source = str(row.get("source") or "")
+        if source:
+            latest_by_source[source] = row
+    result: list[dict] = []
+    for record in records:
+        row = latest_by_source.get(record.speaker) or latest
+        item = {
+            "kind": record.kind,
+            "speaker": record.speaker,
+            "name": record.name,
+            "ts": record.ts,
+        }
+        if row:
+            item["session"] = str(row.get("session") or "")
+            item["group"] = str(row.get("group") or "")
+            item["admin"] = bool(row.get("admin"))
+        result.append(item)
+    return result
 
 
 def _history_dict(version: history.HistoryVersion) -> dict:
@@ -500,6 +538,7 @@ class MemoryDashboard:
             raise ApiError(f"文件不存在：{name}")
         doc = memstore.parse_memory(content)
         used = await asyncio.to_thread(store.usage_of, name)
+        origins = await asyncio.to_thread(_origin_info, store, name, doc.origin)
         return _ok(
             {
                 "file": name,
@@ -515,6 +554,7 @@ class MemoryDashboard:
                 "updated": doc.updated,
                 "source": doc.source,
                 "signature": doc.signature,
+                "origin": origins,
                 "hasFrontmatter": doc.has_frontmatter,
                 "links": memstore.extract_links(content),
             }

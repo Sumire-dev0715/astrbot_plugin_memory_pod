@@ -103,7 +103,6 @@ def _recall_shell(recall_mod, injection_mod, prompts) -> int:
         ref="notebook/placeholder.md",
         mem_type="reference",
         description="",
-        source="",
         body="",
         truncated=False,
         omitted=0,

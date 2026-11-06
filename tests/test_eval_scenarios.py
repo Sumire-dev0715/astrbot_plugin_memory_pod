@@ -70,7 +70,7 @@ def test_bad_model_fails_critical_checks(tmp_path):
             for outcome in run.outcomes
             if outcome.critical and not outcome.ok
         )
-    # 坏模型把隐私写进小本本、把用户的话写成了 feedback、不写留言板、
+    # 坏模型把隐私写进小本本、把用户的话原样落盘、不写留言板、
     # 也不处理别人的档案——这些关键项必须失败。
     expected = {
         "non_admin_board_refused.non_admin_board_denied",

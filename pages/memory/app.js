@@ -108,6 +108,11 @@
     savedAt: "最近写入：{time}",
     stampLine: "首次记于 {created} · 最近更新 {updated}",
     sourceLine: "来源 ID {ids}",
+    originLine: "来源：{items}",
+    originGroup: "群聊「{group}」",
+    originGroupUnknown: "群聊",
+    originPrivate: "私聊",
+    originUnknown: "未知",
     delete: "删除",
     cancel: "取消",
     save: "保存",
@@ -378,8 +383,17 @@
     );
   }
 
-  function relTime(ts) {
-    if (!ts) {
+  function originText(item) {
+    const who = item.name || item.speaker || t("originUnknown");
+    let where = t("originPrivate");
+    if (item.kind === "group") {
+      where = item.group ? t("originGroup", { group: item.group }) : t("originGroupUnknown");
+    }
+    const when = item.ts ? fmtTime(item.ts) : "";
+    return [who, where, when].filter(Boolean).join(" · ");
+  }
+
+  function relTime(ts) {    if (!ts) {
       return "—";
     }
     const diff = Math.max(0, Date.now() / 1000 - ts);
@@ -1223,6 +1237,7 @@
         description: data.description || "",
         body: data.body || "",
         signature: data.signature || "",
+        origin: data.origin || [],
         raw: data.content || "",
         hasFrontmatter: data.hasFrontmatter,
         baseMtime: data.mtime || 0,
@@ -1247,6 +1262,7 @@
       description: "",
       body: "",
       signature: "",
+      origin: [],
       raw: "",
       hasFrontmatter: true,
       baseMtime: 0,
@@ -1289,6 +1305,7 @@
       return emptyState("edit", t("editorEmptyTitle"), t("editorEmptyHint"));
     }
     const box = h("div", { class: "editor" });
+    const originItems = (ed.origin || []).map(originText).filter(Boolean);
     const head = h(
       "div",
       { class: "editor-head" },
@@ -1461,6 +1478,9 @@
           "div",
           { class: "meta-row" },
           h("span", null, t("savedAt", { time: fmtTime(ed.baseMtime) })),
+          originItems.length
+            ? h("span", null, t("originLine", { items: originItems.join("；") }))
+            : null,
           h(
             "button",
             { class: "btn ghost", onclick: toggleHistory },

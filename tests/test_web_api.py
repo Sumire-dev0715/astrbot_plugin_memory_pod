@@ -13,7 +13,16 @@ from pathlib import Path
 
 import pytest
 
-from support import PACKAGE, pkg_context_stats, pkg_memstore, pkg_registry, pkg_tidy, thing
+from support import (
+    PACKAGE,
+    pkg_context_stats,
+    pkg_history,
+    pkg_memstore,
+    pkg_origin,
+    pkg_registry,
+    pkg_tidy,
+    thing,
+)
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -375,3 +384,85 @@ def test_registered_routes_have_no_autotidy_or_old_scopes(tmp_path):
     assert all("session/" not in route for route in routes)
     assert any(route.endswith("/board/publish") for route in routes)
     assert any(route.endswith("/whisper/context") for route in routes)
+
+
+GROUP_NAME = "星河秘密基地-甲子园"
+
+
+def test_file_detail_origin_includes_group_name_from_audit(tmp_path):
+    plugin, dashboard = setup(tmp_path)
+    store = plugin._store.notebook_scope("Bot-A")
+    now = time.time()
+    record = pkg_origin.Origin(
+        "group",
+        "123",
+        "小明",
+        now,
+        pkg_origin.session_hash("Bot-A:GroupMessage:987654321"),
+    )
+    call(
+        store.write(
+            "note.md",
+            thing("note", description="合成记忆", body="合成正文"),
+            source="123",
+            actor="Bot-A",
+            origin_record=record,
+            audit=pkg_history.AuditContext(
+                session="Bot-A:GroupMessage:987654321",
+                group=GROUP_NAME,
+                admin=False,
+            ),
+        )
+    )
+    query(scope="notebook", key="Bot-A", file="note.md")
+    data = raw(route(dashboard, "file_detail"))
+    assert data["origin"][0]["kind"] == "group"
+    assert data["origin"][0]["name"] == "小明"
+    assert data["origin"][0]["speaker"] == "123"
+    assert data["origin"][0]["group"] == GROUP_NAME
+    # 群名只在管理页从审计日志读出，记忆文件里没有
+    content = call(store.read("note.md"))
+    assert GROUP_NAME not in content
+    # 没有 origin 的旧文件：来源列表为空
+    call(store.write("old.md", thing("old", body="旧内容")))
+    query(scope="notebook", key="Bot-A", file="old.md")
+    assert raw(route(dashboard, "file_detail"))["origin"] == []
+
+
+def test_management_page_can_write_feedback_without_admin_gate(tmp_path):
+    plugin, dashboard = setup(tmp_path)
+    body(
+        {
+            "scope": "notebook",
+            "key": "Bot-A",
+            "file": "rule.md",
+            "mode": "fields",
+            "type": "feedback",
+            "description": "对机器人的要求",
+            "body": "以后先问我",
+        }
+    )
+    result = route(dashboard, "file_save")
+    assert result["status"] == "ok", result
+    content = call(plugin._store.notebook_scope("Bot-A").read("rule.md"))
+    doc = pkg_memstore.parse_memory(content)
+    assert doc.type == "feedback"
+    # 管理页写入不算来源：没有 origin，别的对话里不会带来源标注
+    assert doc.origin == ""
+    assert pkg_origin.note("notebook/rule.md", doc.origin, "other") == ""
+
+    body(
+        {
+            "scope": "notebook",
+            "key": "Bot-A",
+            "file": "rule.md",
+            "oldFile": "rule.md",
+            "mode": "fields",
+            "type": "feedback",
+            "description": "对机器人的要求",
+            "body": "改成以后先问我再动手",
+        }
+    )
+    result = route(dashboard, "file_save")
+    assert result["status"] == "ok", result
+    assert "再动手" in call(plugin._store.notebook_scope("Bot-A").read("rule.md"))
