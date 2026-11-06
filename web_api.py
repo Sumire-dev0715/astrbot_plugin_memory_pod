@@ -15,6 +15,8 @@
     - 管理页是管理员操作，所以可以编辑任意会话的悄悄话、直接写留言板；
       聊天工具与召回没有这些通道（PLAN 3.8.3）。
     - 改动记忆后作废相应会话的索引快照，下一轮对话就能看到。
+    - 页面在沙箱 iframe 里用不了 localStorage，上次发布告示用的署名记在
+      插件数据目录的 state/webui.json，由 overview 带给页面预填。
 
 AstrBot v4.24.1 起支持插件页面；更早的版本没有 register_web_api，
 这里静默跳过注册，插件其余功能照常。
@@ -23,8 +25,10 @@ AstrBot v4.24.1 起支持插件页面；更早的版本没有 register_web_api�
 from __future__ import annotations
 
 import asyncio
+import json
 import secrets
 import time
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from astrbot.api import logger
@@ -63,9 +67,15 @@ MAX_REMARK = 64
 MAX_QUERY = 200
 MAX_BOARD_TITLE = 120
 MAX_BOARD_BODY = 8000
+# 告示卡片上显示的正文开头（字符数）；完整正文在详情里看
+BOARD_EXCERPT_CHARS = 280
 # 导出、导入的暂存：先生成再下载、先预演再执行，期间内容放在内存里
 STAGE_TTL = 30 * 60
 MAX_STAGED = 4
+# 管理页的偏好（目前只有上次发布告示用的署名），放在插件数据目录的 state/ 下。
+# 页面跑在不带 allow-same-origin 的沙箱 iframe 里，用不了 localStorage，
+# 所以"记住上次填的署名"（PLAN 3.8.3）只能记在服务端。
+PREFS_FILENAME = "webui.json"
 
 
 class ApiError(Exception):
@@ -128,7 +138,42 @@ def _header_dict(header: memstore.MemoryHeader, scope: str = "") -> dict:
         "lastUsed": header.last_used,
         "uses": header.uses,
         "forgottenAt": header.forgotten_at,
+        # 列表里的"来源"：只给会话类型、说话人与时间；群名只在文件详情里
+        # 从审计日志读（PLAN 3.9.1 第 6 条）
+        "origin": _origin_brief(header.origin),
     }
+
+
+def _origin_brief(origin_text: str) -> list[dict]:
+    """frontmatter 里的来源记录，按写入先后排列；不带会话哈希与群名。"""
+    return [
+        {
+            "kind": record.kind,
+            "speaker": record.speaker,
+            "name": record.name,
+            "ts": record.ts,
+        }
+        for record in origin.parse(origin_text)
+    ]
+
+
+def _excerpt(body: str, limit: int = BOARD_EXCERPT_CHARS) -> str:
+    """正文开头一段（空白折叠成单个空格），给告示卡片用。"""
+    text = " ".join((body or "").split())
+    return text if len(text) <= limit else text[:limit].rstrip() + "…"
+
+
+def _board_excerpts(
+    store: memstore.ScopeStore, headers: list[memstore.MemoryHeader]
+) -> dict[str, str]:
+    """留言板每条告示的正文开头（同步，放进线程执行）。"""
+    result: dict[str, str] = {}
+    for header in headers:
+        content = store._read_text_lenient(header.file)
+        if content is None:
+            continue
+        result[header.file] = _excerpt(memstore.parse_memory(content).body)
+    return result
 
 
 def _file_flags(
@@ -456,6 +501,43 @@ class MemoryDashboard:
             "message": meta.message,
         }
 
+    def _config_days(self, key: str) -> int:
+        """保留期配置（天），与 ScopeStore.set_retention 同一口径：0 为永久。"""
+        config = getattr(self.plugin, "config", None) or {}
+        try:
+            return max(0, int(config.get(key, history.DEFAULT_KEEP_DAYS)))
+        except (TypeError, ValueError, AttributeError):
+            return history.DEFAULT_KEEP_DAYS
+
+    # ------------------------------------------------------------ 管理页偏好
+
+    def _prefs_path(self) -> Path:
+        return Path(self.plugin._state_dir) / PREFS_FILENAME
+
+    def _load_prefs(self) -> dict:
+        """读管理页偏好；没有或损坏时当作空（同步，放进线程执行）。"""
+        try:
+            data = json.loads(self._prefs_path().read_text("utf-8"))
+        except (OSError, ValueError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def _save_prefs(self, changes: dict) -> None:
+        """合并写入管理页偏好，原子替换（同步，放进线程执行）。"""
+        data = self._load_prefs()
+        data.update(changes)
+        path = self._prefs_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(path)
+
+    def _last_signature(self) -> str:
+        raw = self._load_prefs().get("boardSignature")
+        if not isinstance(raw, str):
+            return ""
+        return " ".join(raw.split())[: memstore.MAX_SIGNATURE_CHARS]
+
     # ------------------------------------------------------------ 查询
 
     async def overview(self) -> dict:
@@ -493,10 +575,16 @@ class MemoryDashboard:
         board_count, board_latest, notebooks, whispers = await asyncio.to_thread(
             collect
         )
+        last_signature = await asyncio.to_thread(self._last_signature)
         return _ok(
             {
                 "memoryEnabled": plugin._bool("enable_memory", True),
-                "board": {"fileCount": board_count, "updatedAt": board_latest},
+                "board": {
+                    "fileCount": board_count,
+                    "updatedAt": board_latest,
+                    # 发布告示时预填上次的署名（PLAN 3.8.3"记住上次填的"）
+                    "lastSignature": last_signature,
+                },
                 "notebooks": notebooks,
                 "whispers": whispers,
                 "context": await plugin.context_status(None),
@@ -525,10 +613,16 @@ class MemoryDashboard:
                 )
                 return item
 
+            # 告示卡片要显示正文开头；别的作用域列表只显示一句话摘要
+            excerpts = (
+                _board_excerpts(store, headers) if scope == SCOPE_BOARD else {}
+            )
             files = []
             for header in headers:
                 item = row(header)
                 item.update(flags.get(header.file, {}))
+                if scope == SCOPE_BOARD:
+                    item["excerpt"] = excerpts.get(header.file, "")
                 files.append(item)
             return {
                 "files": files,
@@ -557,6 +651,12 @@ class MemoryDashboard:
         data["tidy"] = self._tidy_info(meta)
         data["forgettingEnabled"] = self.plugin._forgetting_on()
         data["forgetAfterDays"] = self.plugin._forget_after_days()
+        # 删除、恢复的确认框要写清能找回多久：0 表示永久保留（PLAN 3.1）
+        data["retention"] = {
+            "historyDays": self._config_days("history_keep_days"),
+            "trashDays": self._config_days("trash_keep_days"),
+            "minVersions": history.MIN_KEEP_VERSIONS,
+        }
         if scope == SCOPE_NOTEBOOK:
             data["notebook"] = {"platform": key}
         elif scope == SCOPE_WHISPER:
@@ -819,6 +919,13 @@ class MemoryDashboard:
         # 刚发布的告示下一轮就会整块注入，先记一次使用，整理时不会显示
         # "从未被用到"
         await asyncio.to_thread(store.note_used, [name])
+        # 记住这次的署名，下次发布时预填；记不下来不影响已经发布的告示
+        try:
+            await asyncio.to_thread(
+                self._save_prefs, {"boardSignature": signature}
+            )
+        except OSError as exc:
+            logger.warning(LOG_PREFIX + f"记录告示署名失败：{exc}")
         # 留言板对所有会话可见：作废全部开头块快照
         self._changed(SCOPE_BOARD, None)
         return _ok({"file": name}, report.message)
