@@ -467,15 +467,15 @@ def test_consolidate_prompt_and_store_know_journal():
 
 
 def test_management_page_offers_journal_type():
-    app_js = (
-        Path(__file__).resolve().parent.parent / "pages" / "memory" / "app.js"
-    ).read_text("utf-8")
-    assert (
-        'const TYPES = ["person", "agreement", "note", "journal"];'
-        in app_js
-    )
-    assert 'type_journal: "日记"' in app_js
-    assert "typeHint_journal:" in app_js
+    page = Path(__file__).resolve().parent.parent / "pages" / "memory"
+    expected = 'const TYPES = ["person", "agreement", "note", "journal"];'
+    assert expected in (page / "memory.js").read_text("utf-8")
+    assert expected in (page / "store.js").read_text("utf-8")
+    i18n_js = (page / "i18n.js").read_text("utf-8")
+    assert '"type_journal": "日记"' in i18n_js
+    assert '"typeHint_journal":' in i18n_js
+    # 日记在文件列表里折叠成一组，不参与自动召回
+    assert 't("journalGroup"' in (page / "memory.js").read_text("utf-8")
 
 
 # ---------------------------------------------------------------- 索引折叠与体检

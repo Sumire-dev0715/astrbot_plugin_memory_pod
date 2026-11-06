@@ -1,89 +1,331 @@
-"""管理页没有 DOM 测试环境：这里锁住关键接线与已删除功能的痕迹。"""
+"""管理页没有 DOM 测试环境：这里锁住关键接线与已删除功能的痕迹。
 
+页面是几个原生 JS 文件（pages/memory/*.js，由 index.html 按顺序加载）。
+下面按文件和函数把源码切出来再断言：删除、彻底删除这类危险操作必须先确认，
+页面里的接口路径必须和 web_api 注册的路由对得上，用户内容不能当 HTML 插进页面。
+"""
+
+import re
+import shutil
+import subprocess
 from pathlib import Path
 
+import pytest
+
+from test_web_api import setup
+
 ROOT = Path(__file__).resolve().parent.parent
-PAGE = ROOT / "pages" / "memory" / "app.js"
+PAGE = ROOT / "pages" / "memory"
+
+SCRIPT_ORDER = [
+    "i18n.js",
+    "ui.js",
+    "markdown.js",
+    "diff.js",
+    "store.js",
+    "memory.js",
+    "manage.js",
+    "app.js",
+]
 
 
-def _source() -> str:
-    return PAGE.read_text("utf-8")
+def _page(name: str) -> str:
+    return (PAGE / name).read_text("utf-8")
+
+
+def _all_js() -> dict[str, str]:
+    return {path.name: path.read_text("utf-8") for path in sorted(PAGE.glob("*.js"))}
+
+
+def _between(source: str, start: str, end: str) -> str:
+    assert start in source, start
+    tail = source.split(start, 1)[1]
+    assert end in tail, end
+    return tail.split(end, 1)[0]
+
+
+def _strip_comments(source: str) -> str:
+    """去掉 /* */ 与 // 注释（只为查"代码里有没有某个写法"，不求完美的词法分析）。"""
+    source = re.sub(r"/\*.*?\*/", "", source, flags=re.S)
+    return re.sub(r"(?m)(^|[^:\"'\\])//.*$", r"\1", source)
+
+
+# ------------------------------------------------------------ 页面骨架
+
+
+def test_index_html_loads_scripts_in_dependency_order_without_external_resources():
+    html = _page("index.html")
+    sources = re.findall(r'<script[^>]*\ssrc="([^"]+)"', html)
+    # 桥接脚本必须是这个固定路径：AstrBot 按它改写成带令牌与主题的地址
+    assert sources[0] == "/api/plugin/page/bridge-sdk.js"
+    assert sources[1:] == ["./" + name for name in SCRIPT_ORDER]
+    for name in SCRIPT_ORDER:
+        assert (PAGE / name).is_file(), name
+    # 没有内联脚本、内联事件，也没有外链字体、CDN
+    assert not re.search(r"<script(?![^>]*\ssrc=)", html)
+    assert not re.search(r"\son[a-z]+\s*=", html)
+    assert "<style" not in html
+    for name in ["index.html", "style.css", *SCRIPT_ORDER]:
+        code = _strip_comments(_page(name))
+        urls = set(re.findall(r"(?:https?:)?//[A-Za-z0-9.-]+\.[A-Za-z]{2,}[^\s\"')]*", code))
+        # 唯一的网址是 SVG 命名空间（createElementNS 要用），不是网络请求
+        assert urls <= {"http://www.w3.org/2000/svg"}, (name, urls)
+    css = _page("style.css")
+    assert "@import" not in css and "url(" not in css
+    # 骨架里要有页面脚本取用的容器
+    for element_id in ("app", "dialogs", "toasts"):
+        assert f'id="{element_id}"' in html
+
+
+def test_page_never_builds_html_from_strings():
+    """记忆正文、文件名、群名、署名、摘要都是用户内容：只能当文字放进页面。"""
+    forbidden = [
+        r"\.innerHTML",
+        r"outerHTML",
+        r"insertAdjacentHTML",
+        r"document\.write",
+        r"\beval\s*\(",
+        r"new\s+Function",
+        r"srcdoc",
+        r"DOMParser",
+        r"createContextualFragment",
+        # 沙箱 iframe 没有 allow-same-origin，访问会抛 SecurityError
+        r"localStorage",
+        r"sessionStorage",
+        # 沙箱 iframe 没有 allow-modals，这些调用被浏览器直接忽略
+        r"window\.(?:prompt|alert|confirm)\b",
+        r"(?<![\w.])(?:prompt|alert)\s*\(",
+        r"javascript:",
+        r"setAttribute\(\s*[\"']on",
+    ]
+    for name, source in _all_js().items():
+        code = _strip_comments(source)
+        for pattern in forbidden:
+            assert not re.search(pattern, code), (name, pattern)
+    # 唯一创建链接的地方是下载备份的 Blob 链接
+    for name, source in _all_js().items():
+        count = len(re.findall(r'h\(\s*"a"\s*[,)]', _strip_comments(source)))
+        assert count == (1 if name == "ui.js" else 0), name
+    # 事件只接受函数：字符串形式的内联事件在 h() 里直接丢掉
+    assert 'typeof value === "function"' in _page("ui.js")
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="没有 node")
+def test_every_js_file_passes_node_check():
+    for name in SCRIPT_ORDER:
+        result = subprocess.run(
+            ["node", "--check", str(PAGE / name)], capture_output=True, text=True
+        )
+        assert result.returncode == 0, (name, result.stderr)
+
+
+# ------------------------------------------------------------ 接口对得上
+
+
+def _used_endpoints() -> set[tuple[str, str]]:
+    used = set()
+    for name, source in _all_js().items():
+        code = _strip_comments(source)
+        for endpoint in re.findall(r'apiGet\(\s*"([^"]+)"', code):
+            used.add((endpoint, "GET"))
+        for endpoint in re.findall(r'apiPost\(\s*"([^"]+)"', code):
+            used.add((endpoint, "POST"))
+        # 备份下载：先 POST export/prepare，再 GET export/file
+        for endpoint in re.findall(r'download\(\s*"([^"]+)"', code):
+            used.add((endpoint, "GET"))
+        # confirmAndPost({ endpoint: "file/delete", ... }) 走 POST
+        for endpoint in re.findall(r'endpoint:\s*"([^"]+)"', code):
+            used.add((endpoint, "POST"))
+    return used
+
+
+def test_every_endpoint_the_page_calls_is_a_registered_route(tmp_path):
+    _, dashboard = setup(tmp_path)
+    routes = {(path, method) for path, method, _handler, _desc in dashboard._routes()}
+    used = _used_endpoints()
+    assert used, "没有从页面源码里读到任何接口调用"
+    assert used <= routes, sorted(used - routes)
+
+
+def test_every_registered_route_has_an_entry_in_the_page(tmp_path):
+    """原有功能一项不丢：后端注册的每个管理页接口，新页面里都有调用。"""
+    _, dashboard = setup(tmp_path)
+    routes = {(path, method) for path, method, _handler, _desc in dashboard._routes()}
+    assert routes <= _used_endpoints(), sorted(routes - _used_endpoints())
+
+
+# ------------------------------------------------------------ 危险操作必须确认
+
+
+def _call_context(source: str, needle: str) -> list[str]:
+    """needle 每次出现时，所在函数（从最近一个 function 声明起）到它为止的代码。"""
+    code = _strip_comments(source)
+    contexts = []
+    for match in re.finditer(re.escape(needle), code):
+        starts = [m.start() for m in re.finditer(r"\bfunction\s+\w+\s*\(", code[: match.start()])]
+        assert starts, needle
+        contexts.append(code[starts[-1] : match.start()])
+    return contexts
+
+
+# 端点 → 调用它之前必须出现的确认写法；每一组里出现任意一种就算
+CONFIRMED = {
+    "file/delete": (("confirm:",),),
+    "file/forget": (("confirm:",),),
+    "file/purge": (("confirm:",),),
+    "forgotten/delete": (("confirm:",),),
+    "trash/delete": (("confirm:",),),
+    "history/restore": (("confirm:",),),
+    "whisper/purge": (("ui.confirm(",),),
+    "tidy/undo": (("ui.confirm(",),),
+    "import/apply": (("ui.confirm(",),),
+    "consolidate/apply": (("confirmApply(",),),
+    "index/rebuild": (("ui.confirm(",),),
+    "index/save": (("ui.dialog(",), ("await ctrl.done",)),
+    # 编辑器保存先显示改动对比；续期的对话框就是确认（写着现在的到期日）
+    "file/save": (("confirmSave(", "ui.dialog("),),
+}
+# 删了就找不回来（或影响面大）的操作，确认框必须用 danger
+DANGER = ("file/delete", "file/purge", "forgotten/delete", "trash/delete", "whisper/purge")
+
+
+@pytest.mark.parametrize("endpoint", sorted(CONFIRMED))
+def test_destructive_endpoints_are_called_only_after_a_confirmation(endpoint):
+    found = 0
+    for name, source in _all_js().items():
+        # 带 endpoint: 的写法是 confirmAndPost 的参数，确认框在同一个对象里
+        for needle in (f'apiPost("{endpoint}"', f'endpoint: "{endpoint}"'):
+            for context in _call_context(source, needle):
+                found += 1
+                for group in CONFIRMED[endpoint]:
+                    assert any(token in context for token in group), (name, endpoint, group)
+                if endpoint in DANGER:
+                    assert "danger: true" in context, (name, endpoint)
+    assert found, endpoint
+
+
+def test_confirm_and_post_asks_before_it_posts():
+    memory = _page("memory.js")
+    body = _between(memory, "async function confirmAndPost(opts) {", "function deleteFile(")
+    assert body.index("ui.confirm(opts.confirm)") < body.index("ui.apiPost(opts.endpoint")
+
+
+def test_real_migrations_run_only_after_a_confirmation_built_from_the_dry_run():
+    manage = _page("manage.js")
+    for body_name, endpoint in (("payload", "migrate/scope"), ("body", "migrate/platform")):
+        real = f'apiPost("{endpoint}", {body_name}(false))'
+        assert real in manage
+        for context in _call_context(manage, real):
+            assert "ui.confirm(" in context, endpoint
+            assert "danger:" in context, endpoint
+            # 真正迁移之前先用预演的数字写确认框
+            assert f'apiPost("{endpoint}", {body_name}(true))' in context, endpoint
+
+
+def test_trash_restore_confirms_before_overwriting():
+    memory = _page("memory.js")
+    body = _between(memory, "async function restoreTrash(item) {", "async function viewTrash(item) {")
+    assert "if (exists) {" in body
+    assert body.index("ui.confirm(") < body.index('ui.apiPost("trash/restore"')
+    assert 't("restoreOverwritePoint"' in body and 't("restoreIndexPoint")' in body
+
+
+# ------------------------------------------------------------ 具体功能的接线
 
 
 def test_trash_tab_purge_button_only_for_missing_active_files():
-    source = _source()
-    render = source.split("function renderTrashTab()", 1)[1].split(
-        "async function viewTrashEntry", 1
-    )[0]
-    assert "const active = new Set(" in render
+    memory = _page("memory.js")
+    render = _between(memory, "function trashList() {", "function forgottenList() {")
+    assert "const active = activeFiles();" in render
     assert "active.has(item.file)" in render
+    assert "!isIndexFile(item.file)" in render
     assert "purgeTrashFile(item)" in render
     assert 't("purgeFile")' in render
 
 
 def test_trash_purge_uses_file_purge_with_confirmation():
-    source = _source()
-    body = source.split("async function purgeTrashFile(item)", 1)[1].split(
-        "// ------------------------------------------------------------ 整理", 1
-    )[0]
-    assert "confirmDialog(" in body
-    assert 't("trashPurgeTitle")' in body
-    assert 't("trashPurgeMessage"' in body
-    assert 'apiPost("file/purge"' in body
-    assert "loadDetail()" in body and "loadOverview(true)" in body
+    memory = _page("memory.js")
+    purge = _between(memory, "function purgeFile(r, name) {", "/** 按钮点击")
+    assert "confirmAndPost(" in purge
+    assert 't("purgeTitle"' in purge
+    assert 't("purgeMessage")' in purge
+    assert "danger: true" in purge
+    assert 'endpoint: "file/purge"' in purge
+    # 后果写清：历史版本、回收站副本、整理记录里的原文、审计只留元数据
+    for key in ("purgePoint1", "purgePoint2", "purgePoint3"):
+        assert f't("{key}")' in purge
+    trash = _between(memory, "async function purgeTrashFile(item) {", "function forgottenList() {")
+    assert "purgeFile(r, item.file)" in trash
+    assert "await refresh()" in trash
 
 
-def test_home_shows_user_identifier_notice():
-    source = _source()
-    welcome = source.split("function renderWelcome()", 1)[1].split(
-        "function renderDetail()", 1
-    )[0]
-    assert 't("userIdentifierNotice")' in welcome
-    assert 't("turnLimitNotice"' not in welcome
+def test_overview_shows_user_identifier_notice():
+    manage = _page("manage.js")
+    overview = _between(manage, "function OverviewSection() {", "function scopeRows(")
+    assert 't("userIdentifierNotice")' in overview
+    assert "turnLimitNotice" not in overview
+    # 上下文面板里同样提示
+    assert 't("userIdentifierNotice")' in _between(
+        manage, "function ContextPanel(key) {", "整理：方案审阅"
+    )
 
 
 def test_context_panel_is_read_only():
-    source = _source()
-    assert '"tabContext"' in source
-    assert 't("contextReadonlyNotice")' in source
-    assert 'apiGet("whisper/context"' in source
-    assert "session/context" not in source
-    assert "session/reset" not in source
-    assert "resetCompression" not in source
-    assert 't("summaryTitle")' in source
-    assert 't("noSummary")' in source
+    app = _page("app.js")
+    manage = _page("manage.js")
+    assert '"tabContext"' in app
+    panel = _between(manage, "function ContextPanel(key) {", "整理：方案审阅")
+    assert 'apiGet("whisper/context"' in panel
+    assert 't("contextReadonlyNotice")' in panel
+    assert 't("summaryTitle")' in panel
+    assert 't("noSummary")' in panel
+    # 面板里没有任何写接口
+    assert "apiPost(" not in panel
+    for name, source in _all_js().items():
+        for needle in ("session/context", "session/reset", "resetCompression"):
+            assert needle not in source, (name, needle)
+
+
+def test_context_panel_shows_composition_bar_cache_rate_and_summary():
+    manage = _page("manage.js")
+    bar = _between(manage, "/** 按比例分段的横条", "/** 一段对话的上下文面板")
+    assert "function stackBar(parts, total)" in bar
+    assert "(parts[k] / total) * 100" in bar
+    assert 't("cacheRate"' in bar
+    assert "data.cacheHit / data.actual" in bar
+    panel = _between(manage, "function ContextPanel(key) {", "整理：方案审阅")
+    assert "data.hasSummary" in panel and "data.summary" in panel
 
 
 def test_context_panel_leaves_no_dead_ui():
-    source = _source()
-    assert "fmtDuration" not in source
-    assert "pendingRounds" not in source
-    assert "下一次压缩" not in source
+    for name, source in _all_js().items():
+        assert "fmtDuration" not in source, name
+        assert "pendingRounds" not in source, name
+        assert "下一次压缩" not in source, name
     api_source = (ROOT / "web_api.py").read_text("utf-8")
     assert "hasContext" not in api_source
 
 
 def test_removed_features_are_gone_from_page():
-    source = _source()
-    for needle in (
-        "autotidy",
-        "autoTidy",
-        "tidyMode",
-        "pendingScopes",
-        "renderPendingPanel",
-        "SHARED_KEY",
-        "globalTitle",
-        "peopleTitle",
-        "renderArchiveTab",
-    ):
-        assert needle not in source, needle
+    sources = {name: _page(name) for name in ("index.html", "style.css", *SCRIPT_ORDER)}
+    for name, source in sources.items():
+        for needle in (
+            "autotidy",
+            "autoTidy",
+            "tidyMode",
+            "pendingScopes",
+            "renderPendingPanel",
+            "SHARED_KEY",
+            "globalTitle",
+            "peopleTitle",
+            "renderArchiveTab",
+        ):
+            assert needle not in source, (name, needle)
 
 
 def test_consolidate_all_covers_three_layers_only():
-    source = _source()
-    body = source.split("function consolidateTargets()", 1)[1].split(
-        "function sameScope(", 1
-    )[0]
+    manage = _page("manage.js")
+    body = _between(manage, "function consolidateTargets() {", "function TidyAllPanel(")
     assert "ov.board" in body
     assert "ov.notebooks" in body
     assert "ov.whispers" in body
@@ -92,34 +334,111 @@ def test_consolidate_all_covers_three_layers_only():
 
 
 def test_memory_type_options_use_the_four_new_types():
-    source = _source()
-    assert 'const TYPES = ["person", "agreement", "note", "journal"];' in source
-    for key in (
-        "type_person",
-        "type_agreement",
-        "type_note",
-        "type_journal",
-    ):
-        assert key in source, key
+    expected = 'const TYPES = ["person", "agreement", "note", "journal"];'
+    assert expected in _page("memory.js")
+    assert expected in _page("store.js")
+    i18n = _page("i18n.js")
+    for key in ("type_person", "type_agreement", "type_note", "type_journal"):
+        assert f'"{key}"' in i18n, key
+    for key in ("typeHint_person", "typeHint_agreement", "typeHint_note", "typeHint_journal"):
+        assert f'"{key}"' in i18n, key
 
 
 def test_board_editor_and_publish_form_have_no_type_option():
-    source = _source()
-    editor = source.split("function renderEditor()", 1)[1].split(
-        "async function saveFile", 1
-    )[0]
+    memory = _page("memory.js")
+    editor = _between(
+        memory,
+        "function Editor(view, r, opts) {",
+        "// ------------------------------------------------------------ 发布告示",
+    )
     # 类型下拉只在非留言板时渲染
-    assert 'if (ed.scope !== "board")' in editor
-    assert 't("fieldType")' in editor
+    assert "board ? null : typeField()" in editor
+    assert 't("fieldType")' in _between(editor, "function typeField() {", "function formFields() {")
+    # 保存时留言板的类型一律给空
+    assert 'type: board ? "" : cur.type' in editor
     # 发布告示表单只有署名、标题、到期日与正文
-    publish = source.split("function publishNotice()", 1)[1].split(
-        "// ------------------------------------------------------------ 搜索", 1
-    )[0]
-    assert 't("fieldType")' not in publish
-    assert "ed.type" not in publish
-    save = source.split("async function saveFile", 1)[1].split(
-        "async function deleteFile", 1
-    )[0]
-    assert 'type: ed.scope === "board" ? "" : ed.type' in save
-    # 留言板列表不显示类型标签
-    assert 'state.detail.scope === "board" ? null : typeTag(file.type)' in source
+    publish = _between(memory, "function PublishForm() {", "/** 续期")
+    assert "fieldType" not in publish
+    assert "cur.type" not in publish
+    payload = publish.split('apiPost("board/publish"', 1)[1].split("});", 1)[0]
+    assert "type:" not in payload
+    # 告示卡片与详情标题不显示类型标签
+    card = _between(memory, "function noticeCard(row) {", "function boardRows(")
+    assert "typeTag" not in card
+    assert "tags: board ? null : typeTag(d.type)" in memory
+
+
+def test_publish_form_prefills_last_signature_from_server():
+    """记住上次填的署名放在服务端（沙箱 iframe 里没有 localStorage）。"""
+    memory = _page("memory.js")
+    publish = _between(memory, "function PublishForm() {", "/** 续期")
+    assert "S.ov.board.lastSignature" in publish
+    assert "signature: last" in publish
+    assert 't("signatureRequired")' in publish
+    assert "signature: cur.signature.trim()" in publish
+
+
+# ------------------------------------------------------------ 键盘、焦点、状态
+
+
+def test_replacing_content_keeps_keyboard_focus_inside_the_area():
+    """重绘一块区域时，焦点原来在里面就留在这块区域，而不是掉回页面开头。"""
+    ui = _page("ui.js")
+    body = _between(ui, "function replace(el) {", "let idSeq")
+    assert "hadFocus" in body
+    assert 'setAttribute("tabindex", "-1")' in body
+    assert "el.focus()" in body
+
+
+def test_busy_buttons_keep_focus_and_ignore_repeat_clicks():
+    ui = _page("ui.js")
+    body = _between(
+        ui,
+        "async function withBusy(button, task) {",
+        "// ------------------------------------------------------------ 表单件",
+    )
+    assert "disabled" not in body
+    assert 'getAttribute("aria-busy") === "true"' in body
+    dialog = _between(ui, "setBusy: function (value) {", "setBody: function (node) {")
+    assert "aria-disabled" in dialog and "disabled =" not in dialog
+
+
+def test_dialogs_are_modal_trap_focus_and_default_to_cancel_when_dangerous():
+    ui = _page("ui.js")
+    assert '"aria-modal": "true"' in ui
+    assert 'opts.alert ? "alertdialog" : "dialog"' in ui
+    assert 'event.key === "Escape"' in ui
+    assert 'event.key !== "Tab"' in ui
+    confirm = _between(ui, "function confirm(opts) {", "/** 按钮执行异步任务期间")
+    # 危险确认：默认焦点放在"取消"上
+    assert "autofocus: Boolean(opts.danger)" in confirm
+    assert "autofocus: !opts.danger" in confirm
+    # 弹窗打开时背景不可操作，关闭后把焦点还给触发它的元素
+    assert "setAppInert(true)" in ui and "previous.focus()" in ui
+
+
+def test_page_follows_host_theme_and_language():
+    html = _page("index.html")
+    css = _page("style.css")
+    app = _page("app.js")
+    assert 'data-theme="light"' in html
+    # 桥接在 <html data-theme> 上写 light / dark；样式只认这个属性
+    assert ':root[data-theme="dark"]' in css
+    assert "prefers-color-scheme" not in css
+    assert "bridge.onContext(onContext)" in app
+    assert "window.AstrBotPluginView || window.AstrBotPluginPage" in app
+    assert "prefers-reduced-motion" in css and "max-width: 900px" in css
+
+
+def test_lists_have_loading_empty_and_error_states():
+    ui = _page("ui.js")
+    for helper in ("function spinner(", "function emptyState(", "function errorState("):
+        assert helper in ui
+    memory = _page("memory.js")
+    for body in (
+        _between(memory, "function fillFileList(body, view, r, st) {", "/** 全文搜索"),
+        _between(memory, "function fillBoard(body, r, st) {", "function boardListPane() {"),
+    ):
+        assert "ui.spinner()" in body
+        assert "ui.errorState(" in body
+        assert "ui.emptyState(" in body

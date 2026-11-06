@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from support import pkg_injection, pkg_memstore, pkg_prompts
@@ -82,47 +83,56 @@ def test_opening_block_none_when_everything_empty():
     assert pkg_injection.build_opening_block("", " ", "", []) is None
 
 
-def test_management_page_has_signature_input_and_remembers_last_value():
-    source = (Path(__file__).resolve().parent.parent / "pages" / "memory" / "app.js").read_text(
+def _page(name):
+    return (Path(__file__).resolve().parent.parent / "pages" / "memory" / name).read_text(
         "utf-8"
     )
-    body = source.split("function publishNotice()", 1)[1].split(
-        "// ------------------------------------------------------------ 搜索", 1
-    )[0]
-    assert 'SIGNATURE_KEY = "memoryPod.boardSignature"' in source
-    assert "savedSignature()" in body
-    assert "rememberSignature(" in body
-    assert "signatureText" in body
-    assert 'apiPost("board/publish"' in body
-    assert 't("fieldSignature")' in body
+
+
+def test_management_page_has_signature_input_and_remembers_last_value():
+    publish = _page("memory.js").split("function PublishForm()", 1)[1].split("/** 续期", 1)[0]
+    # 页面跑在没有 allow-same-origin 的沙箱 iframe 里，localStorage 会抛 SecurityError：
+    # 上次的署名由服务端记着（overview.board.lastSignature），表单据此预填
+    assert "S.ov.board.lastSignature" in publish
+    assert "signature: last" in publish
+    assert 'apiPost("board/publish"' in publish
+    assert "signature: cur.signature.trim()" in publish
+    assert 't("fieldSignature")' in publish
+    assert 't("signatureRequired")' in publish
+    for name in ("memory.js", "manage.js", "app.js", "ui.js", "store.js"):
+        code = re.sub(r"/\*.*?\*/", "", _page(name), flags=re.S)
+        code = re.sub(r"(?m)(^|[^:\"'\\])//.*$", r"\1", code)
+        assert "localStorage" not in code, name
 
 
 def test_management_page_has_optional_expiry_date_and_expired_tag():
-    source = (
-        Path(__file__).resolve().parent.parent / "pages" / "memory" / "app.js"
-    ).read_text("utf-8")
-    editor = source.split("function renderEditor()", 1)[1].split(
-        "async function saveFile", 1
+    memory = _page("memory.js")
+    expiry = memory.split("function expiryInput(", 1)[1].split("function formText", 1)[0]
+    assert 'type: "date"' in expiry
+    # 常用的到期日有快捷选项，也可以改回长期有效
+    assert "dateAfter(" in expiry and 't("expiryNone")' in expiry
+
+    editor = memory.split("function Editor(view, r, opts)", 1)[1].split(
+        "// ------------------------------------------------------------ 发布告示", 1
     )[0]
     assert 't("fieldExpires")' in editor
-    assert 'type: "date"' in editor
-    assert "ed.expires" in editor
+    assert "expiryInput(cur.expires" in editor
+    # 到期日只属于留言板；空串表示清掉到期日
+    assert "if (board) {\n        // 到期日只属于留言板" in editor
+    assert 'payload.expires = cur.expires || ""' in editor
 
-    publish = source.split("function publishNotice()", 1)[1].split(
-        "// ------------------------------------------------------------ 搜索", 1
-    )[0]
+    publish = memory.split("function PublishForm()", 1)[1].split("/** 续期", 1)[0]
     assert 't("fieldExpires")' in publish
-    assert 'type: "date"' in publish
-    assert "expires: expires.value" in publish
+    assert "expiryInput(cur.expires" in publish
+    assert 'expires: cur.expires || ""' in publish
 
-    save = source.split("async function saveFile", 1)[1].split(
-        "async function deleteFile", 1
-    )[0]
-    assert 'expires: ed.scope === "board"' in save
-
-    # 告示列表显示到期日，过期的标"已过期"
-    file_list = source.split("function renderFileList", 1)[1].split(
-        "async function openFile", 1
-    )[0]
-    assert 't("expiresLine"' in file_list
-    assert 't("expired")' in file_list
+    # 告示列表显示到期日，过期的标"已过期"，并且可以按有效期筛选和续期
+    tag = memory.split("function expiryTag(row) {", 1)[1].split("function noticeCard", 1)[0]
+    assert 't("expiredOn"' in tag
+    assert 't("expiresOn"' in tag
+    assert 't("noExpiry")' in tag
+    assert "row.expired" in tag
+    card = memory.split("function noticeCard(row) {", 1)[1].split("function boardRows", 1)[0]
+    assert "expiryTag(row)" in card
+    assert 't("expired")' in memory and "st.status === \"expired\"" in memory
+    assert "function renewNotice(" in memory and 't("renewSave")' in memory

@@ -3,15 +3,27 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>鲸群记忆</title>
+    <title>记忆管理</title>
     <link rel="stylesheet" href="./style.css" />
     <script src="/api/plugin/page/bridge-sdk.js"></script>
   </head>
   <body>
-    <div id="app" class="app">
-      <div class="center-state"><div class="spinner"></div></div>
+    <div id="app" class="app" aria-busy="true">
+      <div class="boot" role="status">
+        <span class="spinner" aria-hidden="true"></span>
+        <span>加载中…</span>
+      </div>
     </div>
-    <div id="toasts" class="toasts"></div>
+    <div id="dialogs"></div>
+    <div id="toasts" class="toasts" aria-live="polite"></div>
+    <!-- 原生 JS、无需构建，按依赖顺序加载；不引用任何外部资源 -->
+    <script src="./i18n.js"></script>
+    <script src="./ui.js"></script>
+    <script src="./markdown.js"></script>
+    <script src="./diff.js"></script>
+    <script src="./store.js"></script>
+    <script src="./memory.js"></script>
+    <script src="./manage.js"></script>
     <script src="./app.js"></script>
   </body>
 </html>
