@@ -137,6 +137,7 @@
     let data = null;
     let error = "";
 
+    /** 读上下文。成功返回 true；失败返回 false，已有数据时留着旧数据并在上面提示 */
     async function load() {
       try {
         data = await ui.apiGet("whisper/context", { key: key });
@@ -145,6 +146,7 @@
         error = err.message;
       }
       paint();
+      return !error;
     }
 
     function composition() {
@@ -201,6 +203,7 @@
       ui.replace(
         root,
         head.el,
+        error ? ui.staleNotice(error, load) : null,
         ui.notice("info", t("contextReadonlyNotice")),
         data.context && data.context.userIdentifier ? ui.notice("warn", t("userIdentifierNotice")) : null,
         composition(),
@@ -422,6 +425,7 @@
         error = err.message;
       }
       paint();
+      return !error;
     }
 
     async function undo(run) {
@@ -593,6 +597,8 @@
     paint();
     return {
       el: root,
+      // 刷新只重读下面的整理记录；正在生成、审阅中的方案原样留着
+      reload: function () { return runs.reload(); },
       isDirty: function () { return st.phase === "plan" && Boolean(st.review && st.review.total); },
       markClean: function () { st.phase = "idle"; },
     };
@@ -734,6 +740,11 @@
           reviewable ? h("div", { class: "actions sticky-actions" }, applyBtn) : null,
         ];
       }
+      const gate = M.overviewGate();
+      if (gate) {
+        // 总览没读到，不知道有多少处可整理：不能显示「0 处」
+        return [h("p", null, t("consolidateAllHint")), gate];
+      }
       return [
         h("p", null, t("consolidateAllHint")),
         h("p", { class: "hint" }, t("consolidateAllCount", { n: consolidateTargets().length })),
@@ -751,6 +762,13 @@
     paint();
     return {
       el: root,
+      // 刷新只更新「共 N 处」；正在整理、审阅、应用时原样留着
+      reload: function () {
+        if (st.phase === "idle") {
+          paint();
+        }
+        return true;
+      },
       isDirty: function () { return st.phase === "review" && chosenTotal() > 0; },
       markClean: function () { st.phase = "idle"; },
     };
@@ -766,6 +784,12 @@
     const sum = function (list) { return list.reduce(function (acc, item) { return acc + (item.fileCount || 0); }, 0); };
     const head = M.detailHead({ view: "manage", title: t("manageOverview"), desc: t("welcomeHint") });
     root.setAttribute("aria-labelledby", head.id);
+    // 总览没读到：显示加载中或错误，不能拿一堆 0 当真数据
+    const gate = M.overviewGate();
+    if (gate) {
+      ui.replace(root, head.el, gate);
+      return { el: root };
+    }
     ui.replace(
       root,
       head.el,
@@ -827,23 +851,28 @@
     const root = h("div", { class: "detail" });
     const head = M.detailHead({ view: "manage", title: t("manageTidy"), desc: t("manageTidyHint") });
     root.setAttribute("aria-labelledby", head.id);
+    const gate = M.overviewGate();
     ui.replace(
       root,
       head.el,
-      card(
-        t("consolidateAllTitle"),
-        [
-          h("p", { class: "hint" }, t("consolidateAllHint")),
-          h("div", { class: "actions" }, h("button", { type: "button", class: "btn btn-primary btn-sm", onclick: function () { MP.app.openManage("tidy", { tidySid: "all" }); } }, icon("sparkles"), t("consolidateAll"))),
-        ]
-      ),
-      card(
-        t("consolidateOneTitle"),
-        [
-          h("p", { class: "hint" }, t("consolidateOneHint")),
-          scopeRows(store.scopesWithFiles(), function (r) { MP.app.openManage("tidy", { tidySid: store.sid(r) }); }, t("consolidateAllNone")),
-        ]
-      )
+      gate
+        ? card(null, gate)
+        : [
+            card(
+              t("consolidateAllTitle"),
+              [
+                h("p", { class: "hint" }, t("consolidateAllHint")),
+                h("div", { class: "actions" }, h("button", { type: "button", class: "btn btn-primary btn-sm", onclick: function () { MP.app.openManage("tidy", { tidySid: "all" }); } }, icon("sparkles"), t("consolidateAll"))),
+              ]
+            ),
+            card(
+              t("consolidateOneTitle"),
+              [
+                h("p", { class: "hint" }, t("consolidateOneHint")),
+                scopeRows(store.scopesWithFiles(), function (r) { MP.app.openManage("tidy", { tidySid: store.sid(r) }); }, t("consolidateAllNone")),
+              ]
+            ),
+          ]
     );
     return { el: root };
   }
@@ -857,7 +886,7 @@
       head.el,
       card(
         null,
-        scopeRows(store.allScopes(), function (r) { MP.app.openManage("maint", { maintSid: store.sid(r) }); }, t("noScopes"))
+        M.overviewGate() || scopeRows(store.allScopes(), function (r) { MP.app.openManage("maint", { maintSid: store.sid(r) }); }, t("noScopes"))
       )
     );
     return { el: root };
@@ -950,6 +979,10 @@
   }
 
   function exportTab() {
+    const gate = M.overviewGate();
+    if (gate) {
+      return gate;
+    }
     const scopes = store.scopesWithFiles();
     if (!scopes.length) {
       return ui.emptyState({ icon: "download", title: t("exportNone"), compact: true });
@@ -1146,6 +1179,10 @@
   }
 
   function migrateTab() {
+    const gate = M.overviewGate();
+    if (gate) {
+      return gate;
+    }
     const sources = store.scopesWithFiles();
     if (!sources.length) {
       return ui.emptyState({ icon: "transfer", title: t("migrateNothing"), compact: true });
@@ -1431,27 +1468,29 @@
   function manageDetailFor() {
     const m = S.manage;
     const back = function () { MP.app.openManage(m.section, m.section === "tidy" ? { tidySid: "" } : { maintSid: "" }); };
+    // 总览没读到（加载中、失败）时这些组件显示的是占位；总览到了以后 id 变了，组件重建
+    const ready = M.overviewState();
     if (m.section === "tidy") {
       if (m.tidySid === "all") {
-        return { id: "manage|tidy|all|" + S.paneVersion, create: function () { return TidyAllPanel({ onBack: back }); } };
+        return { id: "manage|tidy|all|" + S.paneVersion + "|" + ready, create: function () { return TidyAllPanel({ onBack: back }); } };
       }
       const r = m.tidySid ? store.parseSid(m.tidySid) : null;
       if (r) {
         return { id: "manage|tidy|" + m.tidySid + "|" + S.paneVersion, create: function () { return TidyPanel("manage", r, { onBack: back, backLabel: t("backToTidy") }); } };
       }
-      return { id: "manage|tidy|home|" + S.paneVersion, create: TidyHome };
+      return { id: "manage|tidy|home|" + S.paneVersion + "|" + ready, create: TidyHome };
     }
     if (m.section === "maint") {
       const r = m.maintSid ? store.parseSid(m.maintSid) : null;
       if (r) {
         return { id: "manage|maint|" + m.maintSid + "|" + S.paneVersion, create: function () { return M.MaintPanel("manage", r, "trash", { onBack: back, backLabel: t("backToMaint") }); } };
       }
-      return { id: "manage|maint|home|" + S.paneVersion, create: MaintHome };
+      return { id: "manage|maint|home|" + S.paneVersion + "|" + ready, create: MaintHome };
     }
     if (m.section === "transfer") {
-      return { id: "manage|transfer|" + S.paneVersion, create: TransferSection };
+      return { id: "manage|transfer|" + S.paneVersion + "|" + ready, create: TransferSection };
     }
-    return { id: "manage|overview|" + S.paneVersion + "|" + (S.ov ? "1" : "0"), create: OverviewSection };
+    return { id: "manage|overview|" + S.paneVersion + "|" + ready, create: OverviewSection };
   }
 
   // ------------------------------------------------------------ 上下文：列表与详情

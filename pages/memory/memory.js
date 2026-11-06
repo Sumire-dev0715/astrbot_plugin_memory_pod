@@ -2,8 +2,10 @@
  *
  * 每个视图左边是列表（告示卡片 / 文件列表 / 对话列表），右边是详情：
  * 文件详情（正文渲染、frontmatter、来源、历史版本时间线）、编辑器、发布告示、
- * 索引、回收站与已遗忘、整理。右侧组件是带自己状态的小对象 {el, isDirty}，
- * 列表刷新时不重建，未保存的修改不会丢。
+ * 索引、回收站与已遗忘、整理。右侧组件是带自己状态的小对象
+ * {el, reload?, isDirty?, markClean?}：列表刷新时不重建，未保存的修改不会丢。
+ * 顶部「刷新」时有 reload 的组件自己重读（重读失败返回 false）；没有 reload 的组件
+ * 在创建时读一次数据，由 app.js 在没有未保存修改时整个重建。
  */
 (function (MP) {
   "use strict";
@@ -46,6 +48,22 @@
   function findRow(r, name) {
     const data = scopeData(r);
     return data ? (data.files || []).find(function (row) { return row.file === name; }) || null : null;
+  }
+
+  /**
+   * 总览还没读到（加载中或读取失败）时，依赖总览的地方不能当成"什么都没有"：
+   * 返回转圈（加载中）或带重试的错误态（失败）；总览已经有了返回 null。
+   */
+  function overviewGate() {
+    if (S.ov) {
+      return null;
+    }
+    return S.ovError ? ui.errorState(S.ovError, function () { store.loadOverview(); }) : ui.spinner();
+  }
+
+  /** 总览的三种状态，用在组件 id 里：没读到的组件在总览到了以后要重建 */
+  function overviewState() {
+    return S.ov ? "ready" : S.ovError ? "failed" : "loading";
   }
 
   function isPersonFile(name) {
@@ -577,9 +595,10 @@
     const notebooks = (S.ov && S.ov.notebooks) || [];
     const r = viewRef("notebook");
     if (!r) {
+      // 没有选中的小本本：总览读到了才算"真的没有"，没读到（加载中、失败）要如实显示
       return [
         listHead({ title: t("notebookLabel"), sub: t("notebookSub") }),
-        h("div", { class: "list-body" }, ui.emptyState({ icon: "notebook", title: t("notebookNone"), hint: t("notebookNoneHint") })),
+        h("div", { class: "list-body" }, overviewGate() || ui.emptyState({ icon: "notebook", title: t("notebookNone"), hint: t("notebookNoneHint") })),
       ];
     }
     store.ensureScope(r);
@@ -1226,6 +1245,7 @@
     const st = { data: null, error: "", tab: initialTab || "content", versions: null, versionsError: "" };
     let token = 0;
 
+    /** 读文件。成功返回 true；失败返回 false，已有内容时留着旧内容并在上面提示 */
     async function load() {
       const mine = ++token;
       try {
@@ -1241,7 +1261,16 @@
       }
       if (mine === token) {
         paint();
+        return !st.error;
       }
+      return true;
+    }
+
+    /** 顶部刷新用：文件和历史版本都重读（历史版本只在看过以后才有） */
+    async function reload() {
+      const had = st.versions !== null;
+      const results = await Promise.all([load(), had ? loadVersions() : true]);
+      return results.every(function (item) { return item !== false; });
     }
 
     async function loadVersions() {
@@ -1253,6 +1282,7 @@
         st.versionsError = err.message;
       }
       paint();
+      return !st.versionsError;
     }
 
     async function viewVersion(v) {
@@ -1348,7 +1378,8 @@
         },
         t("detailTabsLabel")
       );
-      ui.replace(root, head.el, tabs, panel);
+      // 重新读取失败时还显示着上次读到的内容：在上面说明，别让人以为是最新的
+      ui.replace(root, head.el, st.error ? ui.staleNotice(st.error, load) : null, tabs, panel);
     }
 
     paint();
@@ -1356,7 +1387,7 @@
     if (st.tab === "history") {
       loadVersions();
     }
-    return { el: root, reload: load };
+    return { el: root, reload: reload };
   }
 
   // ------------------------------------------------------------ 编辑器
@@ -2028,6 +2059,24 @@
         error = err.message;
       }
       paint();
+      return !error;
+    }
+
+    /** 顶部刷新用：按重新读到的索引更新健康提示；有未保存的草稿就留着草稿 */
+    async function reload() {
+      try {
+        const data = await store.waitScope(r);
+        idx = data.index || {};
+        if (!isDirty()) {
+          base = idx.content || "";
+          draft = base;
+        }
+        error = "";
+      } catch (err) {
+        error = err.message;
+      }
+      paint();
+      return !error;
     }
 
     async function save() {
@@ -2098,6 +2147,7 @@
       ui.replace(
         root,
         head.el,
+        error ? ui.staleNotice(error, reload) : null,
         indexHealth(idx),
         h(
           "div",
@@ -2118,7 +2168,7 @@
     });
     paint();
     init();
-    return { el: root, isDirty: isDirty, markClean: function () { clean = true; } };
+    return { el: root, reload: reload, isDirty: isDirty, markClean: function () { clean = true; } };
   }
 
   // ------------------------------------------------------------ 回收站与已遗忘
@@ -2146,7 +2196,7 @@
     const back = opts && opts.onBack
       ? h("button", { type: "button", class: "btn btn-ghost btn-sm back-link", onclick: opts.onBack }, icon("back"), opts.backLabel || t("back"))
       : null;
-    const st = { tab: initialTab === "forgotten" ? "forgotten" : "trash", trash: null, trashError: "", data: null, dataError: "" };
+    const st = { tab: initialTab === "forgotten" ? "forgotten" : "trash", trash: null, trashError: "", data: null, dataError: "", dataStale: "" };
 
     async function loadTrash() {
       try {
@@ -2157,16 +2207,25 @@
         st.trashError = err.message;
       }
       paint();
+      return !st.trashError;
     }
 
-    async function loadData() {
+    /** 读这一处的清单。force 是顶部刷新用的：先重新向服务端要；失败时旧清单留着并提示 */
+    async function loadData(force) {
       try {
+        if (force === true) {
+          await store.loadScope(r);
+        }
         st.data = await store.waitScope(r);
+        const entry = store.scopeEntry(r);
         st.dataError = "";
+        st.dataStale = entry && entry.error ? entry.error : "";
       } catch (err) {
         st.dataError = err.message;
+        st.dataStale = "";
       }
       paint();
+      return !st.dataError && !st.dataStale;
     }
 
     async function refresh() {
@@ -2393,13 +2452,19 @@
         },
         t("maintTabsLabel")
       );
-      ui.replace(root, back, head.el, tabs, panel);
+      ui.replace(root, back, head.el, st.dataStale ? ui.staleNotice(st.dataStale, function () { loadData(true); }) : null, tabs, panel);
     }
 
     paint();
     loadData();
     loadTrash();
-    return { el: root, reload: function () { return Promise.all([loadData(), loadTrash()]); } };
+    return {
+      el: root,
+      reload: async function () {
+        const results = await Promise.all([loadData(true), loadTrash()]);
+        return results.every(Boolean);
+      },
+    };
   }
 
   // ------------------------------------------------------------ 对话信息
@@ -2407,9 +2472,21 @@
   function SessionPanel(key) {
     const root = h("div", { class: "detail" });
     const r = store.ref("whisper", key);
-    const initial = (store.whisperByKey(key) || {}).remark || "";
+    let initial = (store.whisperByKey(key) || {}).remark || "";
     let remark = initial;
     let clean = false;
+
+    /** 顶部刷新用：按重新读到的总览更新对话信息；备注输入框里有没存的修改就留着 */
+    function reload() {
+      const server = (store.whisperByKey(key) || {}).remark || "";
+      const edited = remark !== initial;
+      initial = server;
+      if (!edited) {
+        remark = server;
+      }
+      paint();
+      return true;
+    }
 
     async function saveRemark() {
       const res = await ui.apiPost("whisper/remark", { key: key, remark: remark.trim() });
@@ -2511,6 +2588,7 @@
     paint();
     return {
       el: root,
+      reload: reload,
       isDirty: function () { return !clean && remark !== initial && remark !== ((store.whisperByKey(key) || {}).remark || ""); },
       markClean: function () { clean = true; },
     };
@@ -2567,8 +2645,8 @@
     if (!r) {
       const node = view === "whisper"
         ? ui.emptyState({ icon: "whisper", title: t("pickConversationTitle"), hint: t("pickConversationHint") })
-        : ui.emptyState({ icon: "notebook", title: t("notebookNone"), hint: t("notebookNoneHint") });
-      return { id: view + "|none", create: staticDetail(node) };
+        : overviewGate() || ui.emptyState({ icon: "notebook", title: t("notebookNone"), hint: t("notebookNoneHint") });
+      return { id: view + "|none|" + overviewState(), create: staticDetail(node) };
     }
     const pane = S.pane[view] || { kind: "empty" };
     const id = [view, store.sid(r), pane.kind, pane.file || "", pane.tab || "", S.paneVersion].join("|");
@@ -2622,6 +2700,8 @@
     action: action,
     chipGroup: chipGroup,
     viewRef: viewRef,
+    overviewGate: overviewGate,
+    overviewState: overviewState,
     scopeData: scopeData,
     retention: retention,
     trashKeepText: trashKeepText,

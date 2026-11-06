@@ -178,13 +178,20 @@
 
   let ovToken = 0;
 
+  /**
+   * 读取总览。成功返回 true，失败返回 false（调用方据此决定提示成败）。
+   * 失败时 S.ovError 记着原因：还没有数据就整页显示错误，已有数据就留着旧数据，
+   * 由顶部横幅说明数字可能不是最新的。quiet 只是不弹 toast（后台刷新用）。
+   */
   async function loadOverview(quiet) {
     const token = ++ovToken;
     S.ovLoading = true;
+    let ok = true;
     try {
       const data = await ui.apiGet("overview");
       if (token !== ovToken) {
-        return;
+        // 已经有更新的一次在加载：由它决定页面上是什么
+        return true;
       }
       S.ov = data;
       S.ovError = "";
@@ -194,8 +201,9 @@
       }
     } catch (err) {
       if (token !== ovToken) {
-        return;
+        return true;
       }
+      ok = false;
       S.ovError = err.message;
       if (!quiet || !S.ov) {
         ui.toast(err.message, "error");
@@ -206,6 +214,7 @@
       }
     }
     MP.render();
+    return ok;
   }
 
   const scopeTokens = {};
@@ -223,6 +232,7 @@
     return promise;
   }
 
+  /** 读取一处记忆的文件清单与索引。成功返回 true，失败返回 false；失败时旧数据留着，entry.error 记着原因 */
   async function fetchScope(r) {
     const key = sid(r);
     const token = (scopeTokens[key] || 0) + 1;
@@ -231,17 +241,19 @@
     entry.loading = true;
     S.scopes[key] = entry;
     MP.render();
+    let ok = true;
     try {
       const data = await ui.apiGet("scope", { scope: r.scope, key: r.key });
       if (scopeTokens[key] !== token) {
-        return;
+        return true;
       }
       entry.data = data;
       entry.error = "";
     } catch (err) {
       if (scopeTokens[key] !== token) {
-        return;
+        return true;
       }
+      ok = false;
       entry.error = err.message;
     } finally {
       if (scopeTokens[key] === token) {
@@ -249,6 +261,7 @@
       }
     }
     MP.render();
+    return ok;
   }
 
   /** 视图需要某个作用域的数据时调用：没加载过才去拉 */

@@ -421,6 +421,15 @@
     );
   }
 
+  /** 重新读取失败、页面上还是上次读到的内容：说明原因，给一个重试按钮 */
+  function staleNotice(message, onRetry) {
+    return notice(
+      "warn",
+      t("staleNotice", { message: message || t("requestFailed") }),
+      onRetry ? h("button", { type: "button", class: "btn btn-sm", onclick: onRetry }, icon("refresh"), t("retry")) : null
+    );
+  }
+
   // ------------------------------------------------------------ 弹窗
 
   const openDialogs = [];
@@ -935,6 +944,7 @@
     emptyState: emptyState,
     errorState: errorState,
     notice: notice,
+    staleNotice: staleNotice,
     dialog: dialog,
     confirm: confirm,
     withBusy: withBusy,

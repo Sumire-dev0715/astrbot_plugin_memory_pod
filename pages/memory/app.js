@@ -125,19 +125,22 @@
     });
   }
 
+  /** 顶部横幅：记忆开关、总览读取失败（没有数据时）、重新加载失败（页面上是旧数据时） */
   function renderBanner() {
     const items = [];
     if (S.ov && S.ov.memoryEnabled === false) {
       items.push(ui.notice("warn", t("memoryOffNotice")));
     }
-    if (S.ovError && !S.ov) {
-      items.push(
-        ui.notice(
-          "danger",
-          t("overviewFailed", { message: S.ovError }),
-          h("button", { type: "button", class: "btn btn-sm", onclick: function () { store.loadOverview(); } }, icon("refresh"), t("retry"))
-        )
-      );
+    if (S.ovError) {
+      const retry = h("button", { type: "button", class: "btn btn-sm", onclick: function () { store.loadOverview(); } }, icon("refresh"), t("retry"));
+      // 已经有数据：留着旧数据，说明数字可能不是最新的；还没有数据：整页都没东西可看
+      items.push(S.ov ? ui.notice("warn", t("overviewStale", { message: S.ovError }), retry) : ui.notice("danger", t("overviewFailed", { message: S.ovError }), retry));
+    }
+    // 当前视图那一处记忆重新加载失败：列表里还是上次读到的内容
+    const r = MP.memory.viewRef(S.view);
+    const entry = r ? store.scopeEntry(r) : null;
+    if (entry && entry.data && entry.error) {
+      items.push(ui.staleNotice(entry.error, function () { store.loadScope(r); }));
     }
     ui.replace(els.banner, items);
     els.banner.hidden = !items.length;
@@ -203,16 +206,31 @@
     return view;
   }
 
+  /**
+   * 顶部「刷新」：重新读总览和当前这一处，再让右侧的内容跟上。
+   * 右侧组件有 reload 就让它自己重读（保住标签页、滚动位置）；没有 reload 的
+   * （概览、整理入口、对话信息……）在创建时读一次数据，没有未保存的修改就整个重建。
+   * 任何一步失败都如实说，页面上留着的是上次读到的内容。
+   */
   async function refreshAll(button) {
     await ui.withBusy(button, async function () {
-      const view = S.view;
-      const r = MP.memory.viewRef(view);
-      await Promise.all([store.loadOverview(true), r ? store.loadScope(r) : Promise.resolve()]);
+      const r = MP.memory.viewRef(S.view);
+      const loaded = await Promise.all([store.loadOverview(true), r ? store.loadScope(r) : true]);
+      let ok = loaded.every(function (item) { return item !== false; });
       const d = store.current.detail;
       if (d && typeof d.reload === "function") {
-        await d.reload();
+        if ((await d.reload()) === false) {
+          ok = false;
+        }
+      } else if (d && !store.isDirty()) {
+        S.paneVersion += 1;
+        renderNow();
       }
-      ui.toast(t("refreshed"), "info");
+      if (!ok) {
+        ui.toast(t("refreshFailed"), "error");
+      } else {
+        ui.toast(t(store.isDirty() ? "refreshedKept" : "refreshed"), "info");
+      }
     });
   }
 

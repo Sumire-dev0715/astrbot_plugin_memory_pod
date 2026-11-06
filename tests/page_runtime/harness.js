@@ -55,6 +55,16 @@ function getByPath(obj, key) {
   return String(key).split(".").reduce((cur, part) => (cur && typeof cur === "object" && part in cur ? cur[part] : undefined), obj);
 }
 
+/** 直接访问后端（不经页面）：不带 body 是 GET，带 body 是 POST JSON；返回解析后的 JSON。
+ *  场景里用它改服务端的数据（和别的管理员同时在改一样），或用 /__fail 安排下一次失败。 */
+async function backend(urlPath, body) {
+  const base = `http://127.0.0.1:${process.env.MP_PORT}`;
+  const res = body === undefined
+    ? await fetch(base + urlPath)
+    : await fetch(base + urlPath, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  return res.json();
+}
+
 /** 启动一个页面实例。opts: {locale, narrow, width, port, theme} */
 async function boot(opts) {
   opts = opts || {};
@@ -96,6 +106,17 @@ async function boot(opts) {
       await gate;
     }
   }
+  const holds = {};
+  function hold(endpoint) {
+    let release = null;
+    gates[endpoint] = new Promise(function (resolve) { release = resolve; });
+    holds[endpoint] = function () {
+      delete gates[endpoint];
+      release();
+    };
+    return holds[endpoint];
+  }
+  (opts.hold || []).forEach(hold);
   const fakeURL = {
     createObjectURL(blob) {
       blobs.push(blob);
@@ -214,13 +235,11 @@ async function boot(opts) {
     ctx,
     handlers,
     MP: window.MemoryPod,
-    hold(endpoint) {
-      let release = null;
-      gates[endpoint] = new Promise(function (resolve) { release = resolve; });
-      return function () {
-        delete gates[endpoint];
-        release();
-      };
+    hold,
+    release(endpoint) {
+      if (holds[endpoint]) {
+        holds[endpoint]();
+      }
     },
     setLocale(locale) {
       ctx.locale = locale;
@@ -296,4 +315,4 @@ function summary() {
   return results.fail === 0;
 }
 
-module.exports = { boot, assert, until, sleep, section, summary, results, dom, REPO };
+module.exports = { boot, backend, assert, until, sleep, section, summary, results, dom, REPO };
