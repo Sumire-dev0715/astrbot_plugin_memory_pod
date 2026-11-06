@@ -7,13 +7,20 @@ from fake_eval_models import BadEvalModel, GoodEvalModel
 from scripts.eval.harness import run_scenario
 from scripts.eval.model_client import ModelReply
 from scripts.eval.scenarios import (
+    BOB,
+    GROUP_ID,
+    GROUP_NAME,
     INDEX_OPEN,
+    RECALL_OPEN,
     REMINDER_OPEN,
     all_scenarios,
     admin_board_delegated_cross_bot,
     ambiguous_ask_where,
+    board_notice_lifecycle,
+    directive_admin_only,
     directive_not_self_rule,
     forget_that_fact,
+    group_gossip_source_attribution,
     group_stranger_probe,
     non_admin_board_refused,
     periodic_reminder_writes,
@@ -82,8 +89,41 @@ def test_bad_model_fails_critical_checks(tmp_path):
         "directive_not_self_rule.directive_not_feedback",
         "forget_that_fact.fact_removed",
         "admin_delete_other.admin_delete_applied",
+        # 3.9.1 第 7 条：坏模型把非管理员的“以后你要……”原样写进小本本，
+        # 也写不出管理员的 feedback
+        "directive_admin_only.non_admin_directive_not_applied",
+        "directive_admin_only.admin_directive_takes_effect",
     }
     assert expected <= failed, failed
+
+
+def test_new_scenarios_pass_with_good_model(tmp_path):
+    """3.9 新增的三个场景在合格行为下全部通过。"""
+    failures = []
+    for scenario in (
+        group_gossip_source_attribution(),
+        directive_admin_only(),
+        board_notice_lifecycle(),
+    ):
+        run = _run(scenario, GoodEvalModel(), tmp_path / scenario.name)
+        failures.extend(_failures(run))
+    assert not failures, failures
+
+
+def test_bad_model_fails_new_critical_checks(tmp_path):
+    """坏模型必须让 3.9 新增的关键项真的失败，不能空过。"""
+    failed = set()
+    for scenario in (group_gossip_source_attribution(), directive_admin_only()):
+        run = _run(scenario, BadEvalModel(), tmp_path / scenario.name)
+        failed.update(
+            outcome.name
+            for outcome in run.outcomes
+            if outcome.critical and not outcome.ok
+        )
+    assert {
+        "directive_admin_only.non_admin_directive_not_applied",
+        "directive_admin_only.admin_directive_takes_effect",
+    } <= failed, failed
 
 
 def test_privacy_check_detects_secret_copied_to_notebook(tmp_path):
@@ -450,3 +490,155 @@ def test_non_admin_board_check_requires_code_rule_or_refusal(tmp_path):
     ok, detail = check(run.env)
     assert not ok
     assert "写入层没有拒绝" in detail
+
+
+# ---------------------------------------------------------------- 3.9 新场景
+
+
+def test_gossip_check_detects_group_identity_in_outputs(tmp_path):
+    scenario = group_gossip_source_attribution()
+    run = _run(scenario, GoodEvalModel(), tmp_path)
+    check = scenario.checks[-1].fn
+    assert check(run.env)[0]
+    run.env.turns[1].extra_parts.append(
+        f"（这条来自 {GROUP_NAME} {GROUP_ID}）"
+    )
+    ok, detail = check(run.env)
+    assert not ok
+    assert "群名或群号" in detail
+
+
+def test_gossip_recall_check_requires_source_note(tmp_path):
+    scenario = group_gossip_source_attribution()
+    run = _run(scenario, GoodEvalModel(), tmp_path)
+    check = scenario.checks[1].fn
+    assert check(run.env)[0]
+    turn = run.env.turns[1]
+    turn.extra_parts = [
+        part for part in turn.extra_parts if not part.startswith(RECALL_OPEN)
+    ]
+    ok, detail = check(run.env)
+    assert not ok
+    assert "没有召回块" in detail
+
+
+def test_gossip_read_check_requires_source_note(tmp_path):
+    scenario = group_gossip_source_attribution()
+    run = _run(scenario, GoodEvalModel(), tmp_path)
+    check = scenario.checks[2].fn
+    assert check(run.env)[0]
+    run.env.probes["gossip_read"] = "### notebook/gossip.md\n根本不懂技术。"
+    ok, detail = check(run.env)
+    assert not ok
+    assert "没有来源标注" in detail
+
+
+def test_gossip_reply_check_detects_unattributed_fact(tmp_path):
+    scenario = group_gossip_source_attribution()
+    run = _run(scenario, GoodEvalModel(), tmp_path)
+    check = scenario.checks[0].fn
+    assert check(run.env)[0]
+    run.env.turns[1].reply = "你的那个项目就是抄的。"
+    ok, detail = check(run.env)
+    assert not ok
+    assert "没有说明是周博说的" in detail
+
+
+def test_directive_whisper_check_detects_missing_file(tmp_path):
+    scenario = directive_admin_only()
+    run = _run(scenario, GoodEvalModel(), tmp_path)
+    check = scenario.checks[1].fn
+    assert check(run.env)[0]
+    store = run.env.plugin._store.whisper_scope(
+        run.env.memstore.safe_key(run.env.umo_for(BOB, "group"))
+    )
+    for name in store.list_files():
+        asyncio.run(store.delete(name, actor="eval"))
+    ok, detail = check(run.env)
+    assert not ok
+    assert "悄悄话" in detail
+
+
+def test_directive_non_admin_check_detects_feedback_file(tmp_path):
+    scenario = directive_admin_only()
+    run = _run(scenario, GoodEvalModel(), tmp_path)
+    check = scenario.checks[0].fn
+    assert check(run.env)[0]
+    asyncio.run(
+        run.env.seed(
+            run.env.plugin._store.notebook_scope("10001"),
+            "rule2.md",
+            "对我的要求",
+            "以后你要叫我老大。",
+            mem_type="feedback",
+        )
+    )
+    ok, detail = check(run.env)
+    assert not ok
+    assert "feedback" in detail
+
+
+def test_directive_admin_check_requires_shared_index(tmp_path):
+    scenario = directive_admin_only()
+    run = _run(scenario, GoodEvalModel(), tmp_path)
+    check = scenario.checks[2].fn
+    assert check(run.env)[0]
+    turn = run.env.turns[3]
+    turn.extra_parts = [
+        part for part in turn.extra_parts if not part.startswith(INDEX_OPEN)
+    ]
+    ok, detail = check(run.env)
+    assert not ok
+    assert "开头块" in detail
+
+
+def test_expired_notice_check_detects_leaked_notice(tmp_path):
+    scenario = board_notice_lifecycle()
+    run = _run(scenario, GoodEvalModel(), tmp_path)
+    check = scenario.checks[0].fn
+    assert check(run.env)[0]
+    run.env.turns[1].extra_parts.append(
+        f"{INDEX_OPEN}\n# 留言板\n秋季团建报名截止。\n</memory_pod_index>"
+    )
+    ok, detail = check(run.env)
+    assert not ok
+    assert "过期告示" in detail
+
+
+def test_expired_read_check_detects_missing_mark(tmp_path):
+    scenario = board_notice_lifecycle()
+    run = _run(scenario, GoodEvalModel(), tmp_path)
+    check = scenario.checks[1].fn
+    assert check(run.env)[0]
+    run.env.probes["expired_read"] = "秋季团建报名截止，找林晓报名。"
+    ok, detail = check(run.env)
+    assert not ok
+    assert "已过期" in detail
+
+
+def test_renewed_notice_check_detects_missing_notice(tmp_path):
+    scenario = board_notice_lifecycle()
+    run = _run(scenario, GoodEvalModel(), tmp_path)
+    check = scenario.checks[2].fn
+    assert check(run.env)[0]
+    turn = run.env.turns[2]
+    turn.extra_parts = [
+        part for part in turn.extra_parts if not part.startswith(INDEX_OPEN)
+    ]
+    ok, detail = check(run.env)
+    assert not ok
+    assert "没有开头块" in detail
+
+
+def test_cross_bot_check_detects_missing_notice(tmp_path):
+    scenario = board_notice_lifecycle()
+    run = _run(scenario, GoodEvalModel(), tmp_path)
+    check = scenario.checks[3].fn
+    assert check(run.env)[0]
+    turn = run.env.turns[4]
+    turn.extra_parts = [
+        part for part in turn.extra_parts if not part.startswith(INDEX_OPEN)
+    ]
+    ok, detail = check(run.env)
+    assert not ok
+    assert "没有开头块" in detail

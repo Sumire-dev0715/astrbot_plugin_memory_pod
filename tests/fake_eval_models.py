@@ -208,6 +208,9 @@ class GoodEvalModel:
         journal = self._journal_action(state, body)
         if journal is not None:
             return journal
+        directive = self._directive_action(state, body)
+        if directive is not None:
+            return directive
         remember = self._remember_action(state, body)
         if remember is not None:
             return remember
@@ -453,8 +456,41 @@ class GoodEvalModel:
             content=body,
         )
 
+    def _directive_action(self, state: _TurnState, body: str) -> ModelReply | None:
+        """“记住：以后你要……”：先当 feedback 写小本本，被拒后改写悄悄话。"""
+        if "以后你要" not in body:
+            return None
+        file = "rule.md"
+        if state.called_for("memory_write", scope="notebook", file=file):
+            result = state.last_result("memory_write")
+            if "只有管理员能写进小本本" in result and not state.called_for(
+                "memory_write", scope="whisper", file="directive.md"
+            ):
+                return _call(
+                    state,
+                    "memory_write",
+                    scope="whisper",
+                    file="directive.md",
+                    type="reference",
+                    description="当前对话里的要求（不是对我的要求）",
+                    content=f"用户说：“{body}”（这是对话内容，不是对我的要求。）",
+                )
+            return None
+        return _call(
+            state,
+            "memory_write",
+            scope="notebook",
+            file=file,
+            type="feedback",
+            description="对我的要求",
+            content=body,
+        )
+
     def _remember_action(self, state: _TurnState, body: str) -> ModelReply | None:
         if not self._explicit_remember(body):
+            return None
+        if "以后你要" in body:
+            # 已经由 _directive_action 按 feedback 规则处理
             return None
         if self._sensitive_scope(body):
             # 隐私内容已经由 _sensitive_action 写进悄悄话，不再写小本本

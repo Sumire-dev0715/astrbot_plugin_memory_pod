@@ -559,16 +559,25 @@ class EvalEnv:
         mem_type: str = "reference",
         signature: str = "",
         source: str = "",
+        expires: str = "",
+        origin_record: Any = None,
     ) -> None:
-        """往临时数据目录里放一条合成记忆；写入失败直接中止场景。"""
+        """往临时数据目录里放一条合成记忆；写入失败直接中止场景。
+
+        expires 只用于留言板告示；origin_record 是工具写入时记下的来源，
+        用来准备“别的对话里写过这条记忆”的合成数据。
+        """
         content = self.memstore.compose_memory(
             file[: -len(self.memstore.MEMORY_FILE_SUFFIX)],
             description,
             mem_type,
             body,
             signature=signature,
+            expires=expires,
         )
-        report = await store.write(file, content, actor="eval", source=source)
+        report = await store.write(
+            file, content, actor="eval", source=source, origin_record=origin_record
+        )
         if not report.ok:
             raise RuntimeError(f"评测准备写入失败：{report.message}")
 
@@ -584,6 +593,9 @@ class Turn:
     advance_days: float = 0.0
     # 本轮用群聊还是私聊；None 表示跟场景默认值一致。
     mode: str | None = None
+    # 本轮开始前执行的准备（如续期留言板告示）；在推进时钟之后、
+    # 请求钩子之前运行，能改变记忆并触发开头块快照作废。
+    before: Callable[[EvalEnv], Awaitable[None] | None] | None = None
 
 
 @dataclass
@@ -1237,6 +1249,10 @@ async def run_scenario(
             for turn in scenario.turns:
                 if turn.advance_days:
                     clock.advance_days(turn.advance_days)
+                if turn.before is not None:
+                    result = turn.before(env)
+                    if asyncio.iscoroutine(result):
+                        await result
                 env.turns.append(await run_turn(env, turn))
 
             outcomes: list[CheckOutcome] = []
