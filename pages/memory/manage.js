@@ -837,7 +837,7 @@
             "button",
             { type: "button", class: "row row-scope", "data-nav-item": "", onclick: function () { onPick(item.ref); } },
             h("span", { class: "row-main" }, h("span", { class: "row-name" }, item.label)),
-            h("span", { class: "count", "aria-label": t("fileCount", { n: item.count || 0 }) }, ui.fmtNum(item.count || 0)),
+            ui.countBadge("count", ui.fmtNum(item.count || 0), t("fileCount", { n: item.count || 0 })),
             icon("chevronRight")
           )
         );

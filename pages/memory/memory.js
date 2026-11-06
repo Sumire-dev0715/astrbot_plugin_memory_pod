@@ -689,7 +689,7 @@
         h("span", { class: "row-name" }, store.sessionTitle(s)),
         h("span", { class: "row-meta" }, [store.sessionSub(s), ui.fmtRel(s.lastActive || s.updatedAt)].filter(function (v) { return v && v !== "—"; }).join(" · "))
       ),
-      opts.showCount ? h("span", { class: "count", "aria-label": t("fileCount", { n: s.fileCount || 0 }) }, ui.fmtNum(s.fileCount || 0)) : null
+      opts.showCount ? ui.countBadge("count", ui.fmtNum(s.fileCount || 0), t("fileCount", { n: s.fileCount || 0 })) : null
     );
   }
 

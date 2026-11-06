@@ -110,6 +110,15 @@
     return h("span", { class: "sr-only" }, text);
   }
 
+  /**
+   * 带单位说明的数量：眼睛看到数字，读屏软件读「9 项」「3 个文件」这样的整句。
+   * 没有角色的 span 上挂 aria-label 不可靠（ARIA 不允许给 generic 命名，读屏软件会忽略），
+   * 所以用「看得见但对读屏隐藏的数字 + 只给读屏读的整句」。
+   */
+  function countBadge(cls, shown, label) {
+    return h("span", { class: cls }, h("span", { "aria-hidden": "true" }, shown), srOnly(label));
+  }
+
   // ------------------------------------------------------------ 图标
 
   // 24×24、描边风格；每个图标是若干 [元素, 属性] 对
@@ -942,6 +951,7 @@
     replace: replace,
     uid: uid,
     srOnly: srOnly,
+    countBadge: countBadge,
     icon: icon,
     fmtDate: fmtDate,
     fmtTime: fmtTime,

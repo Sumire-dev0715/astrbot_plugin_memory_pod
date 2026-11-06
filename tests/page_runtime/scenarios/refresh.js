@@ -39,7 +39,7 @@ async function whisperKey(remark) {
   await until(() => toasts(p).some((x) => /已刷新/.test(x)), "刷新完成的提示");
   const after = stats();
   assert(Number(after[0]) === Number(before[0]) + 1, `概览里的留言板告示数 ${before[0]} → ${after[0]}（应当 +1）`);
-  assert(p.text(p.$(".nav-count")) === after[0], "导航角标和概览数字一致");
+  assert(p.text(p.$(".nav-count [aria-hidden]")) === after[0], "导航角标和概览数字一致");
 
   section("R2 悄悄话 → 对话信息：服务端多了一个文件，点刷新后文件数跟着变");
   p = await ready(await boot());

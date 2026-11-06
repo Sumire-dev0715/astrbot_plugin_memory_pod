@@ -118,7 +118,7 @@
             },
             icon(item[2]),
             h("span", { class: "nav-label" }, t(item[1])),
-            count === null ? null : h("span", { class: "nav-count", "aria-label": t("navCount", { n: count }) }, ui.fmtNum(count))
+            count === null ? null : ui.countBadge("nav-count", ui.fmtNum(count), t("navCount", { n: count }))
           );
         })
       );
