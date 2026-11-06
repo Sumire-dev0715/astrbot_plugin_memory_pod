@@ -37,7 +37,11 @@ _DAY_SECONDS = 86400
 
 _FRONTMATTER_RE = re.compile(r"\A---\s*\n(.*?)\n---\s*\n?", re.S)
 _ORIGIN_LINE_RE = re.compile(r"^[ \t]*origin[ \t]*:[^\n]*(?:\n|$)", re.M)
-_PERSON_FILE_RE = re.compile(r"^user-(\d+)\.md$", re.I)
+_PERSON_FILE_RE = re.compile(
+    r"^user-(?P<id>\d+)(?:-(?P<topic>[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*))?"
+    r"\.md$",
+    re.I,
+)
 
 # 显示名里可能冒充标注结构或截断来源记录的字符：圆括号能提前闭合
 # “（小明在群聊里说的…）”，换行/行分隔符会把 frontmatter 的一行拆开。
@@ -155,8 +159,14 @@ def _age_label(ts: float, now: float) -> str:
 
 
 def _person_id(ref: str) -> str:
+    """档案文件名里的平台 ID；主档案与主题档案都算这个人的。"""
     match = _PERSON_FILE_RE.match(str(ref or "").rsplit("/", 1)[-1])
-    return match.group(1) if match else ""
+    if match is None:
+        return ""
+    topic = match.group("topic")
+    if topic and topic != topic.lower():
+        return ""
+    return match.group("id")
 
 
 def note(

@@ -556,7 +556,7 @@ class EvalEnv:
         file: str,
         description: str,
         body: str,
-        mem_type: str = "reference",
+        mem_type: str = "note",
         signature: str = "",
         source: str = "",
         expires: str = "",

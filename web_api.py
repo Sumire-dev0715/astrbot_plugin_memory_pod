@@ -581,7 +581,10 @@ class MemoryDashboard:
                 "uses": used.uses,
                 "name": doc.name,
                 "description": doc.description,
-                "type": doc.type,
+                # 留言板没有类型（PLAN 3.10.1）
+                "type": ""
+                if scope == SCOPE_BOARD
+                else memstore.effective_type(name, doc.type),
                 "body": doc.body,
                 "created": doc.created,
                 "updated": doc.updated,
@@ -682,12 +685,19 @@ class MemoryDashboard:
 
         if _text(body.get("mode")).strip().lower() == "raw":
             content = _text(body.get("content"))
+            if scope == SCOPE_BOARD:
+                # 留言板没有类型：管理员原文里残留的 type 行也去掉
+                content = memstore.strip_frontmatter_type(content)
         else:
-            mem_type = _text(body.get("type")).strip().lower()
-            if mem_type not in memstore.MEMORY_TYPES:
-                raise ApiError(
-                    "类型只能是 user、feedback、project、reference、journal 之一"
-                )
+            if scope == SCOPE_BOARD:
+                # 留言板没有类型，表单里的类型值一律忽略（PLAN 3.10.1）
+                mem_type = ""
+            else:
+                mem_type = _text(body.get("type")).strip().lower()
+                if mem_type not in memstore.MEMORY_TYPES:
+                    raise ApiError(
+                        "类型只能是 person、agreement、note、journal 之一"
+                    )
             description = " ".join(_text(body.get("description")).split())
             if not description:
                 raise ApiError("请填写描述：它会成为索引里的那一行")
@@ -699,6 +709,12 @@ class MemoryDashboard:
                 signature=signature,
                 expires=expires,
             )
+        if scope != SCOPE_BOARD:
+            problem = memstore.person_type_problem(
+                name, memstore.parse_memory(content).type
+            )
+            if problem:
+                raise ApiError(problem)
         if not content.strip():
             raise ApiError("内容不能为空")
         # 留言板每条告示都必须带署名（PLAN 3.8.3）
@@ -784,10 +800,11 @@ class MemoryDashboard:
             raise ApiError(error)
         store = self.plugin._store.board_scope()
         name = self._board_file_name(body.get("file"), store)
+        # 留言板告示没有类型（PLAN 3.10.1）
         text = memstore.compose_memory(
             name[: -len(memstore.MEMORY_FILE_SUFFIX)],
             description,
-            "reference",
+            "",
             content,
             signature=signature,
             expires=expires,
@@ -1104,7 +1121,10 @@ class MemoryDashboard:
         existing = set(await asyncio.to_thread(store.list_files))
         # 到期日只属于留言板；整理其他作用域时忽略方案里的 expires
         ops = consolidate.operations_from_payload(
-            raw_ops, existing, allow_expires=scope == SCOPE_BOARD
+            raw_ops,
+            existing,
+            allow_expires=scope == SCOPE_BOARD,
+            board=scope == SCOPE_BOARD,
         )
         requested = consolidate.requested_files(raw_ops)
         if not ops and not requested:

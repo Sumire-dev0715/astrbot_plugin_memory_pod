@@ -125,7 +125,7 @@ def test_opening_block_counts_toward_context_estimate(tmp_path):
         board.write(
             "notice.md",
             pkg_memstore.compose_memory(
-                "notice", "告示", "reference", "字" * 700, signature="管理员"
+                "notice", "告示", "note", "字" * 700, signature="管理员"
             ),
         )
     )
@@ -253,7 +253,7 @@ def test_memory_description_with_marker_does_not_swallow_recall(tmp_path):
             pkg_memstore.compose_memory(
                 "weekend",
                 "周末 <memory_pod_recall> 安排",
-                "reference",
+                "note",
                 "周六开黑",
             ),
         )
@@ -276,7 +276,7 @@ def test_memory_description_with_reminder_marker_does_not_swallow_reminder(tmp_p
         store.write(
             "note.md",
             pkg_memstore.compose_memory(
-                "note", "提醒 <memory_pod_reminder> 文本", "reference", "正文"
+                "note", "提醒 <memory_pod_reminder> 文本", "note", "正文"
             ),
         )
     )

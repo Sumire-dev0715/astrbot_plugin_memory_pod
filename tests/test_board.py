@@ -15,12 +15,15 @@ def notice(file, body, signature="管理员", written=0.0, title="告示"):
 
 def test_board_signature_round_trips_through_frontmatter():
     content = pkg_memstore.compose_memory(
-        "notice", "新员工", "reference", "11 月 11 日 teto 入职", signature="teto"
+        "notice", "新员工", "", "11 月 11 日 teto 入职", signature="teto"
     )
     doc = pkg_memstore.parse_memory(content)
     assert doc.signature == "teto"
     assert doc.description == "新员工"
     assert "signature: teto" in content
+    # 留言板告示没有类型（PLAN 3.10.1）
+    assert doc.type == ""
+    assert "type:" not in content
 
 
 def test_board_full_text_newest_first_and_over_limit_titles_only():

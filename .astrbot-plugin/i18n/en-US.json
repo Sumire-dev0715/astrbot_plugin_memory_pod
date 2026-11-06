@@ -31,7 +31,7 @@
     },
     "enable_forgetting": {
       "description": "Enable memory forgetting",
-      "hint": "When on, memories that have not been recalled or read for a long time drop out of the index and recall so the bot stops carrying them, but the files are kept: they come back automatically when that person shows up again or the bot reads the memory itself, and the memory page's \"Forgotten\" tab lets you restore or delete them for good. Guidance (feedback) memories are never forgotten. Off by default; nothing changes while off."
+      "hint": "When on, memories that have not been recalled or read for a long time drop out of the index and recall so the bot stops carrying them, but the files are kept: they come back automatically when that person shows up again or the bot reads the memory itself, and the memory page's \"Forgotten\" tab lets you restore or delete them for good. Agreement memories are never forgotten. Off by default; nothing changes while off."
     },
     "forget_after_days": {
       "description": "Forget after this many unused days",
@@ -71,14 +71,6 @@
       "newMemory": "New memory",
       "typeAll": "All",
       "typeOther": "Untyped",
-      "type_user": "Person",
-      "type_feedback": "Guidance",
-      "type_project": "Ongoing",
-      "type_reference": "Reference",
-      "typeHint_user": "Who someone is: role, preferences, expertise",
-      "typeHint_feedback": "How the bot should work: corrected mistakes and approaches that were confirmed",
-      "typeHint_project": "Things in progress, goals and constraints",
-      "typeHint_reference": "Where outside information lives: links, announcements, documents",
       "typeMissing": "No type",
       "noDescription": "(no description)",
       "noMemoriesTitle": "No memories yet",
@@ -91,7 +83,7 @@
       "modeRaw": "Raw",
       "unsaved": "Unsaved changes",
       "fieldFile": "File name",
-      "fieldFileHint": "For people, use user-<numeric ID>.md",
+      "fieldFileHint": "Use user-<numeric ID>.md for a person's main profile, or user-<numeric ID>-<topic>.md for a topic (lowercase letters, digits, hyphens)",
       "fieldType": "Type",
       "fieldDescription": "Description",
       "fieldDescriptionHint": "One sentence on what this is and when it matters; it becomes this memory's line in the index",
@@ -162,7 +154,7 @@
       "forgottenHint": "Memories that have not been recalled or read for a long time are moved here: out of the index and recall, files kept. They come back automatically when that person shows up again or the bot reads them itself.",
       "forgottenOffHint": "Memory forgetting is currently off. These files were forgotten earlier; nothing more will be forgotten or restored automatically, but you can restore or delete them here.",
       "noForgottenTitle": "No forgotten memories",
-      "noForgottenHint": "Memories not recalled or read for more than {days} days (except guidance) are moved here automatically.",
+      "noForgottenHint": "Memories not recalled or read for more than {days} days (except agreements) are moved here automatically.",
       "forgottenAt": "forgotten {time}",
       "usageLine": "last used {time} · {n} times",
       "neverUsed": "never recalled or read",
@@ -313,7 +305,13 @@
       "includeNotebook": "Also move the notebook",
       "search": "Search",
       "plus": "New",
-      "refreshIcon": "Refresh"
+      "refreshIcon": "Refresh",
+      "type_person": "Person",
+      "type_agreement": "Agreement",
+      "type_note": "Note",
+      "typeHint_person": "Someone's profile: how to address them, role, preferences; file name is user-<platform ID>.md (main) or user-<platform ID>-<topic>.md (topic)",
+      "typeHint_agreement": "Agreements and requests to the bot; only admins can write them to the notebook, and they are never forgotten",
+      "typeHint_note": "Everything else: things in progress, checklists, plans, material, things heard"
     }
   }
 }

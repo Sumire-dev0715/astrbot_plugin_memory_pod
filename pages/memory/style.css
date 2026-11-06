@@ -16,14 +16,14 @@
   --warn-soft: #fdf3e1;
   --ok: #2f9e6e;
   --ok-soft: #e3f5ec;
-  --t-user: #3d63dd;
-  --t-user-soft: #e6ecfd;
-  --t-feedback: #c27a12;
-  --t-feedback-soft: #fcf1de;
-  --t-project: #2f9e6e;
-  --t-project-soft: #e3f5ec;
-  --t-reference: #8250c4;
-  --t-reference-soft: #f1e9fb;
+  --t-person: #3d63dd;
+  --t-person-soft: #e6ecfd;
+  --t-agreement: #c27a12;
+  --t-agreement-soft: #fcf1de;
+  --t-note: #2f9e6e;
+  --t-note-soft: #e3f5ec;
+  --t-violet: #8250c4;
+  --t-violet-soft: #f1e9fb;
   --t-journal: #5b6b8c;
   --t-journal-soft: #e9edf5;
   --p-system: #8a93a8;
@@ -55,14 +55,14 @@
   --warn-soft: #3a2f1c;
   --ok: #4cc08c;
   --ok-soft: #1d3529;
-  --t-user: #7f9af6;
-  --t-user-soft: #263156;
-  --t-feedback: #e0a84a;
-  --t-feedback-soft: #3a2f1c;
-  --t-project: #4cc08c;
-  --t-project-soft: #1d3529;
-  --t-reference: #b38ae8;
-  --t-reference-soft: #31254a;
+  --t-person: #7f9af6;
+  --t-person-soft: #263156;
+  --t-agreement: #e0a84a;
+  --t-agreement-soft: #3a2f1c;
+  --t-note: #4cc08c;
+  --t-note-soft: #1d3529;
+  --t-violet: #b38ae8;
+  --t-violet-soft: #31254a;
   --t-journal: #9fb0d0;
   --t-journal-soft: #283143;
   --p-system: #727b90;
@@ -210,23 +210,23 @@ svg.icon {
 }
 
 .avatar.group {
-  background: var(--t-project-soft);
-  color: var(--t-project);
+  background: var(--t-note-soft);
+  color: var(--t-note);
 }
 
 .avatar.private {
-  background: var(--t-user-soft);
-  color: var(--t-user);
+  background: var(--t-person-soft);
+  color: var(--t-person);
 }
 
 .avatar.board {
-  background: var(--t-reference-soft);
-  color: var(--t-reference);
+  background: var(--t-violet-soft);
+  color: var(--t-violet);
 }
 
 .avatar.notebook {
-  background: var(--t-feedback-soft);
-  color: var(--t-feedback);
+  background: var(--t-agreement-soft);
+  color: var(--t-agreement);
 }
 
 .session-text {
@@ -447,24 +447,19 @@ svg.icon {
   white-space: nowrap;
 }
 
-.tag.user {
-  background: var(--t-user-soft);
-  color: var(--t-user);
+.tag.person {
+  background: var(--t-person-soft);
+  color: var(--t-person);
 }
 
-.tag.feedback {
-  background: var(--t-feedback-soft);
-  color: var(--t-feedback);
+.tag.agreement {
+  background: var(--t-agreement-soft);
+  color: var(--t-agreement);
 }
 
-.tag.project {
-  background: var(--t-project-soft);
-  color: var(--t-project);
-}
-
-.tag.reference {
-  background: var(--t-reference-soft);
-  color: var(--t-reference);
+.tag.note {
+  background: var(--t-note-soft);
+  color: var(--t-note);
 }
 
 .tag.journal {

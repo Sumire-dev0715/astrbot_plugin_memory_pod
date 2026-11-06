@@ -38,7 +38,7 @@ class _RecordingModel:
                         arguments={
                             "scope": "notebook",
                             "file": "note.md",
-                            "type": "reference",
+                            "type": "note",
                             "description": "测试记忆",
                             "content": "合成内容",
                         },
@@ -74,7 +74,7 @@ def _simple_scenario():
     async def setup(env):
         await env.seed(
             env.plugin._store.notebook_scope("10001"),
-            "project.md",
+            "plan.md",
             "项目代号与负责人",
             "项目代号是蓝鲸七号。",
         )

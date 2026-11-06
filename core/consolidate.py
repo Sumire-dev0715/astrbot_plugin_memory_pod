@@ -22,6 +22,7 @@ from .memstore import (
     MEMORY_TYPES,
     MemoryHeader,
     compose_memory,
+    person_type_problem,
 )
 from .recall import age_label
 from .writer import WRITE_RULES
@@ -42,11 +43,11 @@ _SAFE_FILE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,120}\.md$")
 
 CONSOLIDATE_PROMPT = """你是聊天机器人的记忆整理助手。下面是记忆库「{scope_label}」里的全部记忆文件（每个文件标注了最近写入时间与最近被用到的时间）。请像整理笔记一样做一次复盘：
 
-- 合并重复：同一个人（同一个数字 ID）或同一件事分散在几个文件里的，合并进一个文件——记人的文件统一命名为 user-<数字ID>.md——并删除其余文件；
+- 合并重复：同一个人（同一个数字 ID）或同一件事分散在几个文件里的，合并进一个文件——人物主档案统一命名为 user-<数字ID>.md，主题档案命名为 user-<数字ID>-<主题>.md——并删除其余文件；
 - 修正过时与矛盾：同一事实前后矛盾时以较新的为准，删去明显已失效的内容；正文里的相对日期（明天、下周）按写入时间换算成绝对日期；
 - 精简：长期没被用到、内容又明显只是一次性的条目（如早已过去的临时安排）可以删除；有长期价值的即使没用过也保留；
 - 日记（journal）是每日流水账：保持 journal 类型与现有文件名（journal-<日期>.md），不要删除日记文件，也不要把它合并进其他记忆；只在确有重复或过期内容时精简正文；
-- 规范格式：type 只能是 user、feedback、project、reference、journal 之一；description 写成一句能让人判断"何时该读全文"的钩子；feedback 与 project 类正文附 **Why:** 与 **How to apply:** 两行；
+- 规范格式：{type_rules}；description 写成一句能让人判断"何时该读全文"的钩子；
 - 不编造：只能重组、精简、改写已有信息，不得添加文件里没有的事实；
 - 拿不准的不动。不需要整理就输出空数组。
 
@@ -116,6 +117,8 @@ def build_prompt(
     scope_label: str,
     files: list[tuple[MemoryHeader, str]],
     now: float | None = None,
+    *,
+    board: bool = False,
 ) -> tuple[str, list[str]]:
     """拼整理提示词；返回 (提示词, 因超出预算未纳入的文件名)。"""
     blocks: list[str] = []
@@ -130,10 +133,18 @@ def build_prompt(
             f"=== {header.file}（{age_label(header.updated, now)}写入，"
             f"{usage_label(header, now)}）===\n{content.strip()}"
         )
+    type_rules = (
+        "留言板告示没有类型，不要写 type"
+        if board
+        else "type 只能是 person、agreement、note、journal 之一，"
+        "人物档案的文件名和 type 必须对上；agreement 类正文附 "
+        "**Why:** 与 **How to apply:** 两行"
+    )
     prompt = CONSOLIDATE_PROMPT.format(
         scope_label=scope_label,
         files="\n\n".join(blocks) or "（空）",
         write_rules=WRITE_RULES,
+        type_rules=type_rules,
     )
     return prompt, skipped
 
@@ -161,7 +172,11 @@ def _load_array(text: str):
 
 
 def parse_operations(
-    text: str, existing: set[str], *, allow_expires: bool = False
+    text: str,
+    existing: set[str],
+    *,
+    allow_expires: bool = False,
+    board: bool = False,
 ) -> list[Operation] | None:
     """解析并校验整理方案；输出无法解析时返回 None（区别于"无需整理"的空列表）。
 
@@ -200,12 +215,15 @@ def parse_operations(
                 Operation(op="delete", file=file, reason=reason, base_mtime=base_mtime)
             )
         elif op == "write":
-            mem_type = str(entry.get("type", "")).strip().lower()
+            mem_type = (
+                "" if board else str(entry.get("type", "")).strip().lower()
+            )
             content = str(entry.get("content", "")).strip()
-            if (
+            if not content or len(content) > MAX_CONTENT_CHARS:
+                continue
+            if not board and (
                 mem_type not in MEMORY_TYPES
-                or not content
-                or len(content) > MAX_CONTENT_CHARS
+                or person_type_problem(file, mem_type)
             ):
                 continue
             signature = " ".join(str(entry.get("signature", "")).split())
@@ -233,13 +251,20 @@ def parse_operations(
 
 
 def operations_from_payload(
-    raw, existing: set[str], *, allow_expires: bool = False
+    raw,
+    existing: set[str],
+    *,
+    allow_expires: bool = False,
+    board: bool = False,
 ) -> list[Operation]:
     """把 WebUI 回传的（可能被管理员改过的）方案重新校验一遍再应用。"""
     if not isinstance(raw, list):
         return []
     ops = parse_operations(
-        json.dumps(raw, ensure_ascii=False), existing, allow_expires=allow_expires
+        json.dumps(raw, ensure_ascii=False),
+        existing,
+        allow_expires=allow_expires,
+        board=board,
     )
     return ops or []
 

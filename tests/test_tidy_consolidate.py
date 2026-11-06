@@ -35,7 +35,7 @@ def test_propose_apply_and_undo(tmp_path):
         {
             "op": "write",
             "file": "a.md",
-            "type": "reference",
+            "type": "note",
             "description": "合并后",
             "content": "旧内容\n待合并",
             "reason": "合并 b",
@@ -83,11 +83,11 @@ def test_consolidate_parse_rejects_unknown_types_and_journal():
     ops = consolidate.parse_operations(
         json.dumps(
             [
-                {"op": "write", "file": "ok.md", "type": "reference",
+                {"op": "write", "file": "ok.md", "type": "note",
                  "description": "好", "content": "正文"},
                 {"op": "write", "file": "bad.md", "type": "unknown",
                  "description": "坏", "content": "正文"},
-                {"op": "write", "file": "MEMORY.md", "type": "reference",
+                {"op": "write", "file": "MEMORY.md", "type": "note",
                  "description": "坏", "content": "正文"},
             ]
         ),
@@ -113,7 +113,7 @@ def test_board_rewrite_keeps_signature_and_new_notice_gets_one(tmp_path):
         {
             "op": "write",
             "file": "a.md",
-            "type": "reference",
+            "type": "note",
             "description": "合并",
             "content": "内容甲\n内容乙",
             "reason": "合并 b",
@@ -136,7 +136,7 @@ def test_board_rewrite_keeps_signature_and_new_notice_gets_one(tmp_path):
         {
             "op": "write",
             "file": "merged.md",
-            "type": "reference",
+            "type": "note",
             "description": "合并告示",
             "content": "合并后的正文",
             "reason": "合并",
@@ -175,7 +175,7 @@ def test_board_rewrite_keeps_expiry_and_new_notice_has_none(tmp_path):
         {
             "op": "write",
             "file": "a.md",
-            "type": "reference",
+            "type": "note",
             "description": "改写",
             "content": "内容甲改",
             "reason": "改正文",
@@ -195,7 +195,7 @@ def test_board_rewrite_keeps_expiry_and_new_notice_has_none(tmp_path):
         {
             "op": "write",
             "file": "merged.md",
-            "type": "reference",
+            "type": "note",
             "description": "合并告示",
             "content": "合并后的正文",
             "reason": "合并",
@@ -217,7 +217,7 @@ def test_consolidate_only_accepts_expires_when_explicitly_allowed():
             {
                 "op": "write",
                 "file": "note.md",
-                "type": "reference",
+                "type": "note",
                 "description": "笔记",
                 "content": "正文",
                 "expires": "2999-12-31",
@@ -239,7 +239,7 @@ def test_notebook_consolidation_ignores_model_expires(tmp_path):
         {
             "op": "write",
             "file": "note.md",
-            "type": "reference",
+            "type": "note",
             "description": "笔记",
             "content": "新正文",
             "expires": "2999-12-31",
@@ -280,7 +280,7 @@ def test_apply_keeps_origin_when_merging_into_new_file(tmp_path):
         consolidate.Operation(
             op="write",
             file="merged.md",
-            type="reference",
+            type="note",
             description="合并后的文件",
             content="源正文",
         ),
@@ -324,7 +324,7 @@ def test_apply_merges_source_origin_into_existing_target(tmp_path):
         consolidate.Operation(
             op="write",
             file="a.md",
-            type="reference",
+            type="note",
             description="合并后",
             content="旧内容\n待合并",
             base_mtime=store.mtime("a.md") or 0.0,

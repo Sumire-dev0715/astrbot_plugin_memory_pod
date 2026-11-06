@@ -23,7 +23,7 @@ def seed(plugin):
     run(
         notebook.write(
             "user-456.md",
-            thing("user-456", description="阿杰", body="身份：设计师", mem_type="user"),
+            thing("user-456", description="阿杰", body="身份：设计师", mem_type="person"),
         )
     )
     return board, notebook
@@ -229,7 +229,7 @@ def test_opening_with_origin_note_stays_byte_stable(tmp_path):
     )
     run(
         plugin.memory_write(
-            group, "notebook", "user-123.md", "user", "小明档案", "身份：工程师"
+            group, "notebook", "user-123.md", "person", "小明档案", "身份：工程师"
         )
     )
     private = FakeEvent("Bot-A", "123", umo="Bot-A:FriendMessage:123", name="小明")
@@ -254,7 +254,7 @@ def test_opening_index_marks_origin_from_other_conversations(tmp_path):
     )
     run(
         plugin.memory_write(
-            group, "notebook", "plan.md", "reference", "周末开黑安排", "周六晚上开黑"
+            group, "notebook", "plan.md", "note", "周末开黑安排", "周六晚上开黑"
         )
     )
     other = FakeEvent("Bot-A", "456", umo="Bot-A:FriendMessage:456", name="小红")
@@ -266,3 +266,51 @@ def test_opening_index_marks_origin_from_other_conversations(tmp_path):
     same = run(plugin._index_block(main.RuntimeSession(), group))
     assert "plan.md" in same
     assert "在群聊里说的" not in same
+
+
+# ------------------------------------------------------- 3.10.2 主题档案
+
+
+def test_topic_profile_not_pinned_and_not_forced(tmp_path):
+    """只有主档案进私聊开头块、按身份强制召回；主题档案只按关键词召回。"""
+    plugin = make_plugin(tmp_path)
+    notebook = plugin._store.notebook_scope("Bot-A")
+    run(notebook.write("user-123.md", person_file("123", "身份：工程师")))
+    run(
+        notebook.write(
+            "user-123-games.md",
+            thing(
+                "user-123-games",
+                description="游戏偏好",
+                body="周末喜欢玩英雄联盟。",
+                mem_type="person",
+            ),
+        )
+    )
+
+    # 私聊开头块只钉主档案，主题档案的正文不出现
+    private = FakeEvent("Bot-A", sender_id="123")
+    opening = run(plugin._index_block(main.RuntimeSession(), private))
+    assert "### notebook/user-123.md" in opening
+    assert "身份：工程师" in opening
+    assert "英雄联盟" not in opening
+    assert "### notebook/user-123-games.md" not in opening
+
+    # 群聊：发送者身份只强制召回主档案
+    group = FakeEvent("Bot-A", sender_id="123", umo="Bot-A:GroupMessage:900")
+    block = run(
+        plugin._recall_message(group, group.unified_msg_origin, "今天好累", None)
+    )
+    assert block is not None
+    assert "notebook/user-123.md" in block
+    assert "英雄联盟" not in block
+
+    # 聊到主题相关内容时，主题档案按关键词召回
+    block = run(
+        plugin._recall_message(
+            group, group.unified_msg_origin, "周末一起玩英雄联盟吗", None
+        )
+    )
+    assert block is not None
+    assert "notebook/user-123-games.md" in block
+    assert "英雄联盟" in block

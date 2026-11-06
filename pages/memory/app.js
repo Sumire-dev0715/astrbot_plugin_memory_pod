@@ -4,7 +4,7 @@
   const bridge = window.AstrBotPluginPage || null;
   const I18N_PREFIX = "pages.memory.";
   const SVG_NS = "http://www.w3.org/2000/svg";
-  const TYPES = ["user", "feedback", "project", "reference", "journal"];
+  const TYPES = ["person", "agreement", "note", "journal"];
   const PARTS = ["system", "plugin", "tools", "history", "prompt", "recall"];
   const SCOPES = ["board", "notebook", "whisper"];
   // "记住上次填的署名"的本地存储键
@@ -74,15 +74,13 @@
     expired: "已过期",
     typeAll: "全部",
     typeOther: "未分类",
-    type_user: "人物",
-    type_feedback: "指导",
-    type_project: "事项",
-    type_reference: "资料",
+    type_person: "人物",
+    type_agreement: "约定",
+    type_note: "笔记",
     type_journal: "日记",
-    typeHint_user: "某个人是谁：身份、偏好、专长",
-    typeHint_feedback: "对机器人做事方式的指导：纠正过的错误、确认过的做法",
-    typeHint_project: "进行中的事、目标与约束",
-    typeHint_reference: "外部资源、资料与告示",
+    typeHint_person: "某个人的档案：称呼、身份、爱好；文件名必须是 user-<平台ID>.md 或 user-<平台ID>-<主题>.md",
+    typeHint_agreement: "相处的约定、对机器人的要求；只有管理员能写进小本本",
+    typeHint_note: "其余所有内容：进行中的事、清单、计划、资料、听来的事",
     typeHint_journal: "每日流水账：不占单独索引行，不参与自动召回",
     typeMissing: "无类型",
     noDescription: "（没有描述）",
@@ -96,7 +94,7 @@
     modeRaw: "原文",
     unsaved: "有未保存的修改",
     fieldFile: "文件名",
-    fieldFileHint: "记人用 user-<数字ID>.md",
+    fieldFileHint: "人物主档案用 user-<数字ID>.md；一个主题一个文件 user-<数字ID>-<主题>.md，主题只用小写英文、数字、连字符",
     fieldType: "类型",
     fieldDescription: "描述",
     fieldDescriptionHint: "一句话说明这是什么、什么时候用得上；它会成为索引里的那一行",
@@ -169,7 +167,7 @@
     forgottenHint: "长期没被召回或读取的记忆会移到这里：不进索引、不参与召回，文件保留。这个人再出现、或机器人主动读它时会自动恢复。",
     forgottenOffHint: "记忆遗忘当前未启用，这里只是之前遗忘下来的文件，不会再自动遗忘或恢复；可以手动恢复或彻底删除。",
     noForgottenTitle: "没有已遗忘的记忆",
-    noForgottenHint: "超过 {days} 天没被召回或读取的记忆（指导类除外）会自动移到这里。",
+    noForgottenHint: "超过 {days} 天没被召回或读取的记忆（约定类除外）会自动移到这里。",
     forgottenAt: "{time} 遗忘",
     usageLine: "最近用到 {time} · 共 {n} 次",
     neverUsed: "还没被召回或读取过",
@@ -289,7 +287,7 @@
     plus: '<path d="M12 5v14M5 12h14"/>',
     refresh: '<path d="M20 11a8 8 0 0 0-14.9-4M4 4v4h4"/><path d="M4 13a8 8 0 0 0 14.9 4M20 20v-4h-4"/>',
     group: '<circle cx="9" cy="8" r="3.2"/><path d="M3.5 19a5.5 5.5 0 0 1 11 0"/><path d="M16 5.2a3 3 0 0 1 0 5.6M17.5 14a5 5 0 0 1 3 5"/>',
-    user: '<circle cx="12" cy="8" r="3.6"/><path d="M5 20a7 7 0 0 1 14 0"/>',
+    person: '<circle cx="12" cy="8" r="3.6"/><path d="M5 20a7 7 0 0 1 14 0"/>',
     chat: '<path d="M5 18l-1 3 4-1.5A8 8 0 1 0 5 18z"/>',
     bot: '<rect x="5" y="8" width="14" height="11" rx="2.5"/><path d="M12 4v4M9.5 13h.01M14.5 13h.01M9.5 16h5"/>',
     trash: '<path d="M4 7h16M10 11v6M14 11v6M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/>',
@@ -930,7 +928,7 @@
             title: s.umo || s.key,
             onclick: function () { selectScope(sel); },
           },
-          h("div", { class: "avatar " + (s.kind === "group" ? "group" : "private") }, icon(s.kind === "group" ? "group" : "user")),
+          h("div", { class: "avatar " + (s.kind === "group" ? "group" : "private") }, icon(s.kind === "group" ? "group" : "person")),
           h(
             "div",
             { class: "session-text" },
@@ -1210,7 +1208,7 @@
             "div",
             { class: "file-item-top" },
             h("span", { class: "file-name" }, file.file),
-            typeTag(file.type)
+            state.detail.scope === "board" ? null : typeTag(file.type)
           ),
           h("div", { class: "file-desc" }, file.description || t("noDescription")),
           h(
@@ -1239,7 +1237,8 @@
         mode: "form",
         file: data.file,
         originalFile: data.file,
-        type: data.type || "reference",
+        type:
+          state.detail.scope === "board" ? "" : data.type || "note",
         description: data.description || "",
         body: data.body || "",
         signature: data.signature || "",
@@ -1265,7 +1264,7 @@
       mode: "form",
       file: "",
       originalFile: "",
-      type: "reference",
+      type: state.detail && state.detail.scope === "board" ? "" : "note",
       description: "",
       body: "",
       signature: "",
@@ -1370,26 +1369,28 @@
           })
         )
       );
-      const typeOptions = TYPES.map(function (type) {
-        return h("option", { value: type, selected: ed.type === type }, t("type_" + type));
-      });
-      box.append(
-        field(
-          t("fieldType"),
-          null,
-          h(
-            "select",
-            {
-              class: "input",
-              onchange: function (event) {
-                ed.type = event.target.value;
-                markDirty();
+      if (ed.scope !== "board") {
+        const typeOptions = TYPES.map(function (type) {
+          return h("option", { value: type, selected: ed.type === type }, t("type_" + type));
+        });
+        box.append(
+          field(
+            t("fieldType"),
+            null,
+            h(
+              "select",
+              {
+                class: "input",
+                onchange: function (event) {
+                  ed.type = event.target.value;
+                  markDirty();
+                },
               },
-            },
-            typeOptions
+              typeOptions
+            )
           )
-        )
-      );
+        );
+      }
       box.append(
         field(
           t("fieldDescription"),
@@ -1530,7 +1531,7 @@
       file: ed.file,
       oldFile: ed.originalFile,
       mode: ed.mode,
-      type: ed.type,
+      type: ed.scope === "board" ? "" : ed.type,
       description: ed.description,
       body: ed.body,
       signature: ed.signature,

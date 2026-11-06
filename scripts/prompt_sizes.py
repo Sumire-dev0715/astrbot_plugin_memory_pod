@@ -101,7 +101,7 @@ def _recall_shell(recall_mod, injection_mod, prompts) -> int:
     item = recall_mod.Recalled("notebook/placeholder.md", "", 0.0)
     view = injection_mod.MemoryView(
         ref="notebook/placeholder.md",
-        mem_type="reference",
+        mem_type="note",
         description="",
         body="",
         truncated=False,

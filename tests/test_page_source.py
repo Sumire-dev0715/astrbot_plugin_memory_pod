@@ -89,3 +89,37 @@ def test_consolidate_all_covers_three_layers_only():
     assert "ov.whispers" in body
     assert "people.platforms" not in body
     assert "sessions" not in body
+
+
+def test_memory_type_options_use_the_four_new_types():
+    source = _source()
+    assert 'const TYPES = ["person", "agreement", "note", "journal"];' in source
+    for key in (
+        "type_person",
+        "type_agreement",
+        "type_note",
+        "type_journal",
+    ):
+        assert key in source, key
+
+
+def test_board_editor_and_publish_form_have_no_type_option():
+    source = _source()
+    editor = source.split("function renderEditor()", 1)[1].split(
+        "async function saveFile", 1
+    )[0]
+    # 类型下拉只在非留言板时渲染
+    assert 'if (ed.scope !== "board")' in editor
+    assert 't("fieldType")' in editor
+    # 发布告示表单只有署名、标题、到期日与正文
+    publish = source.split("function publishNotice()", 1)[1].split(
+        "// ------------------------------------------------------------ 搜索", 1
+    )[0]
+    assert 't("fieldType")' not in publish
+    assert "ed.type" not in publish
+    save = source.split("async function saveFile", 1)[1].split(
+        "async function deleteFile", 1
+    )[0]
+    assert 'type: ed.scope === "board" ? "" : ed.type' in save
+    # 留言板列表不显示类型标签
+    assert 'state.detail.scope === "board" ? null : typeTag(file.type)' in source

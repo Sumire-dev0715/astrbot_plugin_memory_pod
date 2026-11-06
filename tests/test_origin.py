@@ -118,6 +118,15 @@ def test_origin_note_formats_group_private_person_and_multiple_sources():
     )
     assert person_note == "（本人说的）"
 
+    # 主题档案也属于这个人：本人写的同样标“本人说的”
+    topic_note = pkg_origin.note(
+        "notebook/user-456-games.md",
+        pkg_origin.encode([origin()]),
+        "other",
+        now=NOW,
+    )
+    assert topic_note == "（本人说的）"
+
     multi = pkg_origin.encode(
         [
             origin(days=5, speaker="456", name="小明", session="s1"),
@@ -138,7 +147,7 @@ def test_origin_note_absent_for_same_conversation_or_no_origin():
 
 def test_strip_from_frontmatter_removes_origin_but_keeps_other_fields():
     content = pkg_memstore.compose_memory(
-        "a", "摘要", "reference", "正文", source="123"
+        "a", "摘要", "note", "正文", source="123"
     )
     content = pkg_memstore.stamp_memory(content, NOW, origin_record=origin())
     assert "origin:" in content
@@ -151,7 +160,7 @@ def test_strip_from_frontmatter_removes_origin_but_keeps_other_fields():
 
 
 def test_annotate_inserts_note_after_frontmatter():
-    content = pkg_memstore.compose_memory("a", "摘要", "reference", "正文")
+    content = pkg_memstore.compose_memory("a", "摘要", "note", "正文")
     annotated = pkg_origin.annotate(content, "（小明在群聊里说的，今天）")
     assert "---\n\n（小明在群聊里说的，今天）\n\n" in annotated
     assert annotated.index("摘要") < annotated.index("（小明")

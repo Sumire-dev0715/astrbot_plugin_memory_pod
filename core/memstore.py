@@ -10,7 +10,7 @@
 
 索引自动注入通道有 200 行 / 25KB 上限。超过时不再从底部截断：先整块丢
 日记，再按最近一次用到的时间从旧到新丢非日记条目（没有使用统计的按
-updated 算），feedback 类最后丢；剩下的行保持原顺序，末尾注明还有多少条
+updated 算），agreement 类最后丢；剩下的行保持原顺序，末尾注明还有多少条
 未加载、可用搜索工具找到——否则模型根本不知道自己有记忆没看到。注入时
 行格式渲染成 ``- 文件.md — 描述``，MEMORY.md 本身仍是
 ``- [名称](文件.md) — 描述``（见 core/index_view.py）。
@@ -63,7 +63,12 @@ MAX_HOOK_CHARS = 100
 
 # 召回打分只看文件开头这么多字符，避免个别大文件拖慢每轮的扫描
 HEADER_TEXT_CHARS = 8 * 1024
-MEMORY_TYPES = ("user", "feedback", "project", "reference", "journal")
+# 记忆类型（PLAN 3.10.1）：只有插件需要区别对待的内容才单独成一类。
+# 文件里出现不认识的类型（旧版本写的类型名、手改错的类型）按 note 处理。
+PERSON_TYPE = "person"
+AGREEMENT_TYPE = "agreement"
+NOTE_TYPE = "note"
+MEMORY_TYPES = (PERSON_TYPE, AGREEMENT_TYPE, NOTE_TYPE, journal.JOURNAL_TYPE)
 
 # 三层作用域（工具参数、目录名、管理页都用这套键）
 SCOPE_BOARD = "board"
@@ -101,8 +106,8 @@ USAGE_FILENAME = ".usage.json"
 # .trash-scopes 归档里的旧名副本用；不是记忆文件，不进索引与召回。
 RENAMES_FILENAME = ".renames.json"
 FORGOTTEN_DIRNAME = "forgotten"
-# 指导类记忆是行为约束，长期不被提起不代表失效，不参与遗忘
-FORGET_EXEMPT_TYPES = ("feedback",)
+# 约定类是行为约束，长期不被提起不代表失效，不参与遗忘
+FORGET_EXEMPT_TYPES = (AGREEMENT_TYPE,)
 
 _SAFE_KEY_RE = re.compile(r"[^A-Za-z0-9._-]")
 _SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,120}$")
@@ -227,7 +232,7 @@ def parse_memory(content: str) -> MemoryDoc:
     """拆解记忆文件：frontmatter 的 name / description / type、三个戳、署名、
     到期日与正文。
 
-    type 按规范写在 metadata 下一级（metadata:\\n  type: user），也兼容
+    type 按规范写在 metadata 下一级（metadata:\\n  type: person），也兼容
     直接写在顶层的 type:，两处都有时以 metadata 下的为准。expires 同样
     兼容 metadata.expires 与顶层 expires，以 metadata 下的为准。
     """
@@ -292,7 +297,8 @@ def compose_memory(
     写入由 stamp_memory 自动继承。
     """
     description = _HOOK_WS_RE.sub(" ", description or "").strip()
-    meta = [f"  type: {mem_type.strip()}"]
+    # 留言板没有类型（PLAN 3.10.1）：mem_type 为空时不写 type 行
+    meta = [f"  type: {mem_type.strip()}"] if (mem_type or "").strip() else []
     values = (("created", created), ("updated", updated), ("source", source))
     for key, value in values:
         value = " ".join(str(value or "").split())
@@ -307,12 +313,13 @@ def compose_memory(
     expires = " ".join(str(expires or "").split())
     if expires:
         meta.append(f"  expires: {expires}")
+    metadata = "metadata:\n" + "\n".join(meta) + "\n" if meta else ""
     return (
         "---\n"
         f"name: {name.strip()}\n"
         f"description: {description}\n"
-        "metadata:\n" + "\n".join(meta) + "\n"
-        "---\n\n"
+        + metadata
+        + "---\n\n"
         f"{(body or '').strip()}\n"
     )
 
@@ -426,11 +433,11 @@ def _legacy_frontmatter(
         if cleaned:
             description = cleaned
             break
-    mem_type = "reference"
+    mem_type = NOTE_TYPE
     if journal.is_journal_name(name):
-        mem_type = "journal"
+        mem_type = journal.JOURNAL_TYPE
     elif is_person_file(name):
-        mem_type = "user"
+        mem_type = PERSON_TYPE
     meta = [
         f"  type: {mem_type}",
         f"  created: {format_stamp(now)}",
@@ -925,8 +932,14 @@ class ScopeStore:
         return result
 
     @staticmethod
+    def _display_type(layer: str, name: str, mem_type: str) -> str:
+        """展示类路径用的类型：留言板没有类型（PLAN 3.10.1）。"""
+        if layer == SCOPE_BOARD:
+            return ""
+        return effective_type(name, mem_type)
+
     def _read_header(
-        path: str | Path, name: str, st: os.stat_result
+        self, path: str | Path, name: str, st: os.stat_result
     ) -> MemoryHeader | None:
         try:
             with open(path, encoding="utf-8", errors="replace") as fh:
@@ -939,7 +952,7 @@ class ScopeStore:
             file=name,
             name=doc.name or name[: -len(MEMORY_FILE_SUFFIX)],
             description=description,
-            type=doc.type,
+            type=self._display_type(self.layer, name, doc.type),
             mtime=st.st_mtime,
             size=st.st_size,
             # 召回打分只看正文：frontmatter 里的 origin 显示名、source 等
@@ -1759,7 +1772,7 @@ class ScopeStore:
         """把长期没用到的在册记忆移进 forgotten/，返回被遗忘的文件名。
 
         判定起点是最近一次被召回或读取的时间；从没用过的按最近修改时间。
-        指导类（feedback）不遗忘。被遗忘的文件离开索引与召回，但不删除。
+        约定类（agreement）不遗忘。被遗忘的文件离开索引与召回，但不删除。
         """
         now = time.time() if now is None else now
         async with self._lock:
@@ -2861,7 +2874,7 @@ class ScopeStore:
             header = headers.get(name)
             if header is None:
                 doc = parse_memory(content)
-                mem_type = doc.type
+                mem_type = self._display_type(self.layer, name, doc.type)
                 updated = parse_stamp(doc.updated) or self.mtime(name) or 0.0
                 expires = doc.expires
             else:
@@ -2928,7 +2941,12 @@ class ScopeStore:
                 continue
             doc = parse_memory(content)
             reasons = insights.long_file_reasons(
-                header.file, doc.type or header.type, doc.body, header.size
+                header.file,
+                self._display_type(
+                    self.layer, header.file, doc.type or header.type
+                ),
+                doc.body,
+                header.size,
             )
             if reasons:
                 result.append(
@@ -2949,12 +2967,93 @@ class ScopeStore:
             return None
 
 
-# 人物记忆一人一个文件：user-<数字ID>.md
-_PERSON_FILE_RE = re.compile(r"^user-\d+\.md$", re.I)
+# 人物档案（PLAN 3.10.2）：主档案 user-<平台ID>.md，主题档案
+# user-<平台ID>-<主题>.md，主题只用小写英文、数字和连字符。
+# 平台 ID 是数字；前缀与扩展名的匹配不区分大小写，主题必须小写。
+_PERSON_FILE_RE = re.compile(
+    r"^user-(?P<id>\d+)(?:-(?P<topic>[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*))?"
+    r"\.md$",
+    re.I,
+)
+
+
+def _person_match(name: str) -> re.Match | None:
+    match = _PERSON_FILE_RE.match((name or "").strip())
+    if match is None:
+        return None
+    topic = match.group("topic")
+    if topic and topic != topic.lower():
+        return None
+    return match
 
 
 def is_person_file(name: str) -> bool:
-    return bool(_PERSON_FILE_RE.match((name or "").strip()))
+    """是否是这个人的档案：主档案或主题档案（文件名与类型必须一致）。"""
+    return _person_match(name) is not None
+
+
+def is_primary_person_file(name: str) -> bool:
+    """是否主档案 user-<平台ID>.md；只有主档案会被强制召回。"""
+    match = _person_match(name)
+    return match is not None and not match.group("topic")
+
+
+def person_id(name: str) -> str:
+    """档案文件名里的平台 ID；不是人物档案返回空串。"""
+    match = _person_match(name)
+    return match.group("id") if match else ""
+
+
+def effective_type(name: str, mem_type: str = "") -> str:
+    """文件实际按哪种类型对待（PLAN 3.10.1、3.10.2）。
+
+    日记按类型或文件名判定；人物档案由文件名决定（主档案与主题档案都算
+    这个人）；约定认 type=agreement；其余一律按笔记处理，包括文件里出现
+    的不认识类型（旧版本的类型名、手改错的类型），不报错。
+    """
+    raw = (mem_type or "").strip().lower()
+    # 人物档案由文件名决定，优先于 frontmatter 里写的类型（当且仅当）
+    if is_person_file(name):
+        return PERSON_TYPE
+    if journal.is_journal(name, raw):
+        return journal.JOURNAL_TYPE
+    if raw == AGREEMENT_TYPE:
+        return AGREEMENT_TYPE
+    return NOTE_TYPE
+
+
+def person_type_problem(name: str, mem_type: str) -> str:
+    """人物档案的"类型与文件名必须对上"校验；对不上时返回回执说明。
+
+    type=person 只允许主档案与主题档案；人物档案的文件名也只允许
+    type=person。两边对不上的写入一律拒绝（PLAN 3.10.2）。
+    """
+    type_is_person = (mem_type or "").strip().lower() == PERSON_TYPE
+    if type_is_person == is_person_file(name):
+        return ""
+    return (
+        "人物档案的类型和文件名必须对上：type=person 只能用于 "
+        "user-<平台ID>.md（主档案）或 user-<平台ID>-<主题>.md（主题档案，"
+        "主题只用小写英文、数字和连字符）；这两个文件名也只能写 type=person"
+    )
+
+
+# 留言板没有类型：raw 保存时把 frontmatter 里残留的 type 行去掉
+_FRONTMATTER_TYPE_LINE_RE = re.compile(
+    r"^[ \t]*type[ \t]*:[^\n]*(?:\n|$)", re.M
+)
+
+
+def strip_frontmatter_type(content: str) -> str:
+    """去掉 frontmatter 里的 type 行；没有 frontmatter 或没有 type 行时原样返回。"""
+    match = _FRONTMATTER_RE.match(content or "")
+    if match is None:
+        return content
+    inner = match.group(1)
+    cleaned = _FRONTMATTER_TYPE_LINE_RE.sub("", inner)
+    if cleaned == inner:
+        return content
+    return content[: match.start(1)] + cleaned + content[match.end(1):]
 
 
 class MemoryStore:

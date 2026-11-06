@@ -122,8 +122,8 @@ class RuntimeSession:
     改动了历史开头时刷新快照（那时提示词缓存本来就已经失效）。此外每天
     的第一轮也刷新一次，让过期的留言板告示最晚第二天撤下（PLAN 3.9.2）。
     两个例外：留言板的任何改动马上刷新所有会话（PLAN 3.9.2 第 5 条）；
-    小本本的 feedback 是对机器人自己的要求，管理员写下的要马上对所有
-    会话生效（PLAN 3.9.1 第 5 条）。
+    小本本的 agreement 是对机器人自己的要求，管理员写下的要马上对所有
+    会话生效（PLAN 3.10.1 继承 3.9.1 第 5 条）。
     """
 
     # 快照锚定的对话 id；变了说明换了对话或被重置
@@ -1027,7 +1027,9 @@ class MemoryPodPlugin(Star):
         if kind != registry.KIND_PRIVATE:
             return ()
         sender_id, _ = self._sender_identity(event)
-        if not sender_id or not memstore.is_person_file(f"user-{sender_id}.md"):
+        if not sender_id or not memstore.is_primary_person_file(
+            f"user-{sender_id}.md"
+        ):
             return ()
         platform = self._event_actor(event) or self._platform_of(umo)
         return ("pin", platform, sender_id)
@@ -1042,7 +1044,7 @@ class MemoryPodPlugin(Star):
         """
         sender_id, _ = self._sender_identity(event)
         name = f"user-{sender_id}.md"
-        if not sender_id or not memstore.is_person_file(name):
+        if not sender_id or not memstore.is_primary_person_file(name):
             return [], {}
         umo = str(getattr(event, "unified_msg_origin", "") or "")
         views: list[injection.MemoryView] = []
@@ -1844,11 +1846,11 @@ class MemoryPodPlugin(Star):
 
     @staticmethod
     async def _tool_file_types(store: memstore.ScopeStore) -> dict[str, str]:
-        """作用域里现有文件的类型（含已遗忘副本），feedback 规则按它判断对象。
+        """作用域里现有文件的类型（含已遗忘副本），agreement 规则按它判断对象。
 
-        已遗忘的 feedback 不在在册 headers 里；如果只看在册文件，非管理员
+        已遗忘的 agreement 不在在册 headers 里；如果只看在册文件，非管理员
         用一个不同 type 的同名 memory_write 就能把它顶进回收站，等于删了
-        管理员的 feedback（PLAN 3.9.1 第 5 条）。
+        管理员的 agreement（PLAN 3.10.1 继承 3.9.1 第 5 条）。
         """
         headers = await asyncio.to_thread(store.headers)
         forgotten = await asyncio.to_thread(store.forgotten_headers)
@@ -1877,9 +1879,9 @@ class MemoryPodPlugin(Star):
         留言板的改动要立刻送到所有会话（PLAN 3.9.2 第 5 条）。小本本和
         悄悄话在对话中途由模型写入时不刷新快照：开头块要逐轮逐字不变才
         能命中前缀缓存，新内容由召回带上（PLAN 3.8.1）。两个例外：
-        - feedback 是对机器人自己的要求，管理员在别的对话里写下的必须
-          马上对所有会话生效（PLAN 3.9.1 第 5 条），所以小本本的 feedback
-          改动作废全部快照；
+        - agreement 是对机器人自己的要求，管理员在别的对话里写下的必须
+          马上对所有会话生效（PLAN 3.10.1 继承 3.9.1 第 5 条），所以小本本
+          的 agreement 改动作废全部快照；
         - 删除或遗忘钉在开头块里的档案没有最新全文可附，继续注入旧内容
           等于让用户删不掉。
         """
@@ -1989,7 +1991,10 @@ class MemoryPodPlugin(Star):
                 + " 在可见记忆里没有对应文件，需要时补上或改成已有文件名。"
             )
         reasons = insights.long_file_reasons(
-            file, doc.type, doc.body, len(content.encode("utf-8"))
+            file,
+            memstore.effective_type(file, doc.type),
+            doc.body,
+            len(content.encode("utf-8")),
         )
         if reasons:
             hints.append(
@@ -2008,9 +2013,9 @@ class MemoryPodPlugin(Star):
         event: AstrMessageEvent,
         scope: str,
         file: str,
-        type: str,
-        description: str,
-        content: str,
+        type: str = "",
+        description: str = "",
+        content: str = "",
         expires: str = "",
     ) -> str:
         """新建记忆文件，或整篇重写已有文件。
@@ -2019,9 +2024,9 @@ class MemoryPodPlugin(Star):
 
         Args:
             scope(string): 作用域：board、notebook 或 whisper
-            file(string): 文件名，如 project-alpha.md，可省略 .md
-            type(string): 类型：user、feedback、project 或 reference
-            description(string): 一句话摘要，写清什么时候该读全文
+            file(string): 文件名，可省略 .md
+            type(string): 类型：person、agreement、note、journal（日记用 memory_edit 追加）；留言板不填
+            description(string): 一句话摘要，说明何时该读全文
             content(string): 完整正文，不含 frontmatter
             expires(string): 可选到期日 YYYY-MM-DD，只对留言板生效
         """
@@ -2037,16 +2042,18 @@ class MemoryPodPlugin(Star):
                 "写日记请用 memory_edit（scope=notebook 或 whisper，"
                 "file=journal，mode=append），具体写到哪一篇由插件决定。"
             )
+        provided_type = (type or "").strip()
         name = writer.normalize_file(raw_file)
         files = await self._tool_files(store)
         file_types = await self._tool_file_types(store)
+        existing = self._existing_name(files, name)
+        old_type = file_types.get(existing, "")
         problem = await self._rewrite_problem(event, store, scope, name, files)
         if problem:
             return problem
         if scope == memstore.SCOPE_BOARD and not (expires or "").strip():
             # 整篇重写留言板告示没给 expires 时沿用原日期：一次普通重写
             # 不该把告示变成长期有效。要清掉到期日，在管理页把日期清空。
-            existing = self._existing_name(files, name)
             if existing:
                 previous = await store.read(existing)
                 if previous is not None:
@@ -2093,16 +2100,24 @@ class MemoryPodPlugin(Star):
             return self._failed_receipt(result)
         actual = result.changes[0][1]
         written = result.written.get(f"{scope}/{actual}", "")
-        # 留言板改动马上刷新所有会话；小本本的 feedback 也要马上对所有
+        # 留言板改动马上刷新所有会话；小本本的 agreement 也要马上对所有
         # 会话生效，其余小本本/悄悄话写入不刷新快照
+        new_type = memstore.effective_type(
+            actual, memstore.parse_memory(written).type
+        )
         self._refresh_after_tool_write(
             scope,
-            refresh_all=memstore.parse_memory(written).type == "feedback",
+            refresh_all=(
+                new_type == memstore.AGREEMENT_TYPE
+                or old_type == memstore.AGREEMENT_TYPE
+            ),
         )
-        new_file = not self._existing_name(files, name)
+        new_file = not existing
         head = f"已写入 {scope}/{actual}（{'新建' if new_file else '整篇重写'}）"
         detail = result.messages[0] if result.messages else result.message
         lines = [head + "。" + detail]
+        if scope == memstore.SCOPE_BOARD and provided_type:
+            lines.append("留言板告示不用填 type，已忽略。")
         lines.extend(
             await self._receipt_hints(
                 event, actual, result.written.get(f"{scope}/{actual}", "")
@@ -2180,10 +2195,17 @@ class MemoryPodPlugin(Star):
             return self._failed_receipt(result)
         actual = result.changes[0][1]
         written = result.written.get(f"{scope}/{actual}", "")
-        # 留言板改动马上刷新所有会话；小本本的 feedback 也要马上生效
+        # 留言板改动马上刷新所有会话；小本本的 agreement 也要马上生效
+        old_type = file_types.get(self._existing_name(files, name), "")
+        new_type = memstore.effective_type(
+            actual, memstore.parse_memory(written).type
+        )
         self._refresh_after_tool_write(
             scope,
-            refresh_all=memstore.parse_memory(written).type == "feedback",
+            refresh_all=(
+                new_type == memstore.AGREEMENT_TYPE
+                or old_type == memstore.AGREEMENT_TYPE
+            ),
         )
         head = f"已写日记 {scope}/{actual}" if is_journal else f"已修改 {scope}/{actual}"
         detail = result.messages[0] if result.messages else result.message
@@ -2247,12 +2269,13 @@ class MemoryPodPlugin(Star):
             return self._failed_receipt(result)
         actual = result.changes[0][1]
         # 删除没有最新全文可附：钉在开头块里的档案要作废，不能继续注入；
-        # 删掉一条 feedback 同样要让所有会话马上不再看到它
+        # 删掉一条 agreement 同样要让所有会话马上不再看到它
         existing = self._existing_name(files, actual)
         self._refresh_after_tool_write(
             scope,
             [actual],
-            refresh_all=file_types.get(existing, "").lower() == "feedback",
+            refresh_all=file_types.get(existing, "").lower()
+            == memstore.AGREEMENT_TYPE,
         )
         lines = [
             f"已删除 {scope}/{actual}，已移入回收站，可恢复；"

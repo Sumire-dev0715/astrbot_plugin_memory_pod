@@ -146,3 +146,20 @@ def test_person_file_name_is_case_insensitive():
     assert pkg_memstore.is_person_file("USER-123.md")
     assert pkg_memstore.is_person_file("user-123.MD")
     assert pkg_memstore.is_person_file("User-123.md")
+
+
+def test_person_file_name_accepts_lowercase_topics_only():
+    assert pkg_memstore.is_person_file("user-123-games.md")
+    assert pkg_memstore.is_person_file("user-123-games-2026.md")
+    assert not pkg_memstore.is_person_file("user-123-Games.md")
+    assert not pkg_memstore.is_person_file("user-123-.md")
+    assert not pkg_memstore.is_person_file("user-123--games.md")
+    assert pkg_memstore.is_primary_person_file("user-123.md")
+    assert not pkg_memstore.is_primary_person_file("user-123-games.md")
+    assert pkg_memstore.person_id("user-123-games.md") == "123"
+    assert pkg_memstore.person_id("user-123.md") == "123"
+    assert pkg_memstore.person_id("someone.md") == ""
+    # 未知类型按笔记处理；人物档案由文件名决定
+    assert pkg_memstore.effective_type("note.md", "legacy") == "note"
+    assert pkg_memstore.effective_type("user-123-games.md", "legacy") == "person"
+    assert pkg_memstore.effective_type("user-123.md", "journal") == "person"

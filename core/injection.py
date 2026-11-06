@@ -121,9 +121,10 @@ def prepare_view(
     # 没有 frontmatter 的文件尤其明显。
     description = clean_description(doc.description)
     body, truncated, omitted = trim_body(doc.body, limit)
+    filename = ref.rsplit("/", 1)[-1]
     return MemoryView(
         ref=ref,
-        mem_type=doc.type or "未标注",
+        mem_type=memstore.effective_type(filename, doc.type),
         description=description,
         body=body,
         truncated=truncated,

@@ -72,14 +72,14 @@ def test_memory_write_creates_file_and_records_actor_source(tmp_path):
     event = FakeEvent("Bot-A", "123", name="小明")
     receipt = run(
         plugin.memory_write(
-            event, "notebook", "note", "reference", "周末安排", "每周六开黑"
+            event, "notebook", "note", "note", "周末安排", "每周六开黑"
         )
     )
     assert "已写入 notebook/note.md（新建）" in receipt
     content = run(notebook(plugin).read("note.md"))
     doc = pkg_memstore.parse_memory(content)
     assert doc.description == "周末安排"
-    assert doc.type == "reference"
+    assert doc.type == "note"
     assert doc.source == "123"
     assert "每周六开黑" in doc.body
     # 索引行由插件同步
@@ -95,14 +95,14 @@ def test_memory_write_board_requires_admin_and_signs_notice(tmp_path):
     plugin = make_plugin(tmp_path)
     member = FakeEvent("Bot-A", "123", name="小明")
     receipt = run(
-        plugin.memory_write(member, "board", "notice.md", "reference", "告示", "入职")
+        plugin.memory_write(member, "board", "notice.md", "note", "告示", "入职")
     )
     assert "留言板只有管理员能写" in receipt
     assert run(plugin._store.board_scope().read("notice.md")) is None
 
     admin = FakeEvent("Bot-A", "123", admin=True, name="小明")
     receipt = run(
-        plugin.memory_write(admin, "board", "notice.md", "reference", "告示", "入职")
+        plugin.memory_write(admin, "board", "notice.md", "note", "告示", "入职")
     )
     assert "已写入 board/notice.md（新建）" in receipt
     doc = pkg_memstore.parse_memory(run(plugin._store.board_scope().read("notice.md")))
@@ -114,23 +114,23 @@ def test_memory_write_rejects_unsafe_names_and_journal_type(tmp_path):
     plugin = make_plugin(tmp_path)
     event = FakeEvent("Bot-A", "123")
     assert "文件名不合法" in run(
-        plugin.memory_write(event, "notebook", "../x.md", "reference", "摘要", "正文")
+        plugin.memory_write(event, "notebook", "../x.md", "note", "摘要", "正文")
     )
     assert "文件名不合法" in run(
-        plugin.memory_write(event, "notebook", "中文.md", "reference", "摘要", "正文")
+        plugin.memory_write(event, "notebook", "中文.md", "note", "摘要", "正文")
     )
     assert "类型不合法" in run(
         plugin.memory_write(event, "notebook", "j.md", "journal", "摘要", "正文")
     )
     assert "正文不能为空" in run(
-        plugin.memory_write(event, "notebook", "empty.md", "reference", "摘要", "  ")
+        plugin.memory_write(event, "notebook", "empty.md", "note", "摘要", "  ")
     )
     assert "正文超过" in run(
         plugin.memory_write(
             event,
             "notebook",
             "big.md",
-            "reference",
+            "note",
             "摘要",
             "字" * (pkg_writer.MAX_CONTENT_CHARS + 1),
         )
@@ -141,7 +141,7 @@ def test_memory_write_file_journal_points_to_memory_edit(tmp_path):
     plugin = make_plugin(tmp_path)
     receipt = run(
         plugin.memory_write(
-            FakeEvent("Bot-A", "123"), "notebook", "journal", "reference", "摘要", "今天"
+            FakeEvent("Bot-A", "123"), "notebook", "journal", "note", "摘要", "今天"
         )
     )
     assert "写日记请用 memory_edit" in receipt
@@ -333,7 +333,7 @@ def test_person_profile_only_self_or_admin_can_change(tmp_path):
     run(plugin.memory_read(stranger, "notebook", "user-456.md"))
     assert "只有本人或管理员" in run(
         plugin.memory_write(
-            stranger, "notebook", "user-456.md", "user", "阿杰", "身份：工程师"
+            stranger, "notebook", "user-456.md", "person", "阿杰", "身份：工程师"
         )
     )
     assert "只有本人或管理员" in run(
@@ -354,7 +354,7 @@ def test_person_profile_only_self_or_admin_can_change(tmp_path):
     run(plugin.memory_read(admin, "notebook", "user-456.md"))
     assert "已写入 notebook/user-456.md" in run(
         plugin.memory_write(
-            admin, "notebook", "user-456.md", "user", "阿杰", "身份：管理员更正"
+            admin, "notebook", "user-456.md", "person", "阿杰", "身份：管理员更正"
         )
     )
 
@@ -365,7 +365,7 @@ def test_whisper_writes_never_reach_another_conversation(tmp_path):
     bob = FakeEvent("Bot-A", "456", umo="Bot-A:FriendMessage:456")
 
     receipt = run(
-        plugin.memory_write(alice, "whisper", "secret.md", "reference", "秘密", "只给爱丽丝")
+        plugin.memory_write(alice, "whisper", "secret.md", "note", "秘密", "只给爱丽丝")
     )
     assert "已写入 whisper/secret.md" in receipt
     assert run(whisper(plugin, alice).read("secret.md")) is not None
@@ -381,7 +381,7 @@ def test_whisper_writes_never_reach_another_conversation(tmp_path):
     assert "只给爱丽丝" in run(whisper(plugin, alice).read("secret.md"))
 
     # 鲍勃写自己的悄悄话，落在自己的会话目录
-    run(plugin.memory_write(bob, "whisper", "secret.md", "reference", "秘密", "只给鲍勃"))
+    run(plugin.memory_write(bob, "whisper", "secret.md", "note", "秘密", "只给鲍勃"))
     assert "只给鲍勃" in run(whisper(plugin, bob).read("secret.md"))
     assert "只给爱丽丝" in run(whisper(plugin, alice).read("secret.md"))
 
@@ -390,7 +390,7 @@ def test_write_tools_disabled_with_memory_off(tmp_path):
     plugin = make_plugin(tmp_path, enable_memory=False)
     event = FakeEvent("Bot-A", "123")
     for result in (
-        run(plugin.memory_write(event, "notebook", "a.md", "reference", "摘要", "正文")),
+        run(plugin.memory_write(event, "notebook", "a.md", "note", "摘要", "正文")),
         run(plugin.memory_edit(event, "notebook", "a.md", "append", "", "正文")),
         run(plugin.memory_delete(event, "notebook", "a.md")),
     ):
@@ -401,7 +401,7 @@ def test_write_tools_reject_unknown_scope(tmp_path):
     plugin = make_plugin(tmp_path)
     event = FakeEvent("Bot-A", "123")
     for result in (
-        run(plugin.memory_write(event, "global", "a.md", "reference", "摘要", "正文")),
+        run(plugin.memory_write(event, "global", "a.md", "note", "摘要", "正文")),
         run(plugin.memory_edit(event, "people", "a.md", "append", "", "正文")),
         run(plugin.memory_delete(event, "session", "a.md")),
     ):
@@ -419,7 +419,7 @@ def test_rewrite_requires_fresh_read_and_rejects_after_external_change(tmp_path)
 
     receipt = run(
         plugin.memory_write(
-            event, "notebook", "note.md", "reference", "摘要", "第二版"
+            event, "notebook", "note.md", "note", "摘要", "第二版"
         )
     )
     assert "必须先读" in receipt or "必须先读过" in receipt
@@ -428,7 +428,7 @@ def test_rewrite_requires_fresh_read_and_rejects_after_external_change(tmp_path)
     run(plugin.memory_read(event, "notebook", "note.md"))
     receipt = run(
         plugin.memory_write(
-            event, "notebook", "note.md", "reference", "摘要", "第二版"
+            event, "notebook", "note.md", "note", "摘要", "第二版"
         )
     )
     assert "整篇重写" in receipt
@@ -438,7 +438,7 @@ def test_rewrite_requires_fresh_read_and_rejects_after_external_change(tmp_path)
     run(store.write("note.md", thing("note", body="第三版")))
     receipt = run(
         plugin.memory_write(
-            event, "notebook", "note.md", "reference", "摘要", "第四版"
+            event, "notebook", "note.md", "note", "摘要", "第四版"
         )
     )
     assert "必须先读过" in receipt
@@ -474,7 +474,7 @@ def test_recall_full_text_counts_as_read(tmp_path):
     assert any(t.startswith("<memory_pod_recall>") and "每周六晚上八点开黑" in t for t in texts)
     receipt = run(
         plugin.memory_write(
-            event, "notebook", "weekend.md", "reference", "周末安排", "改到周日"
+            event, "notebook", "weekend.md", "note", "周末安排", "改到周日"
         )
     )
     assert "整篇重写" in receipt
@@ -497,7 +497,7 @@ def test_truncated_recall_does_not_count_as_read(tmp_path):
     assert any("中间省略" in t for t in texts)
     receipt = run(
         plugin.memory_write(
-            event, "notebook", "long.md", "reference", "长文资料", "重写后的正文"
+            event, "notebook", "long.md", "note", "长文资料", "重写后的正文"
         )
     )
     assert "必须先读过" in receipt
@@ -511,7 +511,7 @@ def test_opening_block_full_text_counts_as_read(tmp_path):
     run(plugin._process_request(admin, make_request("你好")))
     receipt = run(
         plugin.memory_write(
-            admin, "board", "notice.md", "reference", "告示", "11 月 12 日入职"
+            admin, "board", "notice.md", "note", "告示", "11 月 12 日入职"
         )
     )
     assert "整篇重写" in receipt
@@ -526,7 +526,7 @@ def test_pinned_private_profile_counts_as_read(tmp_path):
     run(plugin._process_request(event, make_request("你好")))
     receipt = run(
         plugin.memory_write(
-            event, "notebook", "user-123.md", "user", "我", "身份：高级工程师"
+            event, "notebook", "user-123.md", "person", "我", "身份：高级工程师"
         )
     )
     assert "整篇重写" in receipt
@@ -544,7 +544,7 @@ def test_receipt_names_file_and_warns_dangling_and_long(tmp_path):
             event,
             "notebook",
             "links.md",
-            "reference",
+            "note",
             "链接",
             "参见 [[不存在的文件]]",
         )
@@ -555,7 +555,7 @@ def test_receipt_names_file_and_warns_dangling_and_long(tmp_path):
 
     receipt = run(
         plugin.memory_write(
-            event, "notebook", "long.md", "reference", "长文", "字" * 3000
+            event, "notebook", "long.md", "note", "长文", "字" * 3000
         )
     )
     assert "已写入 notebook/long.md" in receipt
@@ -580,9 +580,9 @@ def test_rewrite_saves_previous_version_for_undo(tmp_path):
     plugin = make_plugin(tmp_path)
     store = notebook(plugin)
     event = FakeEvent("Bot-A", "123")
-    run(plugin.memory_write(event, "notebook", "note.md", "reference", "摘要", "第一版"))
+    run(plugin.memory_write(event, "notebook", "note.md", "note", "摘要", "第一版"))
     run(plugin.memory_read(event, "notebook", "note.md"))
-    run(plugin.memory_write(event, "notebook", "note.md", "reference", "摘要", "第二版"))
+    run(plugin.memory_write(event, "notebook", "note.md", "note", "摘要", "第二版"))
     versions = store.history_versions("note.md")
     assert versions
     assert "第一版" in store.read_history("note.md", versions[0].version)
@@ -638,7 +638,7 @@ def test_board_write_visible_to_other_bot_next_turn(tmp_path):
     admin = FakeEvent("Bot-A", "1", admin=True, umo="Bot-A:GroupMessage:10")
     run(
         plugin.memory_write(
-            admin, "board", "new.md", "reference", "告示", "11 月 11 日入职"
+            admin, "board", "new.md", "note", "告示", "11 月 11 日入职"
         )
     )
     after = make_request("你好")
@@ -656,7 +656,7 @@ def test_notebook_write_does_not_refresh_opening_snapshot(tmp_path):
 
     run(
         plugin.memory_write(
-            event, "notebook", "weekend.md", "reference", "周末", "周六开黑"
+            event, "notebook", "weekend.md", "note", "周末", "周六开黑"
         )
     )
     after = run(plugin._index_block(rt, event))
@@ -702,7 +702,7 @@ def test_read_with_leading_slash_still_counts_as_read(tmp_path):
     assert "第一版" in run(plugin.memory_read(event, "notebook", "/note.md"))
     receipt = run(
         plugin.memory_write(
-            event, "notebook", "note.md", "reference", "摘要", "第二版"
+            event, "notebook", "note.md", "note", "摘要", "第二版"
         )
     )
     assert "整篇重写" in receipt
@@ -726,7 +726,7 @@ def test_board_signature_falls_back_to_platform_id(tmp_path):
     event = FakeEvent("Bot-A", "123", admin=True, name="小明")
     run(
         plugin.memory_write(
-            event, "board", "notice.md", "reference", "告示", "内容"
+            event, "board", "notice.md", "note", "告示", "内容"
         )
     )
     doc = pkg_memstore.parse_memory(
@@ -781,7 +781,7 @@ def test_board_overflow_title_only_does_not_count_as_read(tmp_path):
 
     receipt = run(
         plugin.memory_write(
-            admin, "board", "old.md", "reference", "告示", "整篇重写"
+            admin, "board", "old.md", "note", "告示", "整篇重写"
         )
     )
     assert "必须先读过" in receipt
@@ -811,7 +811,7 @@ def test_recall_pointer_only_does_not_count_as_read(tmp_path):
 
     receipt = run(
         plugin.memory_write(
-            event, "notebook", "weekend-0.md", "reference", "周末安排", "重写"
+            event, "notebook", "weekend-0.md", "note", "周末安排", "重写"
         )
     )
     assert "必须先读过" in receipt
@@ -829,7 +829,7 @@ def test_trimmed_pinned_profile_does_not_count_as_read(tmp_path):
 
     receipt = run(
         plugin.memory_write(
-            event, "notebook", "user-123.md", "user", "我", "重写后的档案"
+            event, "notebook", "user-123.md", "person", "我", "重写后的档案"
         )
     )
     assert "必须先读过" in receipt
@@ -867,7 +867,7 @@ def test_group_write_records_origin_and_audit_without_leaking_group(tmp_path):
 
     receipt = run(
         plugin.memory_write(
-            event, "notebook", "weekend.md", "reference", "周末开黑安排", "每周六晚上开黑"
+            event, "notebook", "weekend.md", "note", "周末开黑安排", "每周六晚上开黑"
         )
     )
     # 工具回执、记忆文件、审计：群名与群号只允许出现在审计里
@@ -923,7 +923,7 @@ def test_group_write_records_origin_and_audit_without_leaking_group(tmp_path):
     assert GROUP_NAME not in edit_receipt and GROUP_NUMBER not in edit_receipt
     run(
         plugin.memory_write(
-            other, "notebook", "temp.md", "reference", "临时", "临时内容"
+            other, "notebook", "temp.md", "note", "临时", "临时内容"
         )
     )
     delete_receipt = run(
@@ -938,7 +938,7 @@ def test_group_write_records_origin_and_audit_without_leaking_group(tmp_path):
     member = group_event(name="小明")
     run(
         plugin.memory_write(
-            member, "notebook", "user-123.md", "user", "小明档案", "身份：工程师"
+            member, "notebook", "user-123.md", "person", "小明档案", "身份：工程师"
         )
     )
     private = FakeEvent("Bot-A", "123", umo="Bot-A:FriendMessage:123", name="小明")
@@ -952,7 +952,7 @@ def test_reminder_and_opening_never_contain_group_name(tmp_path):
     event = group_event()
     run(
         plugin.memory_write(
-            event, "notebook", "note.md", "reference", "周末安排", "周六开黑"
+            event, "notebook", "note.md", "note", "周末安排", "周六开黑"
         )
     )
     req = make_request("今天怎么样")
@@ -996,7 +996,7 @@ def test_origin_lists_multiple_recent_sources(tmp_path):
     first = group_event(name="小明", card="小明卡片", number="900")
     run(
         plugin.memory_write(
-            first, "notebook", "plan.md", "reference", "周末开黑安排", "周六开黑"
+            first, "notebook", "plan.md", "note", "周末开黑安排", "周六开黑"
         )
     )
     second = group_event(sender_id="456", name="小红", number="901")
@@ -1033,16 +1033,16 @@ def test_old_file_without_origin_is_not_annotated(tmp_path):
     assert "在群聊里说的" not in block
 
 
-# ------------------------------------------------------------ 3.9.1 第 5 条 feedback
+# ------------------------------------------------------- 3.9.1 第 5 条 agreement
 
 
-def test_feedback_in_notebook_requires_admin(tmp_path):
+def test_agreement_in_notebook_requires_admin(tmp_path):
     plugin = make_plugin(tmp_path)
     store = notebook(plugin)
     member = FakeEvent("Bot-A", "123")
     receipt = run(
         plugin.memory_write(
-            member, "notebook", "rule.md", "feedback", "要求", "以后先问我"
+            member, "notebook", "rule.md", "agreement", "要求", "以后先问我"
         )
     )
     assert "只有管理员" in receipt
@@ -1052,29 +1052,29 @@ def test_feedback_in_notebook_requires_admin(tmp_path):
     # 非管理员把自己的要求写进当前对话的悄悄话：允许
     assert "已写入 whisper/rule.md" in run(
         plugin.memory_write(
-            member, "whisper", "rule.md", "feedback", "要求", "以后先问我"
+            member, "whisper", "rule.md", "agreement", "要求", "以后先问我"
         )
     )
 
-    # 管理员在小本本里新建 feedback
+    # 管理员在小本本里新建 agreement
     admin = FakeEvent("Bot-A", "1", admin=True)
     assert "已写入 notebook/rule2.md" in run(
         plugin.memory_write(
-            admin, "notebook", "rule2.md", "feedback", "要求", "以后先问我"
+            admin, "notebook", "rule2.md", "agreement", "要求", "以后先问我"
         )
     )
-    # 非管理员不能修改、删除、也不能借整篇重写把 feedback 换类型
+    # 非管理员不能修改、删除、也不能借整篇重写把 agreement 换类型
     assert "只有管理员" in run(
         plugin.memory_edit(member, "notebook", "rule2.md", "append", "", "补充")
     )
     assert "只有管理员" in run(
         plugin.memory_delete(member, "notebook", "rule2.md", "不需要")
     )
-    # 整篇重写前先读；读过之后仍会被 feedback 规则拦住
+    # 整篇重写前先读；读过之后仍会被 agreement 规则拦住
     run(plugin.memory_read(member, "notebook", "rule2.md"))
     assert "只有管理员" in run(
         plugin.memory_write(
-            member, "notebook", "rule2.md", "reference", "要求", "换个类型"
+            member, "notebook", "rule2.md", "note", "要求", "换个类型"
         )
     )
     assert run(store.read("rule2.md")) is not None
@@ -1096,7 +1096,7 @@ def test_origin_display_name_prefers_card_and_cleans_forgery(tmp_path):
     )
     run(
         plugin.memory_write(
-            event, "notebook", "card.md", "reference", "摘要一", "正文一"
+            event, "notebook", "card.md", "note", "摘要一", "正文一"
         )
     )
     card_name = pkg_origin.parse(
@@ -1111,7 +1111,7 @@ def test_origin_display_name_prefers_card_and_cleans_forgery(tmp_path):
     no_card = group_event(name="QQ昵称", card="", number="222333")
     run(
         plugin.memory_write(
-            no_card, "notebook", "nick.md", "reference", "摘要二", "正文二"
+            no_card, "notebook", "nick.md", "note", "摘要二", "正文二"
         )
     )
     nick_name = pkg_origin.parse(
@@ -1127,7 +1127,7 @@ def test_origin_display_name_prefers_card_and_cleans_forgery(tmp_path):
     )
     run(
         plugin.memory_write(
-            attack, "notebook", "attack.md", "reference", "摘要三", "正文三"
+            attack, "notebook", "attack.md", "note", "摘要三", "正文三"
         )
     )
     doc = pkg_memstore.parse_memory(run(store.read("attack.md")))
@@ -1156,7 +1156,7 @@ def test_memory_edit_records_origin_on_legacy_file_without_frontmatter(tmp_path)
     content = run(store.read("legacy.md"))
     doc = pkg_memstore.parse_memory(content)
     assert doc.has_frontmatter
-    assert doc.type == "reference"
+    assert doc.type == "note"
     records = pkg_origin.parse(doc.origin)
     assert len(records) == 1 and records[0].name == "小红"
     assert "旧正文" in doc.body and "新增一行" in doc.body
@@ -1180,7 +1180,7 @@ def test_audit_group_falls_back_to_event_get_group(tmp_path):
     )
     assert "已写入" in run(
         plugin.memory_write(
-            event, "notebook", "g.md", "reference", "摘要", "正文"
+            event, "notebook", "g.md", "note", "摘要", "正文"
         )
     )
     assert read_audit(store)[-1]["group"] == "平台查到的合成群"
@@ -1198,7 +1198,7 @@ def test_audit_group_falls_back_to_event_get_group(tmp_path):
     )
     assert "已写入" in run(
         plugin.memory_write(
-            broken, "notebook", "broken.md", "reference", "摘要", "正文"
+            broken, "notebook", "broken.md", "note", "摘要", "正文"
         )
     )
     assert read_audit(store)[-1]["group"] == ""
@@ -1210,7 +1210,7 @@ def test_memory_read_restore_records_group_audit(tmp_path):
     event = group_event()
     run(
         plugin.memory_write(
-            event, "notebook", "old.md", "reference", "摘要", "正文"
+            event, "notebook", "old.md", "note", "摘要", "正文"
         )
     )
     run(store.forget("old.md"))
@@ -1233,7 +1233,7 @@ def test_admin_tool_write_marks_admin_in_audit(tmp_path):
     admin = FakeEvent("Bot-A", "1", admin=True)
     run(
         plugin.memory_write(
-            admin, "notebook", "admin-note.md", "reference", "管理员写的", "正文"
+            admin, "notebook", "admin-note.md", "note", "管理员写的", "正文"
         )
     )
     assert read_audit(store)[-1]["admin"] is True
@@ -1241,20 +1241,20 @@ def test_admin_tool_write_marks_admin_in_audit(tmp_path):
     member = FakeEvent("Bot-A", "123")
     run(
         plugin.memory_write(
-            member, "notebook", "member-note.md", "reference", "成员写的", "正文"
+            member, "notebook", "member-note.md", "note", "成员写的", "正文"
         )
     )
     assert read_audit(store)[-1]["admin"] is False
 
 
-def test_forgotten_feedback_cannot_be_overwritten_by_member(tmp_path):
-    """已遗忘的 feedback 仍按 feedback 保护，非管理员不能借同名重写删掉它。"""
+def test_forgotten_agreement_cannot_be_overwritten_by_member(tmp_path):
+    """已遗忘的 agreement 仍按 agreement 保护，非管理员不能借同名重写删掉它。"""
     plugin = make_plugin(tmp_path, enable_forgetting=True)
     store = notebook(plugin)
     admin = FakeEvent("Bot-A", "1", admin=True)
     assert "已写入 notebook/rule.md" in run(
         plugin.memory_write(
-            admin, "notebook", "rule.md", "feedback", "要求", "以后先问我"
+            admin, "notebook", "rule.md", "agreement", "要求", "以后先问我"
         )
     )
     assert run(store.forget("rule.md")).ok
@@ -1263,7 +1263,7 @@ def test_forgotten_feedback_cannot_be_overwritten_by_member(tmp_path):
     member = FakeEvent("Bot-A", "123")
     receipt = run(
         plugin.memory_write(
-            member, "notebook", "rule.md", "reference", "换个类型", "换个正文"
+            member, "notebook", "rule.md", "note", "换个类型", "换个正文"
         )
     )
     assert "只有管理员" in receipt
@@ -1278,15 +1278,15 @@ def test_other_message_kind_does_not_record_a_wrong_private_origin(tmp_path):
     store = notebook(plugin)
     event = FakeEvent("Bot-A", "123", umo="Bot-A:OtherMessage:channel-1")
     assert "已写入 notebook/note.md" in run(
-        plugin.memory_write(event, "notebook", "note.md", "reference", "摘要", "正文")
+        plugin.memory_write(event, "notebook", "note.md", "note", "摘要", "正文")
     )
     doc = pkg_memstore.parse_memory(run(store.read("note.md")))
     assert doc.origin == ""
     assert "私聊" not in run(plugin.memory_read(event, "notebook", "note.md"))
 
 
-def test_admin_feedback_write_refreshes_every_session_opening(tmp_path):
-    """管理员的 feedback 要让所有会话马上生效（PLAN 3.9.1 第 5 条）。"""
+def test_admin_agreement_write_refreshes_every_session_opening(tmp_path):
+    """管理员的 agreement 要让所有会话马上生效（PLAN 3.9.1 第 5 条）。"""
     plugin = make_plugin(tmp_path)
     event_a = FakeEvent("Bot-A", "1", umo="Bot-A:GroupMessage:900", admin=True)
     event_b = FakeEvent("Bot-A", "2", umo="Bot-A:FriendMessage:2")
@@ -1300,7 +1300,7 @@ def test_admin_feedback_write_refreshes_every_session_opening(tmp_path):
             event_a,
             "notebook",
             "rule.md",
-            "feedback",
+            "agreement",
             "称呼要求",
             "以后叫我老大",
         )
@@ -1312,7 +1312,177 @@ def test_admin_feedback_write_refreshes_every_session_opening(tmp_path):
     run(plugin._index_block(rt_b, event_b))
     run(
         plugin.memory_write(
-            event_b, "notebook", "note.md", "reference", "普通笔记", "正文"
+            event_b, "notebook", "note.md", "note", "普通笔记", "正文"
         )
     )
     assert rt_b.index_loaded is True
+
+
+# ------------------------------------------------------- 3.10 类型与人物档案
+
+
+def test_board_write_without_type_succeeds_and_ignores_type(tmp_path):
+    """留言板没有类型：不填能写，填了忽略，文件里不写 type。"""
+    plugin = make_plugin(tmp_path)
+    admin = FakeEvent("Bot-A", "1", admin=True)
+    receipt = run(
+        plugin.memory_write(
+            admin, "board", "notice.md", description="告示", content="11 月 11 日入职"
+        )
+    )
+    assert "已写入 board/notice.md（新建）" in receipt
+    content = run(plugin._store.board_scope().read("notice.md"))
+    doc = pkg_memstore.parse_memory(content)
+    assert doc.type == ""
+    assert "type:" not in content
+
+    receipt = run(
+        plugin.memory_write(
+            admin, "board", "notice2.md", "note", "告示", "第二个告示"
+        )
+    )
+    assert "已写入 board/notice2.md" in receipt
+    assert "留言板告示不用填 type" in receipt
+    content = run(plugin._store.board_scope().read("notice2.md"))
+    assert "type:" not in content
+
+
+def test_person_type_must_match_filename(tmp_path):
+    """人物档案的类型和文件名必须对上，两边对不上的写入一律拒绝。"""
+    plugin = make_plugin(tmp_path)
+    event = FakeEvent("Bot-A", "123", admin=True)
+    # type=person 但文件名不是人物档案
+    assert "类型和文件名必须对上" in run(
+        plugin.memory_write(event, "notebook", "alice.md", "person", "档案", "正文")
+    )
+    # 人物档案的文件名但 type 不是 person
+    assert "类型和文件名必须对上" in run(
+        plugin.memory_write(event, "notebook", "user-123.md", "note", "档案", "正文")
+    )
+    assert "类型和文件名必须对上" in run(
+        plugin.memory_write(
+            event, "notebook", "user-123.md", "agreement", "档案", "正文"
+        )
+    )
+    # 主题必须是小写英文、数字和连字符
+    assert "类型和文件名必须对上" in run(
+        plugin.memory_write(
+            event, "notebook", "user-123-Work.md", "person", "档案", "正文"
+        )
+    )
+    # 主档案与合规的主题档案都接受 type=person
+    assert "已写入 notebook/user-123.md" in run(
+        plugin.memory_write(event, "notebook", "user-123.md", "person", "我", "身份")
+    )
+    assert "已写入 notebook/user-123-work.md" in run(
+        plugin.memory_write(
+            event,
+            "notebook",
+            "user-123-work.md",
+            "person",
+            "工作",
+            "负责合成项目",
+        )
+    )
+
+
+def test_topic_profile_only_self_or_admin_can_create_and_change(tmp_path):
+    """主题档案和主档案一样：只有本人或管理员能新建、修改、删除。"""
+    plugin = make_plugin(tmp_path)
+    store = notebook(plugin)
+    admin = FakeEvent("Bot-A", "1", admin=True)
+    assert "已写入 notebook/user-456-games.md" in run(
+        plugin.memory_write(
+            admin, "notebook", "user-456-games.md", "person", "游戏", "喜欢英雄联盟"
+        )
+    )
+
+    third = FakeEvent("Bot-A", "789", umo="Bot-A:GroupMessage:900")
+    # 第三人在群里新建别人的主题档案被拒
+    receipt = run(
+        plugin.memory_write(
+            third, "notebook", "user-456-music.md", "person", "音乐", "喜欢摇滚"
+        )
+    )
+    assert "只有本人或管理员" in receipt
+    assert run(store.read("user-456-music.md")) is None
+    # 修改、删除、整篇重写别人的主题档案都被拒（先读过，确保不是“没读过”拦下）
+    assert "英雄联盟" in run(
+        plugin.memory_read(third, "notebook", "user-456-games.md")
+    )
+    assert "只有本人或管理员" in run(
+        plugin.memory_write(
+            third, "notebook", "user-456-games.md", "person", "游戏", "改掉"
+        )
+    )
+    assert "只有本人或管理员" in run(
+        plugin.memory_edit(
+            third, "notebook", "user-456-games.md", "append", "", "补充"
+        )
+    )
+    assert "只有本人或管理员" in run(
+        plugin.memory_delete(third, "notebook", "user-456-games.md", "删掉")
+    )
+    assert "英雄联盟" in run(store.read("user-456-games.md"))
+
+    # 本人可以改
+    owner = FakeEvent("Bot-A", "456", umo="Bot-A:GroupMessage:900")
+    assert "已修改 notebook/user-456-games.md" in run(
+        plugin.memory_edit(owner, "notebook", "user-456-games.md", "append", "", "补充")
+    )
+    # 管理员可以删
+    assert "已删除 notebook/user-456-games.md" in run(
+        plugin.memory_delete(admin, "notebook", "user-456-games.md", "过期")
+    )
+
+
+def test_agreement_edit_and_delete_refresh_every_session_opening(tmp_path):
+    """agreement 的修改、删除也要让所有会话的开头块马上刷新。"""
+    plugin = make_plugin(tmp_path)
+    event_a = FakeEvent("Bot-A", "1", umo="Bot-A:GroupMessage:900", admin=True)
+    event_b = FakeEvent("Bot-A", "2", umo="Bot-A:FriendMessage:2")
+    rt_a = run(plugin._runtime(event_a.unified_msg_origin))
+    rt_b = run(plugin._runtime(event_b.unified_msg_origin))
+    run(plugin._index_block(rt_a, event_a))
+    run(plugin._index_block(rt_b, event_b))
+
+    # 修改 agreement：两个会话都要重建快照
+    run(
+        plugin.memory_write(
+            event_a, "notebook", "rule.md", "agreement", "称呼要求", "以后叫我老大"
+        )
+    )
+    run(plugin._index_block(rt_a, event_a))
+    run(plugin._index_block(rt_b, event_b))
+    assert "已修改 notebook/rule.md" in run(
+        plugin.memory_edit(event_a, "notebook", "rule.md", "append", "", "别叫老师")
+    )
+    assert rt_a.index_loaded is False and rt_b.index_loaded is False
+
+    # 删除 agreement：同样作废全部快照，下一轮索引里不再出现它
+    run(plugin._index_block(rt_a, event_a))
+    run(plugin._index_block(rt_b, event_b))
+    assert "已删除 notebook/rule.md" in run(
+        plugin.memory_delete(event_a, "notebook", "rule.md", "过期")
+    )
+    assert rt_a.index_loaded is False and rt_b.index_loaded is False
+    block = run(plugin._index_block(rt_b, event_b))
+    assert block is None or "rule.md" not in block
+
+
+def test_unknown_type_file_is_read_and_searched_as_note(tmp_path):
+    """文件里的不认识的类型按笔记处理：读取、搜索、展示都不报错。"""
+    plugin = make_plugin(tmp_path)
+    store = notebook(plugin)
+    run(
+        store.write(
+            "legacy.md",
+            thing("legacy", description="旧类型", body="旧内容", mem_type="legacy"),
+        )
+    )
+    event = FakeEvent("Bot-A", "123")
+    read = run(plugin.memory_read(event, "notebook", "legacy.md"))
+    assert "旧内容" in read
+    result = run(plugin.memory_search(event, "旧内容", "notebook", "all"))
+    assert "legacy.md" in result and "note" in result
+    assert "（legacy" not in result

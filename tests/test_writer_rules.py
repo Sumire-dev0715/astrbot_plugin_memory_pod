@@ -30,7 +30,7 @@ def test_board_writes_require_admin():
             "op": "write",
             "scope": "board",
             "file": "notice.md",
-            "type": "reference",
+            "type": "note",
             "description": "告示",
             "content": "11 月 11 日新员工 teto 入职",
             "signature": "管理员",
@@ -62,7 +62,7 @@ def test_person_file_only_self_or_admin_can_change():
             "op": "write",
             "scope": "notebook",
             "file": "user-456.md",
-            "type": "user",
+            "type": "person",
             "description": "阿杰",
             "content": "工程师",
         }
@@ -96,31 +96,31 @@ def test_non_person_files_are_not_restricted_by_owner():
         {
             "op": "write",
             "scope": "notebook",
-            "file": "project.md",
-            "type": "project",
+            "file": "plan.md",
+            "type": "note",
             "description": "项目",
             "content": "进度",
         }
     ]
     ops, skipped = validate(raw, sender="123", admin=False)
-    assert skipped == [] and ops[0].file == "project.md"
+    assert skipped == [] and ops[0].file == "plan.md"
 
 
 def test_validation_rejects_bad_names_types_and_lengths():
     bad = [
         {"op": "write", "scope": "notebook", "file": "中文.md",
-         "type": "reference", "description": "x", "content": "y"},
+         "type": "note", "description": "x", "content": "y"},
         {"op": "write", "scope": "notebook", "file": "MEMORY.md",
-         "type": "reference", "description": "x", "content": "y"},
+         "type": "note", "description": "x", "content": "y"},
         {"op": "write", "scope": "notebook", "file": "a.md",
          "type": "journal", "description": "x", "content": "y"},
         {"op": "write", "scope": "notebook", "file": "b.md",
-         "type": "reference", "description": "", "content": "y"},
+         "type": "note", "description": "", "content": "y"},
         {"op": "write", "scope": "notebook", "file": "c.md",
-         "type": "reference", "description": "x",
+         "type": "note", "description": "x",
          "content": "z" * (pkg_writer.MAX_CONTENT_CHARS + 1)},
         {"op": "write", "scope": "unknown", "file": "d.md",
-         "type": "reference", "description": "x", "content": "y"},
+         "type": "note", "description": "x", "content": "y"},
         {"op": "edit", "scope": "notebook", "file": "missing.md",
          "mode": "append", "new": "x"},
         {"op": "delete", "scope": "notebook", "file": "missing.md"},
@@ -158,7 +158,7 @@ def test_journal_target_only_append():
     # write / delete 不能用 journal 占位名，避免造出名叫 journal.md 的普通文件
     for raw in (
         {"op": "write", "scope": "notebook", "file": "journal",
-         "type": "reference", "description": "x", "content": "y"},
+         "type": "note", "description": "x", "content": "y"},
         {"op": "delete", "scope": "notebook", "file": "journal"},
     ):
         ops, skipped = validate([raw], sender="123", admin=False)
@@ -176,7 +176,7 @@ def test_delete_of_real_journal_file_is_allowed():
     assert skipped == [] and ops[0].file == name
     ops, skipped = validate(
         [{"op": "write", "scope": "notebook", "file": name,
-          "type": "reference", "description": "x", "content": "y"}],
+          "type": "note", "description": "x", "content": "y"}],
         sender="123",
         notebook=[name],
     )
@@ -238,7 +238,7 @@ def test_person_file_name_is_case_insensitive():
             "op": "write",
             "scope": "notebook",
             "file": "USER-456.md",
-            "type": "user",
+            "type": "person",
             "description": "阿杰",
             "content": "工程师",
         }

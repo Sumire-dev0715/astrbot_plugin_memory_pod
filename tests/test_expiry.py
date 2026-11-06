@@ -41,7 +41,7 @@ def test_expires_round_trips_through_frontmatter():
     # 顶层 expires 也认；metadata 下的优先
     top = (
         "---\nname: notice\ndescription: 告示\nexpires: 2026-12-01\n"
-        "metadata:\n  type: reference\n  expires: 2026-12-02\n---\n\n正文\n"
+        "metadata:\n  type: note\n  expires: 2026-12-02\n---\n\n正文\n"
     )
     assert pkg_memstore.parse_memory(top).expires == "2026-12-02"
 
@@ -103,7 +103,7 @@ def test_memory_write_expires_only_applies_to_board(tmp_path):
             admin,
             "board",
             "notice.md",
-            "reference",
+            "note",
             "告示",
             "正文",
             expires="2026-11-11",
@@ -120,7 +120,7 @@ def test_memory_write_expires_only_applies_to_board(tmp_path):
             admin,
             "board",
             "bad.md",
-            "reference",
+            "note",
             "告示",
             "正文",
             expires="2026/11/11",
@@ -136,7 +136,7 @@ def test_memory_write_expires_only_applies_to_board(tmp_path):
             member,
             "notebook",
             "note.md",
-            "reference",
+            "note",
             "笔记",
             "正文",
             expires="不是日期",
@@ -263,7 +263,7 @@ def test_board_tool_changes_refresh_every_session(tmp_path):
 
     admin = admin_event()
     assert "已写入" in run(
-        plugin.memory_write(admin, "board", "notice.md", "reference", "告示", "新告示")
+        plugin.memory_write(admin, "board", "notice.md", "note", "告示", "新告示")
     )
     assert rt_a.index_loaded is False and rt_b.index_loaded is False
     assert "新告示" in run(plugin._index_block(rt_a, event_a))
@@ -388,7 +388,7 @@ def test_renewed_notice_returns_to_the_opening_block(tmp_path):
             admin,
             "board",
             "notice.md",
-            "reference",
+            "note",
             "续期后的告示",
             "续期后的正文",
             expires="2999-12-31",
@@ -434,7 +434,7 @@ def test_rewrite_without_expires_keeps_existing_expiry(tmp_path):
             admin,
             "board",
             "notice.md",
-            "reference",
+            "note",
             "改过的告示",
             "改过的正文",
         )
@@ -577,7 +577,7 @@ def test_rewrite_repairs_malformed_expiry_instead_of_failing(tmp_path):
             admin,
             "board",
             "notice.md",
-            "reference",
+            "note",
             "告示",
             "新正文",
         )

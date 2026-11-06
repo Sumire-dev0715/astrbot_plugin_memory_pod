@@ -258,7 +258,7 @@ def thing(
     name,
     description="合成记忆",
     body="合成正文",
-    mem_type="reference",
+    mem_type="note",
     signature="",
     expires="",
 ):
@@ -277,7 +277,7 @@ def person_file(sender_id="123", body="身份：测试用户，工程师", descr
         f"user-{sender_id}",
         description=description,
         body=body,
-        mem_type="user",
+        mem_type="person",
     )
 
 

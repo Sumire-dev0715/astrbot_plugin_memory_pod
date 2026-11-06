@@ -5,7 +5,7 @@ from __future__ import annotations
 from support import pkg_injection, pkg_memstore, pkg_origin, pkg_recall, run, thing
 
 
-def header(file, description="", body="", mem_type="reference", updated=1.0):
+def header(file, description="", body="", mem_type="note", updated=1.0):
     return pkg_memstore.MemoryHeader(
         file=file,
         name=file,
@@ -113,7 +113,7 @@ def test_indexed_refs_hide_description_in_pointer_line():
 
 def test_prepare_view_trims_and_keeps_origin_note():
     now = 1_700_000_000.0
-    content = pkg_memstore.compose_memory("user-123", "我", "user", "身份", source="456")
+    content = pkg_memstore.compose_memory("user-123", "我", "person", "身份", source="456")
     content = pkg_memstore.stamp_memory(
         content,
         now,
@@ -138,7 +138,7 @@ def test_prepare_view_trims_and_keeps_origin_note():
 
 def test_forced_profile_does_not_consume_full_text_quota(tmp_path):
     store = pkg_memstore.MemoryStore(tmp_path / "memories").notebook_scope("Bot-A")
-    run(store.write("user-123.md", thing("user-123", description="我", body="身份", mem_type="user")))
+    run(store.write("user-123.md", thing("user-123", description="我", body="身份", mem_type="person")))
     run(store.write("a.md", thing("a", description="开黑", body="周六开黑")))
     run(store.write("b.md", thing("b", description="开黑备用", body="开黑时间")))
     candidates = [pkg_recall.Candidate("notebook", header) for header in store.headers()]
@@ -187,7 +187,7 @@ def test_recall_score_ignores_origin_display_name(tmp_path):
 def test_pointer_line_marks_origin_from_other_conversation():
     """指针行也不让别的对话里的条目看起来像本地记录。"""
     now = 1_700_000_000.0
-    content = pkg_memstore.compose_memory("a", "摘要", "reference", "正文")
+    content = pkg_memstore.compose_memory("a", "摘要", "note", "正文")
     content = pkg_memstore.stamp_memory(
         content,
         now,

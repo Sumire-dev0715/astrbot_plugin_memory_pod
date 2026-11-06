@@ -99,10 +99,10 @@ def test_import_dry_run_does_not_write(tmp_path):
     assert run(scope.read("new.md")) is None
 
 
-def test_forget_stale_exempts_feedback(tmp_path):
+def test_forget_stale_exempts_agreement(tmp_path):
     scope = store(tmp_path)
     old = time.time() - 20 * 86400
-    run(scope.write("advice.md", thing("advice", body="指导", mem_type="feedback"), now=old))
+    run(scope.write("advice.md", thing("advice", body="指导", mem_type="agreement"), now=old))
     run(scope.write("note.md", thing("note", body="普通"), now=old))
     for name in ("advice.md", "note.md"):
         os.utime(scope.root / name, (old, old))
@@ -192,3 +192,36 @@ def test_memory_store_scopes_are_isolated(tmp_path):
     assert run(first.search("B 的内容")) == []
     assert "B 的钩子" not in run(first.read(pkg_memstore.INDEX_FILENAME))
     assert "A 的钩子" not in run(second.read(pkg_memstore.INDEX_FILENAME))
+
+
+def test_unknown_type_is_treated_as_note(tmp_path):
+    """文件里出现不认识的类型：按笔记处理，不报错，也不豁免遗忘。"""
+    scope = store(tmp_path)
+    old = time.time() - 20 * 86400
+    run(
+        scope.write(
+            "legacy.md",
+            thing("legacy", description="旧类型", body="旧内容", mem_type="legacy"),
+            now=old,
+        )
+    )
+    header = next(h for h in scope.headers() if h.file == "legacy.md")
+    assert header.type == "note"
+    hits = run(scope.search_hits("旧内容"))
+    assert hits and hits[0].file == "legacy.md" and hits[0].mem_type == "note"
+    assert run(scope.long_files()) == []
+
+    run(scope.write("fresh.md", thing("fresh", body="新内容")))
+    forgotten = run(scope.forget_stale(86400.0))
+    assert forgotten == ["legacy.md"]
+    assert not scope.exists("legacy.md")
+
+    # 人物档案由文件名决定：未知类型不改变它是这个人的档案
+    run(
+        scope.write(
+            "user-123.md",
+            thing("user-123", description="阿杰", body="身份", mem_type="legacy"),
+        )
+    )
+    header = next(h for h in scope.headers() if h.file == "user-123.md")
+    assert header.type == "person"

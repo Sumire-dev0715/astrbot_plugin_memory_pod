@@ -83,18 +83,18 @@ def test_model_tools_cannot_reach_audit_history_or_trash(tmp_path):
     )
     run(
         plugin.memory_write(
-            event, "notebook", "note.md", "reference", "摘要", "正文"
+            event, "notebook", "note.md", "note", "摘要", "正文"
         )
     )
     run(plugin.memory_read(event, "notebook", "note.md"))
     run(
         plugin.memory_write(
-            event, "notebook", "note.md", "reference", "摘要", "第二版"
+            event, "notebook", "note.md", "note", "摘要", "第二版"
         )
     )
     run(
         plugin.memory_write(
-            event, "notebook", "gone.md", "reference", "摘要", "要删"
+            event, "notebook", "gone.md", "note", "摘要", "要删"
         )
     )
     run(plugin.memory_delete(event, "notebook", "gone.md", "清理"))

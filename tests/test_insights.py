@@ -18,7 +18,7 @@ def run(coro):
 def memory_md(
     name: str,
     description: str = "描述",
-    mem_type: str = "user",
+    mem_type: str = "note",
     body: str = "正文。",
     updated: str = "",
 ) -> str:
@@ -114,7 +114,7 @@ def test_scope_edit_section_goes_through_history(tmp_path):
     original = memory_md(
         "user-1",
         "测试人物",
-        "user",
+        "person",
         "## 基本信息\n\n职业：工程师\n\n## 作息与习惯\n\n旧作息，晚睡\n",
     )
     run(store.write("user-1.md", original, actor="Bot-A"))
@@ -194,7 +194,7 @@ def test_section_edit_rejects_frontmatter_comment_without_touching_file(tmp_path
         "name: x\n"
         "description: 甲\n"
         "metadata:\n"
-        "  type: user\n"
+        "  type: person\n"
         "# 用户档案\n"
         "---\n"
         "\n"
@@ -216,7 +216,7 @@ def test_scope_edit_section_preserves_crlf_end_to_end(tmp_path):
     store = ScopeStore(tmp_path)
     raw = (
         "---\r\nname: a\r\ndescription: 测试\r\nmetadata:\r\n"
-        "  type: user\r\n---\r\n\r\n"
+        "  type: person\r\n---\r\n\r\n"
         "## 甲\r\n旧\r\n\r\n## 乙\r\n乙正文\r\n"
     )
     (tmp_path / "a.md").write_bytes(raw.encode("utf-8"))
@@ -231,7 +231,7 @@ def test_scope_edit_section_preserves_crlf_end_to_end(tmp_path):
 def test_stamp_memory_preserves_crlf_frontmatter():
     raw = (
         "---\r\nname: a\r\ndescription: 测试\r\nmetadata:\r\n"
-        "  type: user\r\n---\r\n\r\n正文\r\n"
+        "  type: person\r\n---\r\n\r\n正文\r\n"
     )
     stamped = memstore.stamp_memory(raw, time.time(), "111")
     assert b"\n" not in stamped.encode("utf-8").replace(b"\r\n", b"")
@@ -289,7 +289,7 @@ def test_search_ranking_non_journal_then_matched_then_updated(tmp_path):
         memory_md(
             "journal-2026-01-01",
             "日志",
-            "project",
+            "note",
             body="alpha beta",
             updated="2026-01-04",
         ),
@@ -315,7 +315,7 @@ def test_search_is_not_crowded_out_by_daily_files(tmp_path):
         write_file(
             tmp_path,
             f"journal-2026-01-{day:02d}.md",
-            memory_md(f"journal-2026-01-{day:02d}", "日志", "project", body="项目 日志"),
+            memory_md(f"journal-2026-01-{day:02d}", "日志", "note", body="项目 日志"),
         )
     store = ScopeStore(tmp_path)
 
@@ -346,7 +346,7 @@ def test_search_hit_has_type_updated_and_two_snippets(tmp_path):
     assert len(hits) == 1
     hit = hits[0]
     assert hit.file == "a.md"
-    assert hit.mem_type == "user"
+    assert hit.mem_type == "note"
     assert hit.updated == time.mktime((2026, 2, 3, 0, 0, 0, 0, 0, -1))
     assert len(hit.snippets) == 2
     assert hit.snippets[0].endswith("…")
@@ -363,7 +363,7 @@ def test_search_forgotten_ranks_like_active_results(tmp_path):
         write_file(
             tmp_path,
             f"journal-2026-01-{day:02d}.md",
-            memory_md(f"journal-2026-01-{day:02d}", "日志", "project", body="项目 日志"),
+            memory_md(f"journal-2026-01-{day:02d}", "日志", "note", body="项目 日志"),
         )
     names = store.list_files()
 
@@ -383,7 +383,7 @@ def test_search_forgotten_ranks_like_active_results(tmp_path):
 
 def test_snippet_window_keeps_hit_beyond_160_chars():
     line = "x" * 300 + " alpha"
-    hit = insights.build_hit("a.md", "user", 0.0, line, ["alpha"])
+    hit = insights.build_hit("a.md", "person", 0.0, line, ["alpha"])
     assert hit is not None
     snippet = hit.snippets[0]
     assert "alpha" in snippet
@@ -418,18 +418,18 @@ def test_dangling_links_normalize_and_ignore_existing():
 
 
 def test_long_file_size_threshold_is_strict_and_journal_ignores_dates():
-    assert insights.long_file_reasons("a.md", "user", "短正文", 8 * 1024) == []
-    reasons = insights.long_file_reasons("a.md", "user", "短正文", 8 * 1024 + 1)
+    assert insights.long_file_reasons("a.md", "person", "短正文", 8 * 1024) == []
+    reasons = insights.long_file_reasons("a.md", "person", "短正文", 8 * 1024 + 1)
     assert reasons == ["约 8.1KB，超过 8KB"]
 
     body = "2026-01-01 " * 20
-    reasons = insights.long_file_reasons("a.md", "user", body, 100)
+    reasons = insights.long_file_reasons("a.md", "person", body, 100)
     assert reasons == ["正文里有 20 个日期"]
 
     # 日志只看体积，日期再多也不提示
-    assert insights.long_file_reasons("journal-2026-11-03.md", "project", body, 100) == []
+    assert insights.long_file_reasons("journal-2026-11-03.md", "note", body, 100) == []
     journal_reasons = insights.long_file_reasons(
-        "journal-2026-11-03.md", "project", body, 8 * 1024 + 1
+        "journal-2026-11-03.md", "note", body, 8 * 1024 + 1
     )
     assert len(journal_reasons) == 1 and "超过 8KB" in journal_reasons[0]
 
@@ -438,8 +438,8 @@ def test_date_threshold_is_fifteen():
     fifteen = "2026-01-01 " * 15
     sixteen = "2026-01-01 " * 16
     assert insights.count_dates(fifteen) == 15
-    assert insights.long_file_reasons("a.md", "user", fifteen, 100) == []
-    reasons = insights.long_file_reasons("a.md", "user", sixteen, 100)
+    assert insights.long_file_reasons("a.md", "person", fifteen, 100) == []
+    reasons = insights.long_file_reasons("a.md", "person", sixteen, 100)
     assert any("16 个日期" in reason for reason in reasons)
     # 非日期形态的编号不算
     assert insights.count_dates("编号 20260101 和 2026-1-1") == 0
@@ -459,7 +459,7 @@ def test_long_files_lists_only_over_threshold(tmp_path):
         memory_md(
             "journal-2026-11-03",
             "日志",
-            "project",
+            "note",
             body="2026-01-01 " * 20,
         ),
     )
@@ -477,5 +477,5 @@ def test_long_files_lists_only_over_threshold(tmp_path):
 
 
 def test_is_journal_names_still_used_for_ordering():
-    assert journal.is_journal("journal-2026-11-03.md", "project")
-    assert not journal.is_journal("daily-2026-11-03.md", "project")
+    assert journal.is_journal("journal-2026-11-03.md", "note")
+    assert not journal.is_journal("daily-2026-11-03.md", "note")

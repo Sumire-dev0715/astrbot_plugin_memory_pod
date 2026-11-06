@@ -186,7 +186,7 @@ def test_rename_file_keeps_content(tmp_path):
             "file": "new.md",
             "oldFile": "old.md",
             "mode": "fields",
-            "type": "reference",
+            "type": "note",
             "description": "新",
             "body": "正文",
             "baseMtime": mtime,

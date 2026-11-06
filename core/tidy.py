@@ -238,14 +238,15 @@ async def propose(
         content = await store.read(header.file)
         if content:
             files.append((header, content))
-    prompt, skipped = consolidate.build_prompt(label, files)
+    is_board = store.layer == memstore.SCOPE_BOARD
+    prompt, skipped = consolidate.build_prompt(label, files, board=is_board)
     text, attempts = await call_model(prompt)
     if not text:
         raise TidyError(
             "整理模型调用失败：" + ("；".join(attempts) or "没有可用的模型提供商")
         )
     existing = {h.file for h in headers}
-    ops = consolidate.parse_operations(text, existing)
+    ops = consolidate.parse_operations(text, existing, board=is_board)
     if ops is None:
         raise TidyError("模型返回的整理方案无法解析，请重试")
     # 日记只作整理参考，不允许整理改写或删除：流水账过时与否不该由一次

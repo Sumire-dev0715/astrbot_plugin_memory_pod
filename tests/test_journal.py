@@ -20,7 +20,7 @@ def run(coro):
 
 
 def memory_md(
-    name: str, description: str, mem_type: str = "project", body: str = "正文。"
+    name: str, description: str, mem_type: str = "note", body: str = "正文。"
 ) -> str:
     return (
         "---\n"
@@ -33,7 +33,7 @@ def memory_md(
     )
 
 
-def header(file: str, description: str = "", mem_type: str = "user") -> MemoryHeader:
+def header(file: str, description: str = "", mem_type: str = "person") -> MemoryHeader:
     text = (
         f"---\nname: {file[:-3]}\ndescription: {description}\n---\n\n{description}"
     ).lower()
@@ -49,7 +49,7 @@ def header(file: str, description: str = "", mem_type: str = "user") -> MemoryHe
 
 
 def cand(
-    file: str, description: str = "", mem_type: str = "user", scope: str = "session"
+    file: str, description: str = "", mem_type: str = "person", scope: str = "session"
 ) -> Candidate:
     return Candidate(scope, header(file, description, mem_type))
 
@@ -61,14 +61,14 @@ def test_is_journal_by_type_and_filename():
     # frontmatter 的 type 是 journal：文件名随意
     assert journal.is_journal("notes.md", "journal")
     assert journal.is_journal("notes.md", "JOURNAL")
-    # 文件名带日期：兼容上游老文件写的 type: project
-    assert journal.is_journal("journal-2026-11-03.md", "project")
+    # 文件名带日期：即使 frontmatter 写着别的类型也按日记处理
+    assert journal.is_journal("journal-2026-11-03.md", "note")
     assert journal.is_journal("journal-2026-10-15.md")
     assert journal.is_journal_name("journal-2026-11-03.md")
     # 只有日期在这个位置才算，普通名字里出现 journal 不算
-    assert not journal.is_journal("project-journal-log.md", "project")
-    assert not journal.is_journal("journal-summary.md", "project")
-    assert not journal.is_journal("journal-2026-11-3.md", "project")
+    assert not journal.is_journal("plan-journal-log.md", "note")
+    assert not journal.is_journal("journal-summary.md", "note")
+    assert not journal.is_journal("journal-2026-11-3.md", "note")
 
 
 def test_journal_date_from_filename():
@@ -346,12 +346,12 @@ def test_select_by_keywords_excludes_journals_even_when_forced():
     cands = [
         cand("journal-2026-11-03.md", "今天聊了开黑", "journal"),
         cand("notes.md", "开黑流水账", "journal"),
-        cand("project-game.md", "每周六晚上的开黑活动"),
+        cand("plan-game.md", "每周六晚上的开黑活动"),
     ]
     chosen = recall.select_by_keywords(
         cands, "开黑", ["journal-2026-11-03.md", "notes.md"], 5
     )
-    assert [item.header.file for item in chosen] == ["project-game.md"]
+    assert [item.header.file for item in chosen] == ["plan-game.md"]
 
 
 
@@ -471,7 +471,7 @@ def test_management_page_offers_journal_type():
         Path(__file__).resolve().parent.parent / "pages" / "memory" / "app.js"
     ).read_text("utf-8")
     assert (
-        'const TYPES = ["user", "feedback", "project", "reference", "journal"];'
+        'const TYPES = ["person", "agreement", "note", "journal"];'
         in app_js
     )
     assert 'type_journal: "日记"' in app_js
@@ -484,10 +484,10 @@ def test_management_page_offers_journal_type():
 def test_load_index_folds_journal_lines_in_injection_view(tmp_path):
     """load_index 只读地折叠注入视图；磁盘上的索引文件保持原样。"""
     store = ScopeStore(tmp_path)
-    a = memory_md("alpha", "甲", "project")
-    b = memory_md("beta", "乙", "project")
-    d1 = memory_md("journal-2026-11-01", "一号", "project")
-    d2 = memory_md("journal-2026-11-02", "二号", "project")
+    a = memory_md("alpha", "甲", "note")
+    b = memory_md("beta", "乙", "note")
+    d1 = memory_md("journal-2026-11-01", "一号", "note")
+    d2 = memory_md("journal-2026-11-02", "二号", "note")
     (tmp_path / "alpha.md").write_text(a, "utf-8")
     (tmp_path / "beta.md").write_text(b, "utf-8")
     (tmp_path / "journal-2026-11-01.md").write_text(d1, "utf-8")

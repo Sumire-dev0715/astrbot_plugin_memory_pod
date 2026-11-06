@@ -53,10 +53,12 @@ def test_guidance_keeps_reminder_actionable():
 
 
 def test_write_rules_pin_person_profile_filenames():
-    """人物档案保护只认 user-<数字ID>.md，规范必须给出私密档案的文件名。"""
+    """人物档案规范必须给出主档案与主题档案的文件名和 person 类型。"""
     text = pkg_prompts.memory_guidance()
-    assert "公开部分（称呼、身份、爱好）放小本本 user-<数字ID>.md" in text
-    assert "私密部分放悄悄话的 user-<数字ID>.md" in text
+    assert "主档案 user-<数字ID>.md" in text
+    assert "主题档案 user-<数字ID>-<主题>.md" in text
+    assert "type=person" in text
+    assert "公开部分放小本本，私密部分放悄悄话" in text
 
 
 def test_ask_rule_only_in_write_rules():
@@ -113,7 +115,7 @@ def test_trim_body_keeps_head_and_tail():
 def test_prepare_view_strips_frontmatter_and_renders_origin_note():
     now = 1_700_000_000.0
     content = pkg_memstore.compose_memory(
-        "user-123", "阿杰", "user", "身份：工程师", source="456"
+        "user-123", "阿杰", "person", "身份：工程师", source="456"
     )
     content = pkg_memstore.stamp_memory(
         content,
@@ -142,7 +144,7 @@ def test_prepare_view_strips_frontmatter_and_renders_origin_note():
 
 def test_prepare_view_origin_note_absent_without_origin_or_same_conversation():
     now = 1_700_000_000.0
-    plain = pkg_memstore.compose_memory("a", "摘要", "reference", "正文", source="456")
+    plain = pkg_memstore.compose_memory("a", "摘要", "note", "正文", source="456")
     view = pkg_injection.prepare_view("notebook/a.md", plain, now, now=now)
     assert view.origin_note == ""
 

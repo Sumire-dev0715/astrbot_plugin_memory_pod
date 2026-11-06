@@ -10,7 +10,7 @@ MEMORY.md 在磁盘上的格式不变，仍是 ``- [名称](文件.md) — 描�
 1. 日记块整块让位（日记是流水账，需要时按日期 memory_read）；
 2. 非日记条目按最近一次用到的时间从旧到新丢；使用统计里没有的按
    ``updated`` 算；
-3. feedback 类最后丢——行为指导长期没被提起不代表失效。
+3. agreement 类最后丢——约定长期没被提起不代表失效。
 
 剩下的行保持索引里的原顺序，末尾注明还有多少条未加载、可用
 memory_search 检索。如果可丢条目全部丢完仍然超限（索引里只有分组标题、
@@ -33,7 +33,7 @@ from . import journal
 _INDEX_LINE_RE = re.compile(r"^\s*-\s*\[[^\]]*\]\(([^()\s]+\.md)\)(.*)$")
 # 注入时已渲染成紧凑行的条目：- 文件.md — 描述
 _PLAIN_LINE_RE = re.compile(r"^\s*-\s+([^\s—]+\.md)(?:\s+—.*)?\s*$")
-_FEEDBACK_TYPE = "feedback"
+_AGREEMENT_TYPE = "agreement"
 
 
 @dataclass(frozen=True)
@@ -93,9 +93,9 @@ def _idle_time(target: str, idle_times: dict[str, float] | None) -> float:
         return 0.0
 
 
-def _is_feedback(target: str, file_types: dict[str, str] | None) -> bool:
+def _is_agreement(target: str, file_types: dict[str, str] | None) -> bool:
     return (
-        (file_types or {}).get(target, "").strip().lower() == _FEEDBACK_TYPE
+        (file_types or {}).get(target, "").strip().lower() == _AGREEMENT_TYPE
     )
 
 
@@ -166,7 +166,7 @@ def render_for_injection(
 
     "还有 N 条未加载"的说明也计入 200 行 / 25KB 上限：它是注入文本的
     一部分，不能让最终结果因为多出这一行而超限。为它腾地方时仍按原来的
-    优先级继续丢行（日记 → 最久没用的非 feedback → feedback → 非条目行）。
+    优先级继续丢行（日记 → 最久没用的非 agreement → agreement → 非条目行）。
     """
     lines = [compact_index_line(line) for line in (raw or "").splitlines()]
     # 首尾空行不占注入预算，也不影响日记块的识别
@@ -245,7 +245,7 @@ def render_for_injection(
         note, dropped_entries = note_for(dropped)
 
         if not fits(dropped, note):
-            # 非日记条目：feedback 排最后；同组内按最近用到的时间从旧到新。
+            # 非日记条目：agreement 排最后；同组内按最近用到的时间从旧到新。
             candidates: list[tuple[int, float, int]] = []
             for index, line in enumerate(lines):
                 if index in dropped:
@@ -253,7 +253,7 @@ def render_for_injection(
                 target = entry_target(line)
                 if not target:
                     continue
-                rank = 1 if _is_feedback(target, file_types) else 0
+                rank = 1 if _is_agreement(target, file_types) else 0
                 candidates.append(
                     (rank, _idle_time(target, idle_times), index)
                 )

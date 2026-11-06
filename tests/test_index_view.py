@@ -17,7 +17,7 @@ def memory(
     name: str,
     description: str,
     updated: str = "2026-01-01 12:00",
-    mem_type: str = "user",
+    mem_type: str = "person",
 ) -> str:
     return (
         "---\n"
@@ -86,18 +86,18 @@ def test_journal_block_is_dropped_before_any_normal_entry():
     assert "还有 5 条未加载，可用 memory_search 找到" in view.text
 
 
-def test_oldest_entries_are_dropped_first_and_feedback_last():
+def test_oldest_entries_are_dropped_first_and_agreement_last():
     raw = "\n".join(
         lines("a.md", "b.md", "c.md", "fb.md", "fb2.md")
     )
     view = index_view.render_for_injection(
         raw,
-        file_types={"fb.md": "feedback", "fb2.md": "feedback"},
+        file_types={"fb.md": "agreement", "fb2.md": "agreement"},
         idle_times={"a.md": 100.0, "b.md": 300.0, "c.md": 200.0,
                     "fb.md": 1.0, "fb2.md": 50.0},
         max_lines=4,
     )
-    # 丢掉最久没用的 a、c（b 更晚用过）；feedback 没被丢；
+    # 丢掉最久没用的 a、c（b 更晚用过）；agreement 没被丢；
     # 上限里的 1 行留给"还有 N 条"说明。
     assert view.text.splitlines()[:3] == [
         "- b.md — b.md 的描述",
@@ -108,10 +108,10 @@ def test_oldest_entries_are_dropped_first_and_feedback_last():
     assert "还有 2 条未加载" in view.text
     assert view.dropped_entries == 2
 
-    # 名额更紧时 b 也丢，最后才轮到 feedback
+    # 名额更紧时 b 也丢，最后才轮到 agreement
     tighter = index_view.render_for_injection(
         raw,
-        file_types={"fb.md": "feedback", "fb2.md": "feedback"},
+        file_types={"fb.md": "agreement", "fb2.md": "agreement"},
         idle_times={"a.md": 100.0, "b.md": 300.0, "c.md": 200.0,
                     "fb.md": 1.0, "fb2.md": 50.0},
         max_lines=3,
@@ -266,7 +266,7 @@ def test_write_receipt_uses_compact_injection_size(tmp_path):
     assert "注入上限" not in report.message
 
 
-def test_feedback_is_dropped_last_via_load_index(tmp_path, monkeypatch):
+def test_agreement_is_dropped_last_via_load_index(tmp_path, monkeypatch):
     long_desc = "描" * 100
     note = index_view._drop_note(1)
     one_line = (
@@ -274,22 +274,22 @@ def test_feedback_is_dropped_last_via_load_index(tmp_path, monkeypatch):
         + 1
     )
     monkeypatch.setattr(memstore, "INDEX_MAX_BYTES", one_line + len(note.encode("utf-8")) + 1)
-    (tmp_path / "user.md").write_text(
-        memory("user", long_desc, "2026-06-01 12:00", "user"), "utf-8"
+    (tmp_path / "profile.md").write_text(
+        memory("profile", long_desc, "2026-06-01 12:00", "person"), "utf-8"
     )
     (tmp_path / "fb.md").write_text(
-        memory("fb", long_desc, "2026-01-01 12:00", "feedback"), "utf-8"
+        memory("fb", long_desc, "2026-01-01 12:00", "agreement"), "utf-8"
     )
     (tmp_path / INDEX_FILENAME).write_text(
         "\n".join(
-            format_index_line(name, long_desc) for name in ("user.md", "fb.md")
+            format_index_line(name, long_desc) for name in ("profile.md", "fb.md")
         ) + "\n",
         "utf-8",
     )
     store = ScopeStore(tmp_path)
     snap = run(store.load_index())
-    # feedback 的 updated 更旧，但类型 priority 让它最后才被丢
-    assert "fb.md" in snap.text and "user.md" not in snap.text
+    # agreement 的 updated 更旧，但类型 priority 让它最后才被丢
+    assert "fb.md" in snap.text and "profile.md" not in snap.text
     assert "还有 1 条未加载" in snap.text
 
 

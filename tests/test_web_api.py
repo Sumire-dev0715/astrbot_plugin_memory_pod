@@ -192,7 +192,19 @@ def test_board_publish_requires_signature_and_writes_it(tmp_path):
     doc = pkg_memstore.parse_memory(content)
     assert doc.signature == "管理员"
     assert doc.body == "11 月 11 日 teto 入职"
+    # 留言板告示没有类型（PLAN 3.10.1）
+    assert doc.type == ""
+    assert "type:" not in content
     assert ("board", None) in plugin.invalidated
+    # 列表与详情也不显示类型
+    query(scope="board", key="")
+    item = next(
+        item for item in raw(route(dashboard, "scope_detail"))["files"]
+        if item["file"] == name
+    )
+    assert item["type"] == ""
+    query(scope="board", key="", file=name)
+    assert raw(route(dashboard, "file_detail"))["type"] == ""
 
 
 def test_board_file_save_rejects_missing_signature(tmp_path):
@@ -203,7 +215,7 @@ def test_board_file_save_rejects_missing_signature(tmp_path):
             "key": "",
             "file": "notice.md",
             "mode": "fields",
-            "type": "reference",
+            "type": "note",
             "description": "告示",
             "body": "正文",
             "signature": "",
@@ -223,13 +235,17 @@ def test_board_raw_save_cannot_bypass_signature(tmp_path):
             "file": "notice.md",
             "mode": "raw",
             "signature": "管理员",
-            "content": "---\nname: notice\ndescription: 告示\nmetadata:\n  type: reference\n---\n\n正文\n",
+            "content": "---\nname: notice\ndescription: 告示\nmetadata:\n  type: note\n---\n\n正文\n",
         }
     )
     result = route(dashboard, "file_save")
     assert result["status"] == "ok", result
     content = call(plugin._store.board_scope().read("notice.md"))
-    assert pkg_memstore.parse_memory(content).signature == "管理员"
+    doc = pkg_memstore.parse_memory(content)
+    assert doc.signature == "管理员"
+    # raw 原文里残留的 type 也会被去掉：留言板没有类型
+    assert doc.type == ""
+    assert "type:" not in content
 
     body(
         {
@@ -249,7 +265,7 @@ def test_board_raw_save_cannot_bypass_signature(tmp_path):
 def test_person_profile_can_be_edited_on_management_page(tmp_path):
     plugin, dashboard = setup(tmp_path)
     notebook = plugin._store.notebook_scope("Bot-A")
-    call(notebook.write("user-456.md", thing("user-456", body="旧", mem_type="user")))
+    call(notebook.write("user-456.md", thing("user-456", body="旧", mem_type="person")))
     body(
         {
             "scope": "notebook",
@@ -257,7 +273,7 @@ def test_person_profile_can_be_edited_on_management_page(tmp_path):
             "file": "user-456.md",
             "oldFile": "user-456.md",
             "mode": "fields",
-            "type": "user",
+            "type": "person",
             "description": "阿杰",
             "body": "新身份",
         }
@@ -265,6 +281,78 @@ def test_person_profile_can_be_edited_on_management_page(tmp_path):
     result = route(dashboard, "file_save")
     assert result["status"] == "ok", result
     assert "新身份" in call(notebook.read("user-456.md"))
+
+
+def test_board_file_save_ignores_type_and_writes_no_type(tmp_path):
+    """管理页编辑留言板时没有类型：表单里的值忽略，文件里不写 type。"""
+    plugin, dashboard = setup(tmp_path)
+    body(
+        {
+            "scope": "board",
+            "key": "",
+            "file": "notice.md",
+            "mode": "fields",
+            "type": "agreement",
+            "description": "告示",
+            "body": "正文",
+            "signature": "管理员",
+        }
+    )
+    result = route(dashboard, "file_save")
+    assert result["status"] == "ok", result
+    content = call(plugin._store.board_scope().read("notice.md"))
+    assert "type:" not in content
+    assert pkg_memstore.parse_memory(content).type == ""
+
+
+def test_file_save_rejects_person_type_filename_mismatch(tmp_path):
+    """管理页写入同样执行人物档案的类型/文件名一致性。"""
+    plugin, dashboard = setup(tmp_path)
+    notebook = plugin._store.notebook_scope("Bot-A")
+    body(
+        {
+            "scope": "notebook",
+            "key": "Bot-A",
+            "file": "alice.md",
+            "mode": "fields",
+            "type": "person",
+            "description": "档案",
+            "body": "正文",
+        }
+    )
+    result = route(dashboard, "file_save")
+    assert result["status"] == "error"
+    assert "类型和文件名必须对上" in result["message"]
+
+    body(
+        {
+            "scope": "notebook",
+            "key": "Bot-A",
+            "file": "user-456.md",
+            "mode": "fields",
+            "type": "note",
+            "description": "档案",
+            "body": "正文",
+        }
+    )
+    result = route(dashboard, "file_save")
+    assert result["status"] == "error"
+    assert "类型和文件名必须对上" in result["message"]
+
+    body(
+        {
+            "scope": "notebook",
+            "key": "Bot-A",
+            "file": "user-456-games.md",
+            "mode": "fields",
+            "type": "person",
+            "description": "游戏",
+            "body": "喜欢英雄联盟",
+        }
+    )
+    result = route(dashboard, "file_save")
+    assert result["status"] == "ok", result
+    assert pkg_memstore.parse_memory(call(notebook.read("user-456-games.md"))).type == "person"
 
 
 def test_whisper_scopes_are_addressable_by_key_only(tmp_path):
@@ -305,7 +393,7 @@ def test_consolidate_apply_cannot_touch_other_scope(tmp_path):
             "key": "a",
             "operations": [
                 {"op": "delete", "file": "other.md", "reason": "越界"},
-                {"op": "write", "file": "secret.md", "type": "reference",
+                {"op": "write", "file": "secret.md", "type": "note",
                  "description": "新的", "content": "改写", "baseMtime": base},
             ],
         }
@@ -330,7 +418,7 @@ def test_board_consolidate_keeps_signature_through_preview_and_apply(tmp_path):
             {
                 "op": "write",
                 "file": "notice.md",
-                "type": "reference",
+                "type": "note",
                 "description": "入职",
                 "content": "整理后的告示",
                 "reason": "精简",
@@ -441,7 +529,7 @@ def test_file_detail_origin_includes_group_name_from_audit(tmp_path):
     assert raw(route(dashboard, "file_detail"))["origin"] == []
 
 
-def test_management_page_can_write_feedback_without_admin_gate(tmp_path):
+def test_management_page_can_write_agreement_without_admin_gate(tmp_path):
     plugin, dashboard = setup(tmp_path)
     body(
         {
@@ -449,7 +537,7 @@ def test_management_page_can_write_feedback_without_admin_gate(tmp_path):
             "key": "Bot-A",
             "file": "rule.md",
             "mode": "fields",
-            "type": "feedback",
+            "type": "agreement",
             "description": "对机器人的要求",
             "body": "以后先问我",
         }
@@ -458,7 +546,7 @@ def test_management_page_can_write_feedback_without_admin_gate(tmp_path):
     assert result["status"] == "ok", result
     content = call(plugin._store.notebook_scope("Bot-A").read("rule.md"))
     doc = pkg_memstore.parse_memory(content)
-    assert doc.type == "feedback"
+    assert doc.type == "agreement"
     # 管理页写入不算来源：没有 origin，别的对话里不会带来源标注
     assert doc.origin == ""
     assert pkg_origin.note("notebook/rule.md", doc.origin, "other") == ""
@@ -470,7 +558,7 @@ def test_management_page_can_write_feedback_without_admin_gate(tmp_path):
             "file": "rule.md",
             "oldFile": "rule.md",
             "mode": "fields",
-            "type": "feedback",
+            "type": "agreement",
             "description": "对机器人的要求",
             "body": "改成以后先问我再动手",
         }
@@ -601,7 +689,7 @@ def test_board_expiry_can_be_renewed_from_file_save(tmp_path):
             "file": "notice.md",
             "oldFile": "notice.md",
             "mode": "fields",
-            "type": "reference",
+            "type": "note",
             "description": "告示",
             "body": "正文",
             "signature": "管理员",
@@ -668,7 +756,7 @@ def test_consolidate_ignores_expires_outside_board(tmp_path):
                 {
                     "op": "write",
                     "file": "new.md",
-                    "type": "reference",
+                    "type": "note",
                     "description": "新笔记",
                     "content": "正文",
                     "expires": "2999-12-31",
@@ -705,7 +793,7 @@ def test_board_save_tolerates_unchanged_malformed_expiry(tmp_path):
             "file": "notice.md",
             "oldFile": "notice.md",
             "mode": "fields",
-            "type": "reference",
+            "type": "note",
             "description": "告示",
             "body": "改过的正文",
             "signature": "管理员",
@@ -727,7 +815,7 @@ def test_board_save_tolerates_unchanged_malformed_expiry(tmp_path):
             "file": "notice.md",
             "oldFile": "notice.md",
             "mode": "fields",
-            "type": "reference",
+            "type": "note",
             "description": "告示",
             "body": "再改",
             "signature": "管理员",
@@ -761,7 +849,7 @@ def test_board_save_empty_expires_clears_date(tmp_path):
             "file": "notice.md",
             "oldFile": "notice.md",
             "mode": "fields",
-            "type": "reference",
+            "type": "note",
             "description": "告示",
             "body": "正文",
             "signature": "管理员",
@@ -800,7 +888,7 @@ def test_file_save_rename_keeps_origin_and_source(tmp_path):
             "file": "renamed.md",
             "oldFile": "old.md",
             "mode": "fields",
-            "type": "reference",
+            "type": "note",
             "description": "改过名的文件",
             "body": "正文不变",
         }
