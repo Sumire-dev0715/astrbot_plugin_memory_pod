@@ -46,6 +46,13 @@ def test_collect_sizes_has_required_fields():
     assert sizes["tools"]["memory_edit"]["description"] > 100
 
 
+def test_index_shell_counts_board_and_profile_headings():
+    sizes = prompt_sizes.collect_sizes()
+    # 旧实现只量包裹与小本本/悄悄话标题（约 90 字），漏掉留言板标题、
+    # 人物档案标题和“其余告示只列标题”提示；补上后至少 130 字。
+    assert sizes["index_shell"] >= 130
+
+
 def test_cli_json_output():
     result = subprocess.run(
         [sys.executable, str(ROOT / "scripts" / "prompt_sizes.py"), "--json"],

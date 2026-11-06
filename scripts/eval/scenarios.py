@@ -1012,7 +1012,7 @@ def ambiguous_ask_where() -> Scenario:
         names_layer = any(
             word in turn.reply for word in ("悄悄话", "小本本", "哪一层", "放哪")
         )
-        # 提问不一定带问号："你定一下""告诉我"同样是在等用户确认
+        # 提问不一定带问号；但“我再确认一下”是模型自己确认，不能算在问用户
         asked = any(
             word in turn.reply
             for word in (
@@ -1020,10 +1020,12 @@ def ambiguous_ask_where() -> Scenario:
                 "?",
                 "吗",
                 "你定",
+                "你希望",
+                "你确认",
+                "等你确认",
+                "等你回复",
                 "告诉我",
                 "要不要",
-                "确认一下",
-                "确认下",
             )
         )
         if not (names_layer and asked):

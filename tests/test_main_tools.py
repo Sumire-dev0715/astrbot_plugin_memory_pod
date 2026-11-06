@@ -31,6 +31,16 @@ def test_five_memory_tools_registered():
     }
 
 
+def test_memory_edit_old_text_description_marks_section_required():
+    """section 模式必须给小节标题，参数说明不能写成可空。"""
+    from scripts import prompt_sizes
+
+    schema = prompt_sizes.tool_schema(main.MemoryPodPlugin.memory_edit)
+    desc = schema["function"]["parameters"]["properties"]["old_text"]["description"]
+    assert "section 的小节标题（必填）" in desc
+    assert "section 的小节标题（可空）" not in desc
+
+
 def test_board_readable_by_every_conversation(tmp_path):
     plugin = make_plugin(tmp_path)
     run(

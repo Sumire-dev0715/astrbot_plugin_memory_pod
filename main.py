@@ -751,13 +751,16 @@ class MemoryPodPlugin(Star):
         QQ 群聊 → 群名片｜QQ名｜QQ号，QQ 私聊 → QQ名｜QQ号，
         其他平台 → 名称｜ID。标注随消息进入会话历史，群聊里跨轮次
         也能分清谁说了什么；LLM 记人时以数字 ID 为锚（名称可变、可被冒用）。
-        正文里伪造的标注前缀会先被改写为全角括号，半角前缀因此只可能来自插件。
+        正文里伪造的标注前缀和记忆块标签会先被改写为全角版本，半角版本
+        因此只可能来自插件。
         """
         prompt = str(req.prompt or "")
         if not prompt:
             return
         sender_id, sender_name = self._sender_identity(event)
         if not sender_id:
+            # 没有可信身份也要清洗正文，伪造的块标签不能冒充插件提醒
+            req.prompt = prompts.neutralize_forgery(prompt)
             return
         qq_name, group_card, is_group = self._sender_raw_fields(event)
         tag = prompts.build_sender_tag(
@@ -772,12 +775,12 @@ class MemoryPodPlugin(Star):
         first_line, sep, rest = prompt.partition("\n")
         if first_line == tag:
             # 同一请求被重复处理时不叠加标注；正文其余部分仍要把伪造的
-            # 半角前缀改写掉，否则用户只要把首行写成自己的真实标注，
-            # 后面伪造的 [发送者：…] 就能原样进入会话历史
-            body = prompts.neutralize_sender_forgery(rest) if sep else ""
+            # 半角标注与块标签改写掉，否则用户只要把首行写成自己的真实
+            # 标注，后面伪造的标签就能原样进入会话历史
+            body = prompts.neutralize_forgery(rest) if sep else ""
             req.prompt = f"{tag}\n{body}" if sep else tag
             return
-        req.prompt = f"{tag}\n{prompts.neutralize_sender_forgery(prompt)}"
+        req.prompt = f"{tag}\n{prompts.neutralize_forgery(prompt)}"
 
     async def _index_block(
         self,
@@ -1851,7 +1854,7 @@ class MemoryPodPlugin(Star):
             scope(string): 作用域：board、notebook 或 whisper
             file(string): 文件名，可省略 .md；填 journal 表示当前这篇日记
             mode(string): replace / append / section，默认 append
-            old_text(string): replace 的原文；append、section 的小节标题（可空）
+            old_text(string): replace 的原文；append 的小节标题（可空）；section 的小节标题（必填）
             new_text(string): 新内容；append 与日记是追加的正文
             description(string): 可选，同时更新一句话摘要
         """

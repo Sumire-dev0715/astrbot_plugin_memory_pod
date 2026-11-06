@@ -320,6 +320,18 @@ def test_ambiguous_check_accepts_confirmation_without_question_mark(tmp_path):
     run.env.turns[0].reply = "这条放悄悄话还是小本本，你定一下，我再写。"
     ok, detail = check(run.env)
     assert ok, detail
+    # “我再确认一下”是模型自己确认，不是等用户确认
+    for reply in (
+        "这条放小本本还是悄悄话，我再确认一下。",
+        "悄悄话还是小本本，我确认一下再写。",
+    ):
+        run.env.turns[0].reply = reply
+        ok, _detail = check(run.env)
+        assert not ok, reply
+    # 明确让用户确认的回复仍然通过
+    run.env.turns[0].reply = "你确认一下放哪层，我再写。"
+    ok, detail = check(run.env)
+    assert ok, detail
     # 只声明放在哪、没有等用户确认，仍然不算问过
     run.env.turns[0].reply = "我记在悄悄话了，你说的换工作。"
     ok, _detail = check(run.env)

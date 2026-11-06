@@ -119,6 +119,23 @@ def _recall_shell(recall_mod, injection_mod, prompts) -> int:
     return len(block) - len(entry)
 
 
+def _index_shell(injection_mod, prompts) -> int:
+    """开头块的固定外壳：包裹、数据声明、各段标题与留言板的超限提示。
+
+    build_opening_block 的占位留言板不经过 render_board_notices，量不到
+    “# 留言板”和“其余告示只列标题…”；人物档案区也只在有档案时出现。
+    这里把真实开头块可能出现的固定文本都算进来，取最大值。
+    """
+    block = injection_mod.build_opening_block("X", "Y", "Z", [], now=0.0)
+    shell = len(block) - 3  # 三个占位正文
+    # 留言板标题与标题后换行；超限提示与提示后换行
+    shell += len(injection_mod.BOARD_HEADING) + 1
+    shell += len("其余告示只列标题，需要时用 memory_read 读取：") + 1
+    # 人物档案区：与前一段的空行 + 标题 + 标题后的空行
+    shell += 2 + len(injection_mod.PROFILE_HEADING) + 2
+    return shell
+
+
 def collect_sizes(
     *,
     plugin_cls=None,
@@ -146,9 +163,7 @@ def collect_sizes(
     tool_total = sum(item["description"] for item in tools.values())
     tool_schema_total = sum(sum(item.values()) for item in tools.values())
 
-    index_shell = len(
-        injection.build_opening_block("X", "Y", "Z", [], now=0.0)
-    ) - 3
+    index_shell = _index_shell(injection, prompts)
     recall_shell = _recall_shell(recall, injection, prompts)
 
     chat_total = len(guidance) + tool_schema_total
