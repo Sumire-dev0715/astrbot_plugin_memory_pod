@@ -109,7 +109,7 @@ def _text(raw: Any, limit: int | None = None) -> str:
     return value[:limit] if limit else value
 
 
-def _header_dict(header: memstore.MemoryHeader) -> dict:
+def _header_dict(header: memstore.MemoryHeader, scope: str = "") -> dict:
     return {
         "file": header.file,
         "name": header.name,
@@ -120,7 +120,9 @@ def _header_dict(header: memstore.MemoryHeader) -> dict:
         "created": header.created,
         "source": header.source,
         "signature": header.signature,
-        "expires": header.expires,
+        # 到期日只属于留言板（PLAN 3.9.2 第 1 条）；其他作用域即使文件里
+        # 残留 expires 也不展示，避免页面显示没有意义的日期
+        "expires": header.expires if scope == SCOPE_BOARD else "",
         "size": header.size,
         "links": header.links,
         "lastUsed": header.last_used,
@@ -167,11 +169,9 @@ def _origin_info(
     rows = [
         row for row in store.audit_entries() if str(row.get("file") or "") == name
     ]
-    latest: dict = {}
     by_source: dict[str, list[dict]] = {}
     by_session: dict[str, list[dict]] = {}
     for row in rows:
-        latest = row
         source = str(row.get("source") or "")
         if source:
             by_source.setdefault(source, []).append(row)
@@ -186,7 +186,9 @@ def _origin_info(
             return same_session[-1]
         candidates = by_source.get(record.speaker)
         if not candidates:
-            return latest
+            # 对不上就不显示群名：拿这个文件最后一条无关审计顶上会把
+            # 来源说成另一个群
+            return {}
         return min(
             candidates,
             key=lambda row: abs(float(row.get("ts") or 0) - record.ts),
@@ -426,8 +428,8 @@ class MemoryDashboard:
         self.plugin.invalidate_scope(scope, key)
 
     def _scope_label(self, scope: str, key: str | None) -> str:
-        record = self.plugin._registry.get(key or "") if scope == SCOPE_WHISPER else None
-        return tidy.scope_label(scope, key, record)
+        # 整理提示词会发给默认对话模型，群名/群号不能进去（PLAN 3.9.1）
+        return tidy.scope_label(scope, key)
 
     def _stage(self, payload: Any) -> str:
         now = time.time()
@@ -516,7 +518,7 @@ class MemoryDashboard:
             flags = _file_flags(store, headers)
 
             def row(header: memstore.MemoryHeader) -> dict:
-                item = _header_dict(header)
+                item = _header_dict(header, scope)
                 # 到期日只属于留言板；别的文件即使 frontmatter 有 expires 也不标
                 item["expired"] = scope == SCOPE_BOARD and self.plugin.notice_expired(
                     header.expires, now
@@ -585,7 +587,8 @@ class MemoryDashboard:
                 "updated": doc.updated,
                 "source": doc.source,
                 "signature": doc.signature,
-                "expires": doc.expires,
+                # 到期日只属于留言板；非留言板文件里残留的 expires 不展示
+                "expires": doc.expires if scope == SCOPE_BOARD else "",
                 "expired": scope == SCOPE_BOARD
                 and self.plugin.notice_expired(doc.expires),
                 "origin": origins,
@@ -725,7 +728,14 @@ class MemoryDashboard:
             if isinstance(base, (int, float)) and abs(current - float(base)) > 1e-3:
                 raise ApiError("这个文件在你编辑期间被修改过（可能是模型刚写入），请刷新后再改")
 
-        report = await store.write(name, content, actor=history.ACTOR_WEBUI)
+        # 改名时新名字下还没有文件；把旧文件原文交给写入层，让 created /
+        # source / origin 这些元数据跟着文件走，而不是被 compose 丢掉
+        report = await store.write(
+            name,
+            content,
+            actor=history.ACTOR_WEBUI,
+            previous=current_content if renaming else None,
+        )
         if not report.ok:
             raise ApiError(report.message)
         message = report.message

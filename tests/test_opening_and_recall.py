@@ -239,3 +239,30 @@ def test_opening_with_origin_note_stays_byte_stable(tmp_path):
     assert first == second
     assert "（本人说的）" in first
     assert "合成群名-甲子园" not in first
+
+
+def test_opening_index_marks_origin_from_other_conversations(tmp_path):
+    """开头块的小本本索引行也要注明来源，且不写群名、群号（PLAN 3.9.1 第 4 条）。"""
+    plugin = make_plugin(tmp_path)
+    group = FakeEvent(
+        "Bot-A",
+        "123",
+        umo="Bot-A:GroupMessage:900",
+        name="小明",
+        group_id="900",
+        group_name="合成群名-甲子园",
+    )
+    run(
+        plugin.memory_write(
+            group, "notebook", "plan.md", "reference", "周末开黑安排", "周六晚上开黑"
+        )
+    )
+    other = FakeEvent("Bot-A", "456", umo="Bot-A:FriendMessage:456", name="小红")
+    opening = run(plugin._index_block(main.RuntimeSession(), other))
+    assert "plan.md" in opening
+    assert "小明在群聊里说的" in opening
+    assert "合成群名-甲子园" not in opening and "900" not in opening
+    # 同一段对话里写的条目：来源全部是当前对话，不标注
+    same = run(plugin._index_block(main.RuntimeSession(), group))
+    assert "plan.md" in same
+    assert "在群聊里说的" not in same

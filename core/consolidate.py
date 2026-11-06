@@ -75,6 +75,8 @@ class Operation:
     signature: str = ""
     # 留言板告示的到期日；整理时从原文件继承，避免一次复盘把日期清掉
     expires: str = ""
+    # 来源记录；整理时把被合并进来的源文件的 origin 并进目标文件
+    origin: str = ""
     # 预览时目标文件的写入时间（不存在为 0），应用时据此识别期间被改过的文件
     base_mtime: float = 0.0
 
@@ -87,6 +89,7 @@ class Operation:
             self.content,
             signature=self.signature,
             expires=self.expires,
+            origin=self.origin,
         )
 
     def to_dict(self) -> dict:

@@ -70,15 +70,29 @@ class Origin:
 
 
 def session_hash(umo: str) -> str:
-    """会话键的短哈希：用来判断是不是同一段对话，不可由哈希还原群号。"""
+    """会话键的短哈希：只用来判断是不是同一段对话，不存明文会话键。
+
+    这是未加盐的截断哈希，不是隐私保护手段：UMO 的平台与会话类型已知，
+    会话 ID 熵不高，拿到记忆文件的人可以穷举比对；它只是不把群号、QQ 号
+    直接写进记忆文件。平台改名后 UMO 变了，旧记录的哈希也对不上。
+    """
     return hashlib.sha1(str(umo or "").encode("utf-8")).hexdigest()[:16]
+
+
+def _safe_speaker(speaker: str) -> str:
+    """说话人 ID 的保底清洗：去掉记录分隔符与空白，防止拼出额外来源记录。
+
+    主流平台的发送者 ID 是数字或固定格式；这里是最后一道防线，不改变
+    正常 ID。
+    """
+    return re.sub(r"[;|\s]+", "", str(speaker or ""))
 
 
 def _encode_one(record: Origin) -> str:
     return _FIELD_SEP.join(
         (
             record.kind,
-            record.speaker,
+            _safe_speaker(record.speaker),
             safe_display_name(record.name),
             time.strftime(ORIGIN_TIME_FORMAT, time.localtime(record.ts)),
             record.session,

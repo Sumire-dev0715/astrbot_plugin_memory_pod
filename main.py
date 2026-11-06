@@ -121,6 +121,9 @@ class RuntimeSession:
     对话切换、重置、管理员在 WebUI 改动记忆、检测到 AstrBot 截断或压缩
     改动了历史开头时刷新快照（那时提示词缓存本来就已经失效）。此外每天
     的第一轮也刷新一次，让过期的留言板告示最晚第二天撤下（PLAN 3.9.2）。
+    两个例外：留言板的任何改动马上刷新所有会话（PLAN 3.9.2 第 5 条）；
+    小本本的 feedback 是对机器人自己的要求，管理员写下的要马上对所有
+    会话生效（PLAN 3.9.1 第 5 条）。
     """
 
     # 快照锚定的对话 id；变了说明换了对话或被重置
@@ -402,11 +405,14 @@ class MemoryPodPlugin(Star):
             kind = origin.KIND_GROUP
         else:
             _, session_kind, _ = registry.parse_umo(umo)
-            kind = (
-                origin.KIND_GROUP
-                if session_kind == registry.KIND_GROUP
-                else origin.KIND_PRIVATE
-            )
+            if session_kind == registry.KIND_GROUP:
+                kind = origin.KIND_GROUP
+            elif session_kind == registry.KIND_PRIVATE:
+                kind = origin.KIND_PRIVATE
+            else:
+                # 既不是群聊也不是私聊（OtherMessage 或格式不符的 UMO）：
+                # 规格只允许写"群聊/私聊"，宁可不记来源，也不说错来源
+                return None
         name = sender_name
         if qq_name is not None:
             name = (group_card or "").strip() or (qq_name or "").strip() or sender_name
@@ -892,14 +898,33 @@ class MemoryPodPlugin(Star):
         umo = str(getattr(event, "unified_msg_origin", "") or "")
         notices = await self._board_notices(now)
         board_text = injection.render_board_notices(notices)
-        notebook_snap = await self._notebook_scope(event).load_index()
-        whisper_snap = await self._whisper_scope(umo).load_index()
+        notebook_scope = self._notebook_scope(event)
+        whisper_scope = self._whisper_scope(umo)
+        notebook_snap = await notebook_scope.load_index()
+        whisper_snap = await whisper_scope.load_index()
+        # 索引行也要注明来源：小本本在别的对话里写下的条目，在这个会话的
+        # 开头块里不能看起来像本地记录（PLAN 3.9.1 第 4 条）
+        current_session = origin.session_hash(umo)
+        notebook_index = injection.annotate_index(
+            notebook_snap.text,
+            memstore.SCOPE_NOTEBOOK,
+            await asyncio.to_thread(notebook_scope.headers),
+            current_session,
+            now,
+        )
+        whisper_index = injection.annotate_index(
+            whisper_snap.text,
+            memstore.SCOPE_WHISPER,
+            await asyncio.to_thread(whisper_scope.headers),
+            current_session,
+            now,
+        )
         profiles: list[injection.MemoryView] = []
         pinned: dict[str, str] = {}
         if pin_key:
             profiles, pinned = await self._pinned_profiles(event)
         rt.index_block = injection.build_opening_block(
-            board_text, notebook_snap.text, whisper_snap.text, profiles
+            board_text, notebook_index, whisper_index, profiles, now
         )
         rt.index_loaded = True
         rt.index_day = today
@@ -1611,6 +1636,10 @@ class MemoryPodPlugin(Star):
                 if report.ok:
                     content = await store.read(file)
                     restored = True
+                    if scope == memstore.SCOPE_BOARD:
+                        # 留言板恢复也是留言板改动：所有会话的开头块下一轮
+                        # 就要把这条告示送出去（PLAN 3.9.2 第 5 条）
+                        self.invalidate_scope(memstore.SCOPE_BOARD)
                     logger.info(
                         LOG_PREFIX + f"{scope} 记忆 {file} 已从遗忘中恢复（模型读取）"
                     )
@@ -1815,9 +1844,17 @@ class MemoryPodPlugin(Star):
 
     @staticmethod
     async def _tool_file_types(store: memstore.ScopeStore) -> dict[str, str]:
-        """作用域里在册文件的现有类型；feedback 规则按它判断修改/删除对象。"""
+        """作用域里现有文件的类型（含已遗忘副本），feedback 规则按它判断对象。
+
+        已遗忘的 feedback 不在在册 headers 里；如果只看在册文件，非管理员
+        用一个不同 type 的同名 memory_write 就能把它顶进回收站，等于删了
+        管理员的 feedback（PLAN 3.9.1 第 5 条）。
+        """
         headers = await asyncio.to_thread(store.headers)
-        return {header.file: header.type for header in headers}
+        forgotten = await asyncio.to_thread(store.forgotten_headers)
+        types = {header.file: header.type for header in forgotten}
+        types.update({header.file: header.type for header in headers})
+        return types
 
     @staticmethod
     def _existing_name(files: set[str], name: str) -> str:
@@ -1828,15 +1865,30 @@ class MemoryPodPlugin(Star):
                 return item
         return ""
 
-    def _refresh_after_tool_write(self, umo: str, scope: str) -> None:
-        """聊天工具改了记忆后，作废受影响的会话开头块快照。
+    def _refresh_after_tool_write(
+        self,
+        scope: str,
+        files: list[str] | None = None,
+        *,
+        refresh_all: bool = False,
+    ) -> None:
+        """聊天工具改了记忆后，只作废必须作废的开头块快照。
 
-        与管理页改动走同一条 invalidate_scope：删除某人的档案后若继续用
-        旧快照，已删内容还会发给模型；管理员在对话里代发的留言板告示也
-        必须让所有会话下一轮就能看到。
+        留言板的改动要立刻送到所有会话（PLAN 3.9.2 第 5 条）。小本本和
+        悄悄话在对话中途由模型写入时不刷新快照：开头块要逐轮逐字不变才
+        能命中前缀缓存，新内容由召回带上（PLAN 3.8.1）。两个例外：
+        - feedback 是对机器人自己的要求，管理员在别的对话里写下的必须
+          马上对所有会话生效（PLAN 3.9.1 第 5 条），所以小本本的 feedback
+          改动作废全部快照；
+        - 删除或遗忘钉在开头块里的档案没有最新全文可附，继续注入旧内容
+          等于让用户删不掉。
         """
-        key = memstore.safe_key(umo) if scope == memstore.SCOPE_WHISPER and umo else None
-        self.invalidate_scope(scope, key)
+        if scope == memstore.SCOPE_BOARD or (
+            refresh_all and scope == memstore.SCOPE_NOTEBOOK
+        ):
+            self.invalidate_scope(scope)
+            return
+        self._invalidate_pinned(scope, list(files or []))
 
     @staticmethod
     def _seen_digest(rt: RuntimeSession, scope: str, name: str) -> str:
@@ -2040,9 +2092,12 @@ class MemoryPodPlugin(Star):
         if not result.ok:
             return self._failed_receipt(result)
         actual = result.changes[0][1]
-        # 记忆已经变了：作废受影响的开头块快照，下一轮重读
+        written = result.written.get(f"{scope}/{actual}", "")
+        # 留言板改动马上刷新所有会话；小本本的 feedback 也要马上对所有
+        # 会话生效，其余小本本/悄悄话写入不刷新快照
         self._refresh_after_tool_write(
-            str(getattr(event, "unified_msg_origin", "") or ""), scope
+            scope,
+            refresh_all=memstore.parse_memory(written).type == "feedback",
         )
         new_file = not self._existing_name(files, name)
         head = f"已写入 {scope}/{actual}（{'新建' if new_file else '整篇重写'}）"
@@ -2124,8 +2179,11 @@ class MemoryPodPlugin(Star):
         if not result.ok:
             return self._failed_receipt(result)
         actual = result.changes[0][1]
+        written = result.written.get(f"{scope}/{actual}", "")
+        # 留言板改动马上刷新所有会话；小本本的 feedback 也要马上生效
         self._refresh_after_tool_write(
-            str(getattr(event, "unified_msg_origin", "") or ""), scope
+            scope,
+            refresh_all=memstore.parse_memory(written).type == "feedback",
         )
         head = f"已写日记 {scope}/{actual}" if is_journal else f"已修改 {scope}/{actual}"
         detail = result.messages[0] if result.messages else result.message
@@ -2188,8 +2246,13 @@ class MemoryPodPlugin(Star):
         if not result.ok:
             return self._failed_receipt(result)
         actual = result.changes[0][1]
+        # 删除没有最新全文可附：钉在开头块里的档案要作废，不能继续注入；
+        # 删掉一条 feedback 同样要让所有会话马上不再看到它
+        existing = self._existing_name(files, actual)
         self._refresh_after_tool_write(
-            str(getattr(event, "unified_msg_origin", "") or ""), scope
+            scope,
+            [actual],
+            refresh_all=file_types.get(existing, "").lower() == "feedback",
         )
         lines = [
             f"已删除 {scope}/{actual}，已移入回收站，可恢复；"

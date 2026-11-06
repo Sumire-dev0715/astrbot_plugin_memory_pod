@@ -646,21 +646,24 @@ def test_board_write_visible_to_other_bot_next_turn(tmp_path):
     assert "11 月 11 日入职" in opening_text(after)
 
 
-def test_notebook_write_updates_opening_index_next_turn(tmp_path):
+def test_notebook_write_does_not_refresh_opening_snapshot(tmp_path):
+    """对话中途写小本本不刷新开头块（PLAN 3.8.1），新内容由召回带上。"""
     plugin = make_plugin(tmp_path)
     event = FakeEvent("Bot-A", "123", umo="Bot-A:GroupMessage:900")
-    before = make_request("你好")
-    run(plugin._process_request(event, before))
-    assert "weekend.md" not in opening_text(before)
+    rt = main.RuntimeSession()
+    before = run(plugin._index_block(rt, event))
+    assert "weekend.md" not in (before or "")
 
     run(
         plugin.memory_write(
             event, "notebook", "weekend.md", "reference", "周末", "周六开黑"
         )
     )
-    after = make_request("你好")
-    run(plugin._process_request(event, after))
-    assert "weekend.md" in opening_text(after)
+    after = run(plugin._index_block(rt, event))
+    assert after == before
+    assert "weekend.md" not in (after or "")
+    block = run(plugin._recall_message(event, event.unified_msg_origin, "周六开黑", rt))
+    assert block is not None and "weekend.md" in block
 
 
 # ------------------------------------------------- 其他审查问题的回归
@@ -1219,3 +1222,97 @@ def test_memory_read_restore_records_group_audit(tmp_path):
     assert restored["session"] == event.unified_msg_origin
     assert restored["group"] == GROUP_NAME
     assert restored["admin"] is False
+
+
+# ------------------------------------------------- 第四轮审查补的回归
+
+
+def test_admin_tool_write_marks_admin_in_audit(tmp_path):
+    plugin = make_plugin(tmp_path)
+    store = notebook(plugin)
+    admin = FakeEvent("Bot-A", "1", admin=True)
+    run(
+        plugin.memory_write(
+            admin, "notebook", "admin-note.md", "reference", "管理员写的", "正文"
+        )
+    )
+    assert read_audit(store)[-1]["admin"] is True
+
+    member = FakeEvent("Bot-A", "123")
+    run(
+        plugin.memory_write(
+            member, "notebook", "member-note.md", "reference", "成员写的", "正文"
+        )
+    )
+    assert read_audit(store)[-1]["admin"] is False
+
+
+def test_forgotten_feedback_cannot_be_overwritten_by_member(tmp_path):
+    """已遗忘的 feedback 仍按 feedback 保护，非管理员不能借同名重写删掉它。"""
+    plugin = make_plugin(tmp_path, enable_forgetting=True)
+    store = notebook(plugin)
+    admin = FakeEvent("Bot-A", "1", admin=True)
+    assert "已写入 notebook/rule.md" in run(
+        plugin.memory_write(
+            admin, "notebook", "rule.md", "feedback", "要求", "以后先问我"
+        )
+    )
+    assert run(store.forget("rule.md")).ok
+    assert store.has_forgotten("rule.md")
+
+    member = FakeEvent("Bot-A", "123")
+    receipt = run(
+        plugin.memory_write(
+            member, "notebook", "rule.md", "reference", "换个类型", "换个正文"
+        )
+    )
+    assert "只有管理员" in receipt
+    assert store.has_forgotten("rule.md")
+    assert not store.exists("rule.md")
+    assert not store.trash_entries()
+
+
+def test_other_message_kind_does_not_record_a_wrong_private_origin(tmp_path):
+    """OtherMessage 既不是群聊也不是私聊：宁可不记来源，也不说成私聊。"""
+    plugin = make_plugin(tmp_path)
+    store = notebook(plugin)
+    event = FakeEvent("Bot-A", "123", umo="Bot-A:OtherMessage:channel-1")
+    assert "已写入 notebook/note.md" in run(
+        plugin.memory_write(event, "notebook", "note.md", "reference", "摘要", "正文")
+    )
+    doc = pkg_memstore.parse_memory(run(store.read("note.md")))
+    assert doc.origin == ""
+    assert "私聊" not in run(plugin.memory_read(event, "notebook", "note.md"))
+
+
+def test_admin_feedback_write_refreshes_every_session_opening(tmp_path):
+    """管理员的 feedback 要让所有会话马上生效（PLAN 3.9.1 第 5 条）。"""
+    plugin = make_plugin(tmp_path)
+    event_a = FakeEvent("Bot-A", "1", umo="Bot-A:GroupMessage:900", admin=True)
+    event_b = FakeEvent("Bot-A", "2", umo="Bot-A:FriendMessage:2")
+    rt_a = run(plugin._runtime(event_a.unified_msg_origin))
+    rt_b = run(plugin._runtime(event_b.unified_msg_origin))
+    run(plugin._index_block(rt_a, event_a))
+    run(plugin._index_block(rt_b, event_b))
+
+    assert "已写入" in run(
+        plugin.memory_write(
+            event_a,
+            "notebook",
+            "rule.md",
+            "feedback",
+            "称呼要求",
+            "以后叫我老大",
+        )
+    )
+    assert rt_a.index_loaded is False and rt_b.index_loaded is False
+    assert "rule.md" in run(plugin._index_block(rt_b, event_b))
+
+    # 普通小本本条目仍然不刷新快照
+    run(plugin._index_block(rt_b, event_b))
+    run(
+        plugin.memory_write(
+            event_b, "notebook", "note.md", "reference", "普通笔记", "正文"
+        )
+    )
+    assert rt_b.index_loaded is True

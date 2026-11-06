@@ -771,3 +771,102 @@ def test_board_save_empty_expires_clears_date(tmp_path):
     result = route(dashboard, "file_save")
     assert result["status"] == "ok", result
     assert pkg_memstore.parse_memory(call(store.read("notice.md"))).expires == ""
+
+
+def test_file_save_rename_keeps_origin_and_source(tmp_path):
+    """管理页改名后新文件的 frontmatter 仍保留原文件的来源记录。"""
+    plugin, dashboard = setup(tmp_path)
+    store = plugin._store.notebook_scope("Bot-A")
+    now = time.time()
+    record = pkg_origin.Origin(
+        "group",
+        "123",
+        "小明",
+        now,
+        pkg_origin.session_hash("Bot-A:GroupMessage:900"),
+    )
+    call(
+        store.write(
+            "old.md",
+            thing("old", description="旧文件", body="旧正文"),
+            source="123",
+            origin_record=record,
+        )
+    )
+    body(
+        {
+            "scope": "notebook",
+            "key": "Bot-A",
+            "file": "renamed.md",
+            "oldFile": "old.md",
+            "mode": "fields",
+            "type": "reference",
+            "description": "改过名的文件",
+            "body": "正文不变",
+        }
+    )
+    result = route(dashboard, "file_save")
+    assert result["status"] == "ok", result
+    content = call(store.read("renamed.md"))
+    doc = pkg_memstore.parse_memory(content)
+    records = pkg_origin.parse(doc.origin)
+    assert len(records) == 1
+    assert records[0].speaker == "123"
+    assert records[0].session == record.session
+    assert doc.source.split() == ["123"]
+
+
+def test_non_board_files_do_not_expose_expires(tmp_path):
+    plugin, dashboard = setup(tmp_path)
+    store = plugin._store.notebook_scope("Bot-A")
+    call(store.write("note.md", thing("note", body="正文", expires="2999-12-31")))
+
+    query(scope="notebook", key="Bot-A")
+    item = raw(route(dashboard, "scope_detail"))["files"][0]
+    assert item["expires"] == ""
+    assert item["expired"] is False
+
+    query(scope="notebook", key="Bot-A", file="note.md")
+    detail = raw(route(dashboard, "file_detail"))
+    assert detail["expires"] == ""
+    assert detail["expired"] is False
+
+    # 留言板仍然显示到期日
+    call(
+        plugin._store.board_scope().write(
+            "notice.md", thing("notice", body="告示", signature="管理员", expires="2999-12-31")
+        )
+    )
+    query(scope="board", key="")
+    board_item = raw(route(dashboard, "scope_detail"))["files"][0]
+    assert board_item["expires"] == "2999-12-31"
+
+
+def test_file_detail_origin_does_not_borrow_unrelated_audit_group(tmp_path):
+    """对不上会话与说话人时宁可不显示群名，也不拿最后一条审计顶上。"""
+    plugin, dashboard = setup(tmp_path)
+    store = plugin._store.notebook_scope("Bot-A")
+    now = time.time()
+    record = pkg_origin.Origin(
+        "group",
+        "123",
+        "小明",
+        now,
+        pkg_origin.session_hash("Bot-A:GroupMessage:900"),
+    )
+    call(
+        store.write(
+            "note.md",
+            thing("note", description="合成记忆", body="合成正文"),
+            source="999",
+            actor="Bot-A",
+            origin_record=record,
+            audit=pkg_history.AuditContext(
+                session="Bot-A:GroupMessage:111", group="另一个合成群"
+            ),
+        )
+    )
+    query(scope="notebook", key="Bot-A", file="note.md")
+    origins = raw(route(dashboard, "file_detail"))["origin"]
+    assert origins and "group" not in origins[0]
+    assert "另一个合成群" not in json.dumps(origins, ensure_ascii=False)

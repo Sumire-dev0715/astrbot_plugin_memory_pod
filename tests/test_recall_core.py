@@ -157,3 +157,56 @@ def test_forced_profile_does_not_consume_full_text_quota(tmp_path):
     assert plan.full_files[0] == "notebook/user-123.md"
     assert len(plan.full_files) == 2
     assert any(ref in plan.full_files for ref in ("notebook/a.md", "notebook/b.md"))
+
+
+def test_recall_score_ignores_origin_display_name(tmp_path):
+    """frontmatter 里的来源显示名不是召回关键词（PLAN 3.9.1 第 4 条）。"""
+    store = pkg_memstore.MemoryStore(tmp_path / "memories").notebook_scope("Bot-A")
+    run(
+        store.write(
+            "coffee.md",
+            thing("coffee", description="咖啡偏好", body="喜欢喝美式"),
+            origin_record=pkg_origin.Origin(
+                "group",
+                "456",
+                "深海小鲸",
+                1_700_000_000.0,
+                pkg_origin.session_hash("Bot-A:GroupMessage:900"),
+            ),
+        )
+    )
+    stored = store.headers()[0]
+    assert "origin" not in stored.text and "深海小鲸" not in stored.text
+    query = pkg_recall.tokenize("深海小鲸最近在忙什么")
+    assert pkg_recall.score(query, stored) == 0
+    candidates = [pkg_recall.Candidate("notebook", stored)]
+    chosen = pkg_recall.select_by_keywords(candidates, "深海小鲸最近在忙什么", [])
+    assert chosen == []
+
+
+def test_pointer_line_marks_origin_from_other_conversation():
+    """指针行也不让别的对话里的条目看起来像本地记录。"""
+    now = 1_700_000_000.0
+    content = pkg_memstore.compose_memory("a", "摘要", "reference", "正文")
+    content = pkg_memstore.stamp_memory(
+        content,
+        now,
+        origin_record=pkg_origin.Origin(
+            "group",
+            "456",
+            "小明",
+            now - 3 * 86400,
+            pkg_origin.session_hash("Bot-A:GroupMessage:900"),
+        ),
+    )
+    doc = pkg_memstore.parse_memory(content)
+    item = pkg_recall.Recalled(
+        "notebook/a.md", content, 1.0, description="摘要", origin_text=doc.origin
+    )
+    line = pkg_recall.render_pointer_line(
+        [item],
+        current_session=pkg_origin.session_hash("Bot-A:FriendMessage:123"),
+        now=now,
+    )
+    assert "小明在群聊里说的，3 天前" in line
+    assert "900" not in line

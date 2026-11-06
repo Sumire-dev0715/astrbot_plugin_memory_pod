@@ -588,3 +588,57 @@ def test_rewrite_repairs_malformed_expiry_instead_of_failing(tmp_path):
     )
     assert doc.expires == ""
     assert doc.body == "新正文"
+
+
+def test_memory_edit_keeps_board_notice_expiry(tmp_path):
+    """局部修改留言板告示不会把到期日清掉（PLAN 3.9.2 第 3 条）。"""
+    plugin = make_plugin(tmp_path)
+    admin = admin_event()
+    run(
+        plugin._store.board_scope().write(
+            "notice.md",
+            thing(
+                "notice",
+                description="告示",
+                body="旧正文",
+                signature="管理员",
+                expires="2999-12-31",
+            ),
+        )
+    )
+    assert "已修改" in run(
+        plugin.memory_edit(admin, "board", "notice.md", "append", "", "补充")
+    )
+    doc = pkg_memstore.parse_memory(
+        run(plugin._store.board_scope().read("notice.md"))
+    )
+    assert doc.expires == "2999-12-31"
+
+
+def test_restored_board_notice_refreshes_every_session(tmp_path):
+    """管理员读一条已遗忘的告示会恢复它；开头块要下一轮就把它送出去。"""
+    plugin = make_plugin(tmp_path, enable_forgetting=True, forget_after_days=1)
+    board = plugin._store.board_scope()
+    run(
+        board.write(
+            "notice.md",
+            thing(
+                "notice",
+                description="告示",
+                body="恢复后的告示正文",
+                signature="管理员",
+                expires="2999-12-31",
+            ),
+        )
+    )
+    assert run(board.forget("notice.md")).ok
+    event = admin_event()
+    rt = run(plugin._runtime(event.unified_msg_origin))
+    run(plugin._index_block(rt, event))
+    assert "恢复后的告示正文" not in (rt.index_block or "")
+
+    read = run(plugin.memory_read(event, "board", "notice.md"))
+    assert "恢复后的告示正文" in read
+    assert rt.index_loaded is False
+    opening = run(plugin._index_block(rt, event))
+    assert "恢复后的告示正文" in opening

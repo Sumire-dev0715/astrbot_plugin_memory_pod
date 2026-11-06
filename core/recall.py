@@ -33,7 +33,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from . import injection, journal
+from . import injection, journal, origin
 from .injection import (
     DAY_SECONDS,
     FILE_CHARS,  # noqa: F401 - 测试与调用方从这里取召回单文件预算
@@ -189,6 +189,8 @@ class Recalled:
     written: float
     # 取自 MemoryHeader：指针行只写引用，必要时附一句描述
     description: str = ""
+    # 来源记录；指针行也要注明来源（PLAN 3.9.1 第 4 条）
+    origin_text: str = ""
     # 标题与 description 之后的附注（快照后更新的人物档案用）
     note: str = ""
 
@@ -267,26 +269,43 @@ def freshness_note(written: float, now: float | None = None) -> str:
 
 
 def _pointer_label(
-    item: Recalled, indexed_refs: set[str] | None
+    item: Recalled,
+    indexed_refs: set[str] | None,
+    current_session: str = "",
+    now: float | None = None,
 ) -> str:
-    """指针行里的一项：只写引用；不在注入索引里的文件才附一句描述。"""
+    """指针行里的一项：只写引用；不在注入索引里的文件才附一句描述。
+
+    指针行也是条目在别的对话里出现的一种方式，来自别的对话时要带来源
+    标注（PLAN 3.9.1 第 4 条）。
+    """
     if indexed_refs is not None and item.ref in indexed_refs:
-        return item.ref
-    description = " ".join((item.description or "").split())
-    if not description:
-        return item.ref
-    if len(description) > POINTER_DESC_CHARS:
-        description = description[:POINTER_DESC_CHARS] + "…"
-    return f"{item.ref}（{description}）"
+        label = item.ref
+    else:
+        description = " ".join((item.description or "").split())
+        if not description:
+            label = item.ref
+        else:
+            if len(description) > POINTER_DESC_CHARS:
+                description = description[:POINTER_DESC_CHARS] + "…"
+            label = f"{item.ref}（{description}）"
+    note = origin.note(item.ref, item.origin_text, current_session, now)
+    return f"{label} {note}" if note else label
 
 
 def render_pointer_line(
-    pointers: list[Recalled], indexed_refs: set[str] | None = None
+    pointers: list[Recalled],
+    indexed_refs: set[str] | None = None,
+    current_session: str = "",
+    now: float | None = None,
 ) -> str:
     """分档后的指针行；没有指针返回空串。"""
     if not pointers:
         return ""
-    labels = "、".join(_pointer_label(item, indexed_refs) for item in pointers)
+    labels = "、".join(
+        _pointer_label(item, indexed_refs, current_session, now)
+        for item in pointers
+    )
     return f"可能也相关，需要细节时用 memory_read 读取：{labels}"
 
 
@@ -296,6 +315,7 @@ def render_recall_block(
     now: float | None = None,
     pointers: list[Recalled] | None = None,
     indexed_refs: set[str] | None = None,
+    current_session: str = "",
 ) -> str | None:
     """把已经过预算计划的全文条目与指针行渲染成召回块；都没有返回 None。
 
@@ -303,7 +323,9 @@ def render_recall_block(
     每条全文的标题、description 与头尾瘦身在 core.injection 里统一处理。
     """
     parts = [injection.render_view(section.view, now) for section in sections]
-    pointer_line = render_pointer_line(pointers or [], indexed_refs)
+    pointer_line = render_pointer_line(
+        pointers or [], indexed_refs, current_session, now
+    )
     if pointer_line:
         parts.append(pointer_line)
     if not parts:
@@ -395,6 +417,7 @@ async def assemble_recall(
             content,
             cand.header.updated,
             description=cand.header.description,
+            origin_text=cand.header.origin,
         )
         items.append(item)
         used.setdefault(cand.scope, []).append(cand.header.file)
@@ -420,6 +443,11 @@ async def assemble_recall(
         sections=sections,
         pointers=pointers,
         block=render_recall_block(
-            sections, data_notice, now, pointers=pointers, indexed_refs=indexed_refs
+            sections,
+            data_notice,
+            now,
+            pointers=pointers,
+            indexed_refs=indexed_refs,
+            current_session=current_session,
         ),
     )

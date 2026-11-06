@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import tempfile
 import threading
 import time
@@ -21,7 +22,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Awaitable, Callable
 
-from . import consolidate, history, journal, memstore
+from . import consolidate, history, journal, memstore, origin, writer
 from .memstore import (
     CONFLICT_OVERWRITE,
     CONFLICT_SKIP,
@@ -51,15 +52,17 @@ def scope_id(scope: str, key: str | None) -> str:
     return f"{scope}-{key or ''}"
 
 
-def scope_label(scope: str, key: str | None, record=None) -> str:
-    """整理提示词里的作用域名称。"""
+def scope_label(scope: str, key: str | None) -> str:
+    """整理提示词里的作用域名称。
+
+    这段提示词会发给 AstrBot 的默认对话模型，所以悄悄话不能用群名、
+    昵称或带群号的目录名：群名只在管理页里显示（PLAN 3.9.1 第 1 条）。
+    """
     if scope == "board":
         return "留言板（所有会话可见，管理员发布的告示）"
     if scope == "notebook":
         return f"小本本（平台 {key}，这台机器人的所有群聊和私聊共享）"
-    if record is not None and (record.remark or record.name):
-        return f"这段对话的悄悄话（{record.remark or record.name}）"
-    return f"这段对话的悄悄话（{key or ''}）"
+    return "这段对话的悄悄话（只有这段对话可见）"
 
 
 # ---------------------------------------------------------------- 记录
@@ -280,12 +283,82 @@ async def propose(
     return Proposal(operations=ops, skipped=skipped, files=sorted(existing))
 
 
+def _merged_source(
+    target: str,
+    target_content: str,
+    source_file: str,
+    source_doc: memstore.MemoryDoc,
+    single_write: bool,
+) -> bool:
+    """判断被删除的源文件是否并进了这个目标，用来继承它的 origin。
+
+    先按人物档案的数字 ID 对（user-<ID>.md 合并同名 ID 的文件）；再按
+    正文重叠判断（整理提示词要求只重组、精简、改写已有信息，合并后的
+    内容通常保留源文件的整段或整行）。只有一个写入目标时，删掉的文件
+    都只能并进它，直接算作来源。
+    """
+    if single_write:
+        return True
+    subject = writer.person_id(target)
+    if subject:
+        ids = set((source_doc.source or "").split())
+        ids.update(record.speaker for record in origin.parse(source_doc.origin))
+        if subject in ids or re.search(
+            rf"(?<!\d){re.escape(subject)}(?!\d)", source_file
+        ):
+            return True
+    body = (source_doc.body or "").strip()
+    if body and body in target_content:
+        return True
+    lines = [
+        line.strip()
+        for line in body.splitlines()
+        if len(line.strip()) >= 12
+    ]
+    return any(line in target_content for line in lines)
+
+
+async def _inherit_origins(
+    store: ScopeStore, ops: list[consolidate.Operation]
+) -> None:
+    """把被合并源文件的 origin 并进写入目标，避免一次整理丢掉来源标注。
+
+    目标文件原本就有的 origin 由写入层继承；这里补的是"源文件删掉、正文
+    并进新文件"时的那部分。管理页写入本身不新增来源记录（PLAN 3.9.1）。
+    """
+    writes = [op for op in ops if op.op == "write"]
+    deletes = [op for op in ops if op.op == "delete"]
+    if not writes or not deletes:
+        return
+    sources = {}
+    for op in deletes:
+        content = await store.read(op.file)
+        if content is not None:
+            sources[op.file] = memstore.parse_memory(content)
+    single_write = len(writes) == 1
+    for op in writes:
+        current = await store.read(op.file)
+        doc = memstore.parse_memory(current) if current is not None else None
+        text = doc.origin if doc is not None else ""
+        for source_file, source_doc in sources.items():
+            if source_file == op.file or not source_doc.origin:
+                continue
+            if not _merged_source(
+                op.file, op.content, source_file, source_doc, single_write
+            ):
+                continue
+            for record in origin.parse(source_doc.origin):
+                text = origin.merge(text, record)
+        op.origin = text
+
+
 async def apply(
     store: ScopeStore,
     ops: list[consolidate.Operation],
     actor: str = history.ACTOR_TIDY,
 ) -> list[dict]:
     """先写后删地应用方案；每项结果带改动前原文（before）供撤销。"""
+    await _inherit_origins(store, ops)
     results = []
     write_failed = False
     for op in consolidate.ordered(ops):

@@ -282,11 +282,14 @@ def compose_memory(
     source: str = "",
     signature: str = "",
     expires: str = "",
+    origin: str = "",
 ) -> str:
     """按标准格式拼出记忆文件：frontmatter（name / description / metadata.type）+ 正文。
 
     三个戳平时不用传——写入时由 stamp_memory 自动补；传了就原样写进 metadata。
-    signature 与 expires 只用于留言板告示，同样写进 metadata。
+    signature 与 expires 只用于留言板告示，同样写进 metadata。origin 只在
+    整理合并时显式传入，让合并结果保留被并进来那些文件的来源记录；普通
+    写入由 stamp_memory 自动继承。
     """
     description = _HOOK_WS_RE.sub(" ", description or "").strip()
     meta = [f"  type: {mem_type.strip()}"]
@@ -295,6 +298,9 @@ def compose_memory(
         value = " ".join(str(value or "").split())
         if value:
             meta.append(f"  {key}: {value}")
+    origin = " ".join(str(origin or "").split())
+    if origin:
+        meta.append(f"  origin: {origin}")
     signature = " ".join(str(signature or "").split())[:MAX_SIGNATURE_CHARS]
     if signature:
         meta.append(f"  signature: {signature}")
@@ -565,7 +571,7 @@ class MemoryHeader:
     type: str
     mtime: float
     size: int
-    # 小写化的文件开头（含 frontmatter），供关键词召回打分
+    # 小写化的正文开头（不含 frontmatter），供关键词召回打分
     text: str = ""
     links: list[str] = field(default_factory=list)
     # 由 frontmatter 的戳解析；updated 缺省时退回 mtime，created 缺省为 0
@@ -936,7 +942,9 @@ class ScopeStore:
             type=doc.type,
             mtime=st.st_mtime,
             size=st.st_size,
-            text=content[:HEADER_TEXT_CHARS].lower(),
+            # 召回打分只看正文：frontmatter 里的 origin 显示名、source 等
+            # 不该成为召回关键词（PLAN 3.9.1 第 4 条）
+            text=doc.body[:HEADER_TEXT_CHARS].lower(),
             links=extract_links(doc.body),
             updated=parse_stamp(doc.updated) or st.st_mtime,
             created=parse_stamp(doc.created) or 0.0,
@@ -957,12 +965,15 @@ class ScopeStore:
         now: float | None = None,
         origin_record: origin_mod.Origin | None = None,
         audit: history.AuditContext | None = None,
+        previous: str | None = None,
     ) -> WriteReport:
         """写入记忆文件并自动同步索引行（钩子取自 frontmatter description）。
 
         source 是本次写入的来源 ID（通常是当前发送者），并入文件的 source 戳；
         actor 是这次变更的执行者（聊天工具记平台 ID），写进审计；origin_record
         是工具写入的来源记录，并进 metadata.origin。audit 只进审计日志。
+        previous 用来在改名这类"新名字下还没有文件"的写入里继承旧文件的
+        created / source / origin；不传时读取同名文件（或它的遗忘副本）。
         """
         # 与 _resolve 同样的归一化：索引守门与索引行都要用整理后的名字，
         # 否则 " MEMORY.md" / "/MEMORY.md" 能绕过守门，索引行也会写错
@@ -982,11 +993,12 @@ class ScopeStore:
             # 新内容落盘后那份遗忘副本随之作废
             try:
                 active = await asyncio.to_thread(self._read_for_update, path)
-                previous = active
-                if previous is None:
-                    previous = await asyncio.to_thread(
+                inherited = previous if previous is not None else active
+                if inherited is None:
+                    inherited = await asyncio.to_thread(
                         self._read_for_update, self._forgotten_path(name)
                     )
+                previous = inherited
             except (OSError, UnicodeDecodeError) as exc:
                 return WriteReport(
                     False, f"读取 {name} 的现有内容失败，未写入：{exc}"

@@ -287,6 +287,41 @@ def build_opening_block(
     )
 
 
+def annotate_index(
+    index_text: str,
+    scope: str,
+    headers: list[memstore.MemoryHeader],
+    current_session: str = "",
+    now: float | None = None,
+) -> str:
+    """给开头块里的索引行补来源标注（PLAN 3.9.1 第 4 条）。
+
+    索引是"小本本里的条目"在开头块出现的形式；来自别的对话的条目要注明
+    来源，格式与召回块、memory_read 一致，只写"群聊/私聊"，不写群名。
+    相对时间按快照生成时算，快照逐轮复用，所以文本不会逐轮变化。
+    日记是流水账，不标注。
+    """
+    if not index_text:
+        return index_text
+    by_file = {header.file: header for header in headers}
+    lines = []
+    for line in index_text.splitlines():
+        match = _INDEX_LINK_RE.search(line)
+        if match is None:
+            match = _INDEX_PLAIN_RE.match(line)
+        if match is not None:
+            name = match.group(1)
+            header = by_file.get(name)
+            if header is not None and header.origin and header.type != "journal":
+                note = origin.note(
+                    f"{scope}/{name}", header.origin, current_session, now
+                )
+                if note:
+                    line = f"{line}  {note}"
+        lines.append(line)
+    return "\n".join(lines)
+
+
 def indexed_names(*index_texts: str) -> set[str]:
     """从已注入的索引文本里收集文件名（不区分作用域）。
 
