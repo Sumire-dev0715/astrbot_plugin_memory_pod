@@ -2195,6 +2195,7 @@
           { class: "op" },
           h("div", { class: "op-head" }, check, h("strong", null, op.op === "delete" ? t("opDelete") : (existing.indexOf(op.file) >= 0 ? t("opRewrite") : t("opCreate"))), h("span", { class: "file-name" }, op.file)),
           op.reason ? h("div", { class: "op-reason" }, op.reason) : null,
+          op.op === "write" && op.signature ? h("div", { class: "op-reason" }, t("fieldSignature") + "：" + op.signature) : null,
           op.content ? h("details", null, h("summary", null, t("previewContent")), h("pre", { class: "pre" }, op.content)) : null
         )
       );

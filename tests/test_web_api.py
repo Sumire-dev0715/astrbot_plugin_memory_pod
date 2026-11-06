@@ -295,6 +295,41 @@ def test_consolidate_apply_cannot_touch_other_scope(tmp_path):
     assert "改写" in call(plugin._store.whisper_scope("a").read("secret.md"))
 
 
+def test_board_consolidate_keeps_signature_through_preview_and_apply(tmp_path):
+    plugin, dashboard = setup(tmp_path)
+    board = plugin._store.board_scope()
+    call(
+        board.write(
+            "notice.md",
+            thing("notice", description="入职", body="旧告示", signature="原署名"),
+        )
+    )
+    plugin.reply = json.dumps(
+        [
+            {
+                "op": "write",
+                "file": "notice.md",
+                "type": "reference",
+                "description": "入职",
+                "content": "整理后的告示",
+                "reason": "精简",
+                "signature": "伪造的署名",
+            }
+        ]
+    )
+    body({"scope": "board", "key": ""})
+    preview = raw(route(dashboard, "consolidate_preview"))
+    operation = preview["operations"][0]
+    # 预览能看到真实署名；模型给的署名被插件覆盖
+    assert operation["signature"] == "原署名"
+
+    body({"scope": "board", "key": "", "operations": preview["operations"]})
+    assert route(dashboard, "consolidate_apply")["status"] == "ok"
+    content = call(board.read("notice.md"))
+    assert pkg_memstore.parse_memory(content).signature == "原署名"
+    assert "伪造的署名" not in content
+
+
 def test_export_and_import_keep_whisper_in_its_own_scope(tmp_path):
     plugin, dashboard = setup(tmp_path)
     call(plugin._store.whisper_scope("a").write("secret.md", thing("secret", body="A 的秘密")))

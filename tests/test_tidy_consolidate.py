@@ -117,6 +117,8 @@ def test_board_rewrite_keeps_signature_and_new_notice_gets_one(tmp_path):
             "description": "合并",
             "content": "内容甲\n内容乙",
             "reason": "合并 b",
+            # 模型返回的署名不可信：整理必须沿用原文件的署名
+            "signature": "伪造的署名",
         },
         {"op": "delete", "file": "b.md", "reason": "已合并"},
     ]
@@ -126,6 +128,7 @@ def test_board_rewrite_keeps_signature_and_new_notice_gets_one(tmp_path):
         )
     )
     assert proposal.operations[0].signature == "甲管理员"
+    assert proposal.operations[0].to_dict()["signature"] == "甲管理员"
     run(pkg_tidy.apply(store, proposal.operations))
     assert pkg_memstore.parse_memory(run(store.read("a.md"))).signature == "甲管理员"
 

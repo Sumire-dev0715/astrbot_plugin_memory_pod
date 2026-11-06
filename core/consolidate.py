@@ -94,7 +94,12 @@ class Operation:
         }
         if self.op == "write":
             data.update(
-                type=self.type, description=self.description, content=self.content
+                type=self.type,
+                description=self.description,
+                content=self.content,
+                # 预览要能看到并原样带回署名：留言板告示的署名由插件写进
+                # frontmatter，页面回传方案时少一个字段就会把它清空
+                signature=self.signature,
             )
         return data
 

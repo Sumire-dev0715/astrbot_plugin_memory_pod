@@ -257,15 +257,17 @@ async def propose(
         for op in ops
         if op.file not in journal_files and not journal.is_journal(op.file, op.type)
     ]
-    # 留言板每条告示都必须带署名：改写沿用原署名，合并出的新告示用这次
-    # 整理看到的第一个署名；都没有时按管理页操作署名"管理员"。
+    # 留言板每条告示都必须带署名，且署名由插件决定：改写沿用原署名，
+    # 合并出的新告示用这次整理看到的第一个署名；都没有时按管理页操作
+    # 署名"管理员"。模型给的 signature 不可信（提示注入可能借整理换掉
+    # 别人告示的署名），这里一律覆盖。
     if store.layer == memstore.SCOPE_BOARD:
         signatures = {}
         for header, content in files:
             signatures[header.file] = memstore.parse_memory(content).signature
         fallback = next((value for value in signatures.values() if value), "管理员")
         for op in ops:
-            if op.op == "write" and not op.signature:
+            if op.op == "write":
                 op.signature = signatures.get(op.file) or fallback
     # 记下复盘时各目标文件的写入时间，应用时据此识别期间被改过的文件
     for op in ops:
