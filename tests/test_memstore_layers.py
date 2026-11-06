@@ -152,6 +152,7 @@ def test_person_file_name_accepts_lowercase_topics_only():
     assert pkg_memstore.is_person_file("user-123-games.md")
     assert pkg_memstore.is_person_file("user-123-games-2026.md")
     assert not pkg_memstore.is_person_file("user-123-Games.md")
+    assert not pkg_memstore.is_person_file("user-123-工作.md")
     assert not pkg_memstore.is_person_file("user-123-.md")
     assert not pkg_memstore.is_person_file("user-123--games.md")
     assert pkg_memstore.is_primary_person_file("user-123.md")

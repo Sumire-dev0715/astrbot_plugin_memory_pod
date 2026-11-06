@@ -43,7 +43,7 @@ _SAFE_FILE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,120}\.md$")
 
 CONSOLIDATE_PROMPT = """你是聊天机器人的记忆整理助手。下面是记忆库「{scope_label}」里的全部记忆文件（每个文件标注了最近写入时间与最近被用到的时间）。请像整理笔记一样做一次复盘：
 
-- 合并重复：同一个人（同一个数字 ID）或同一件事分散在几个文件里的，合并进一个文件——人物主档案统一命名为 user-<数字ID>.md，主题档案命名为 user-<数字ID>-<主题>.md——并删除其余文件；
+- 合并重复：同一个人（同一个数字 ID）或同一件事分散在几个文件里的，合并进一个文件——人物主档案统一命名为 user-<数字ID>.md，主题档案命名为 user-<数字ID>-<主题>.md（主题用小写英文、数字和连字符）——并删除其余文件；
 - 修正过时与矛盾：同一事实前后矛盾时以较新的为准，删去明显已失效的内容；正文里的相对日期（明天、下周）按写入时间换算成绝对日期；
 - 精简：长期没被用到、内容又明显只是一次性的条目（如早已过去的临时安排）可以删除；有长期价值的即使没用过也保留；
 - 日记（journal）是每日流水账：保持 journal 类型与现有文件名（journal-<日期>.md），不要删除日记文件，也不要把它合并进其他记忆；只在确有重复或过期内容时精简正文；
@@ -269,13 +269,27 @@ def operations_from_payload(
     return ops or []
 
 
-def requested_files(raw) -> set[str]:
-    """回传方案里点到的文件名（不论是否通过校验），用于报告被跳过的条目。"""
+def _plan_entries(raw) -> list:
+    """整理方案条目：既接受 JSON 文本（模型回复），也接受回传的列表。"""
+    if isinstance(raw, list):
+        return raw
+    if isinstance(raw, str):
+        data = _load_array(raw)
+        return data if isinstance(data, list) else []
+    return []
+
+
+def requested_files(raw, *, op: str | None = None) -> set[str]:
+    """方案里点到的文件名（不论是否通过校验），用于报告被跳过的条目。
+
+    raw 可以是模型返回的文本，也可以是管理页回传的列表；op 只统计指定操作。
+    """
     files: set[str] = set()
-    if not isinstance(raw, list):
-        return files
-    for entry in raw:
+    for entry in _plan_entries(raw):
         if not isinstance(entry, dict):
+            continue
+        entry_op = str(entry.get("op", "") or "write").strip().lower()
+        if op is not None and entry_op != op:
             continue
         file = str(entry.get("file", "")).strip()
         if not file:
@@ -284,6 +298,16 @@ def requested_files(raw) -> set[str]:
             file += MEMORY_FILE_SUFFIX
         files.add(file)
     return files
+
+
+def missing_write_files(raw, ops: list[Operation]) -> set[str]:
+    """方案里要求写入、却没有进入可应用操作的文件名。
+
+    有这种情况时调用方必须放弃同方案里的删除：写入没落盘，合并目标不存在，
+    再删源文件就会丢内容（tidy.apply 的 write_failed 只覆盖已进入 ops 的写）。
+    """
+    applied = {op.file for op in ops if op.op == "write"}
+    return requested_files(raw, op="write") - applied
 
 
 def is_stale(op: Operation, current_mtime: float | None) -> bool:

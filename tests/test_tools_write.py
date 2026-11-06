@@ -1370,6 +1370,11 @@ def test_person_type_must_match_filename(tmp_path):
             event, "notebook", "user-123-Work.md", "person", "档案", "正文"
         )
     )
+    assert "文件名不合法" in run(
+        plugin.memory_write(
+            event, "notebook", "user-123-工作.md", "person", "档案", "正文"
+        )
+    )
     # 主档案与合规的主题档案都接受 type=person
     assert "已写入 notebook/user-123.md" in run(
         plugin.memory_write(event, "notebook", "user-123.md", "person", "我", "身份")

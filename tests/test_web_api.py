@@ -404,6 +404,35 @@ def test_consolidate_apply_cannot_touch_other_scope(tmp_path):
     assert "改写" in call(plugin._store.whisper_scope("a").read("secret.md"))
 
 
+def test_consolidate_apply_blocks_delete_when_write_invalid(tmp_path):
+    """回传方案里的写入未通过校验时，同方案的删除也不能执行。"""
+    plugin, dashboard = setup(tmp_path)
+    notebook = plugin._store.notebook_scope("Bot-A")
+    call(notebook.write("a.md", thing("a", description="棋", body="他会下棋")))
+    body(
+        {
+            "scope": "notebook",
+            "key": "Bot-A",
+            "operations": [
+                {
+                    "op": "write",
+                    "file": "user-123.md",
+                    "type": "note",
+                    "description": "合并档案",
+                    "content": "他会下棋",
+                },
+                {"op": "delete", "file": "a.md", "reason": "已合并"},
+            ],
+        }
+    )
+    result = route(dashboard, "consolidate_apply")
+    assert result["status"] == "ok", result
+    assert "他会下棋" in call(notebook.read("a.md"))
+    assert call(notebook.read("user-123.md")) is None
+    messages = [item["message"] for item in raw(result)["results"]]
+    assert any("删除" in message for message in messages)
+
+
 def test_board_consolidate_keeps_signature_through_preview_and_apply(tmp_path):
     plugin, dashboard = setup(tmp_path)
     board = plugin._store.board_scope()

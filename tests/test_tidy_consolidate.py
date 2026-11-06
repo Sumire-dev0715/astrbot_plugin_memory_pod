@@ -101,6 +101,8 @@ def test_consolidate_prompt_mentions_three_layers_but_one_scope():
     assert "这一处" in prompt
     assert "留言板" in prompt and "小本本" in prompt and "悄悄话" in prompt
     assert "不要在这里跨层搬动内容" in prompt
+    # 主题档案的命名限制与代码校验一致，避免模型写出会被静默丢掉的写入
+    assert "主题用小写英文、数字和连字符" in prompt
 
 
 def test_board_rewrite_keeps_signature_and_new_notice_gets_one(tmp_path):
@@ -348,3 +350,60 @@ def test_tidy_scope_label_does_not_leak_group_name(tmp_path):
     assert "987654321" not in label
     assert "GroupMessage" not in label
     assert "这段对话的悄悄话" in label
+
+
+def test_invalid_merge_write_blocks_deletes(tmp_path):
+    """整理目标写入被校验丢掉时，同方案的删除不能继续，否则合并内容丢失。"""
+    from support import pkg_memstore
+
+    store = pkg_memstore.MemoryStore(tmp_path / "memories").notebook_scope("Bot-A")
+    run(store.write("a.md", thing("a", description="棋", body="他会下棋")))
+    plan = [
+        {
+            "op": "write",
+            "file": "user-123.md",
+            "type": "note",
+            "description": "合并档案",
+            "content": "他会下棋",
+            "reason": "合并进人物档案",
+        },
+        {"op": "delete", "file": "a.md", "reason": "已合并"},
+    ]
+    proposal = run(
+        pkg_tidy.propose(
+            store, "小本本", replies("<operations>" + json.dumps(plan) + "</operations>")
+        )
+    )
+    assert all(op.op != "delete" for op in proposal.operations)
+    assert "user-123.md" in proposal.skipped
+    run(pkg_tidy.apply(store, proposal.operations))
+    assert "他会下棋" in run(store.read("a.md"))
+
+
+def test_valid_person_merge_still_deletes_source(tmp_path):
+    """合法的主题档案写入仍按先写后删执行。"""
+    from support import pkg_memstore
+
+    store = pkg_memstore.MemoryStore(tmp_path / "memories").notebook_scope("Bot-A")
+    run(store.write("a.md", thing("a", description="棋", body="他会下棋")))
+    plan = [
+        {
+            "op": "write",
+            "file": "user-123-games.md",
+            "type": "person",
+            "description": "游戏",
+            "content": "他会下棋",
+            "reason": "合并进主题档案",
+        },
+        {"op": "delete", "file": "a.md", "reason": "已合并"},
+    ]
+    proposal = run(
+        pkg_tidy.propose(
+            store, "小本本", replies("<operations>" + json.dumps(plan) + "</operations>")
+        )
+    )
+    assert [op.op for op in proposal.operations] == ["write", "delete"]
+    results = run(pkg_tidy.apply(store, proposal.operations))
+    assert all(item["ok"] for item in results)
+    assert "他会下棋" in run(store.read("user-123-games.md"))
+    assert run(store.read("a.md")) is None

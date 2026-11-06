@@ -261,6 +261,12 @@ async def propose(
         for op in ops
         if op.file not in journal_files and not journal.is_journal(op.file, op.type)
     ]
+    # 有写入没通过校验（类型与文件名对不上、正文为空等）时，同方案的删除
+    # 必须一起放弃：合并目标没落盘，再删源文件就会丢内容。
+    missing_writes = consolidate.missing_write_files(text, ops)
+    if missing_writes:
+        ops = [op for op in ops if op.op != "delete"]
+        skipped.extend(sorted(missing_writes))
     # 留言板每条告示都必须带署名，且署名由插件决定：改写沿用原署名，
     # 合并出的新告示用这次整理看到的第一个署名；都没有时按管理页操作
     # 署名"管理员"。模型给的 signature 不可信（提示注入可能借整理换掉

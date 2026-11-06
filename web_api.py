@@ -1129,6 +1129,13 @@ class MemoryDashboard:
         requested = consolidate.requested_files(raw_ops)
         if not ops and not requested:
             raise ApiError("没有可应用的操作")
+        # 有写入没通过校验时，同方案的删除必须一起放弃：合并目标没落盘，
+        # 再删源文件就会丢内容（与 core/tidy.propose 同一口径）。
+        missing_writes = consolidate.missing_write_files(raw_ops, ops)
+        blocked_deletes: set[str] = set()
+        if missing_writes:
+            blocked_deletes = {op.file for op in ops if op.op == "delete"}
+            ops = [op for op in ops if op.op != "delete"]
         book = self.plugin._tidy
         sid = tidy.scope_id(scope, key)
         if not book.claim(sid):
@@ -1136,7 +1143,18 @@ class MemoryDashboard:
         try:
             # 没通过重新校验的条目（比如复盘后文件已不在）也要让管理员看到
             skipped = [
-                {"op": "", "file": file, "ok": False, "message": "未通过校验，已跳过"}
+                {
+                    "op": "",
+                    "file": file,
+                    "ok": False,
+                    "message": (
+                        "有写入未通过校验，为避免删掉未合并的内容，已跳过删除"
+                        if file in blocked_deletes
+                        else "写入未通过校验，已跳过"
+                        if file in missing_writes
+                        else "未通过校验，已跳过"
+                    ),
+                }
                 for file in sorted(requested - {op.file for op in ops})
             ]
             results = await tidy.apply(

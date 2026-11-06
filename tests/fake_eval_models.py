@@ -419,7 +419,6 @@ class GoodEvalModel:
             "memory_write",
             scope="board",
             file="notice.md",
-            type="note",
             description="留言板告示",
             content=content,
         )
