@@ -401,3 +401,53 @@ def test_import_refuses_non_utf8_existing_file_without_aborting_batch(tmp_path):
     assert bad.read_bytes() == b"\xff\xfe\x00broken"
     assert results[1].landed
     assert "好的" in run(scope.read("ok.md"))
+
+
+def test_import_overwrite_forgotten_copy_goes_to_trash(tmp_path):
+    scope = store(tmp_path)
+    run(scope.write("a.md", thing("a", body="睡着的旧版")))
+    run(scope.forget("a.md"))
+    forgotten = run(scope.read_forgotten("a.md"))
+    results = run(
+        scope.import_files(
+            [
+                pkg_memstore.ImportEntry(
+                    "a.md", thing("a", body="导入的睡着版"), forgotten=True
+                )
+            ],
+            pkg_memstore.CONFLICT_OVERWRITE,
+            actor="transfer",
+        )
+    )
+    assert results[0].landed
+    entries = [item for item in scope.trash_entries() if item.file == "a.md"]
+    assert len(entries) == 1 and entries[0].action == pkg_history.ACTION_IMPORT
+    assert scope.read_trash(entries[0].entry) == forgotten
+    assert "导入的睡着版" in run(scope.read_forgotten("a.md"))
+
+
+def test_restore_audit_records_actor(tmp_path):
+    scope = store(tmp_path)
+    run(scope.write("a.md", thing("a", body="甲")))
+    run(scope.forget("a.md"))
+    assert run(scope.restore("a.md", actor="Bot-A")).ok
+    rows = [
+        json.loads(line)
+        for line in (scope.root / pkg_history.AUDIT_FILENAME)
+        .read_text("utf-8")
+        .splitlines()
+    ]
+    assert rows[-1]["action"] == pkg_history.ACTION_RESTORE
+    assert rows[-1]["actor"] == "Bot-A"
+
+
+def test_trash_count_matches_list_and_ignores_junk(tmp_path):
+    scope = store(tmp_path)
+    run(scope.write("a.md", thing("a", body="甲")))
+    run(scope.write("b.md", thing("b", body="乙")))
+    run(scope.delete("a.md"))
+    run(scope.delete("b.md"))
+    trash = scope.root / pkg_history.TRASH_DIRNAME
+    (trash / "notes.txt").write_text("不是回收站条目", "utf-8")
+    (trash / "99999999-000000-000__bad.md").write_text("坏时间戳", "utf-8")
+    assert scope.trash_count() == len(scope.trash_entries()) == 2
