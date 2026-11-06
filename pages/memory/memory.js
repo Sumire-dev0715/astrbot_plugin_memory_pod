@@ -1331,7 +1331,10 @@
     function paint() {
       const d = st.data;
       if (!d) {
-        ui.replace(root, st.error ? ui.errorState(st.error, load) : ui.spinner());
+        // 读的时候和读失败时也有标题栏：窄屏有返回按钮，打开详情后的焦点也有地方落
+        const pending = detailHead({ view: view, title: name, mono: true });
+        root.setAttribute("aria-labelledby", pending.id);
+        ui.replace(root, pending.el, st.error ? ui.errorState(st.error, load) : ui.spinner());
         return;
       }
       const board = r.scope === "board";
@@ -1735,7 +1738,9 @@
 
     function paint() {
       if (!st.ready) {
-        ui.replace(root, st.error ? ui.errorState(st.error, load) : ui.spinner());
+        const pending = detailHead({ view: view, title: opts.file || t("newMemory"), mono: true });
+        root.setAttribute("aria-labelledby", pending.id);
+        ui.replace(root, pending.el, st.error ? ui.errorState(st.error, load) : ui.spinner());
         return;
       }
       dirtyBadge = h("span", { class: "dirty", hidden: !isDirty() }, h("span", { class: "dot dot-warn", "aria-hidden": "true" }), t("unsaved"));

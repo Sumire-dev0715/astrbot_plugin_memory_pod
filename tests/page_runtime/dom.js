@@ -181,7 +181,9 @@ function parseCompound(text) {
       const body = text.slice(i + 1, end);
       const m = /^([A-Za-z0-9_:-]+)(?:=(?:"([^"]*)"|'([^']*)'|([^"'\]]*)))?$/.exec(body);
       if (!m) throw new Error("属性选择器无法解析: " + body);
-      out.attrs.push({ name: m[1], value: m[2] !== undefined ? m[2] : m[3] !== undefined ? m[3] : m[4] });
+      const raw = m[2] !== undefined ? m[2] : m[3] !== undefined ? m[3] : m[4];
+      // 值里的 CSS 转义（CSS.escape 产生的 \:）还原成字面字符，和浏览器一样按字面值比较
+      out.attrs.push({ name: m[1], value: raw === undefined ? raw : raw.replace(/\\(.)/g, "$1") });
       i = end + 1;
     } else if (text.startsWith(":not(", i)) {
       let depth = 0;

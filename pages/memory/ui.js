@@ -71,6 +71,7 @@
   function replace(el) {
     const active = document.activeElement;
     const hadFocus = Boolean(el && active && active !== el && el.contains(active));
+    const hadHeading = hadFocus && active.hasAttribute("data-detail-heading");
     clear(el);
     for (let i = 1; i < arguments.length; i += 1) {
       append(el, arguments[i]);
@@ -78,6 +79,13 @@
     if (hadFocus) {
       const now = document.activeElement;
       if (!now || now === document.body || !now.isConnected) {
+        // 详情的标题有焦点时整块重画（比如文件读完了）：焦点跟到新的标题上，
+        // 读屏软件会接着读新标题
+        const heading = hadHeading ? el.querySelector("[data-detail-heading]") : null;
+        if (heading) {
+          heading.focus();
+          return el;
+        }
         // 焦点原来在被换掉的内容里（比如刚点过的按钮已经不在了）：停在这个区域上，
         // 键盘用户接着按 Tab 就从这里往下走，而不是回到整个页面的开头
         if (!el.hasAttribute("tabindex")) {
