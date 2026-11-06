@@ -380,6 +380,71 @@ def test_invalid_merge_write_blocks_deletes(tmp_path):
     assert "他会下棋" in run(store.read("a.md"))
 
 
+def test_duplicate_writes_apply_nothing_and_block_deletes(tmp_path):
+    """同一文件写两次：两条可能各只含一部分合并结果，整条不应用，删除也放弃。"""
+    from support import pkg_memstore
+
+    store = pkg_memstore.MemoryStore(tmp_path / "memories").notebook_scope("Bot-A")
+    run(store.write("a.md", thing("a", description="甲", body="甲的内容")))
+    run(store.write("b.md", thing("b", description="乙", body="乙的内容")))
+    plan = [
+        {
+            "op": "write",
+            "file": "a.md",
+            "type": "note",
+            "description": "合并",
+            "content": "甲的内容",
+            "reason": "第一次写",
+        },
+        {
+            "op": "write",
+            "file": "a",
+            "type": "note",
+            "description": "合并",
+            "content": "乙独有的事实",
+            "reason": "第二次写（文件名省了后缀）",
+        },
+        {"op": "delete", "file": "b.md", "reason": "已合并"},
+    ]
+    raw = "<operations>" + json.dumps(plan) + "</operations>"
+    ops = consolidate.parse_operations(raw, {"a.md", "b.md"})
+    # 自相矛盾的写入一条都不应用；删除条目虽然解析出来了，但调用方必须拦下
+    assert [(op.op, op.file) for op in ops] == [("delete", "b.md")]
+    assert consolidate.missing_write_files(raw, ops) == {"a.md"}
+
+    proposal = run(pkg_tidy.propose(store, "小本本", replies(raw)))
+    assert proposal.operations == []
+    assert "a.md" in proposal.skipped
+    run(pkg_tidy.apply(store, proposal.operations))
+    assert "甲的内容" in run(store.read("a.md"))
+    assert "乙独有的事实" not in run(store.read("a.md"))
+    assert "乙的内容" in run(store.read("b.md"))
+
+
+def test_unknown_operation_counts_as_unapplied_write(tmp_path):
+    """不认识的 op（如 update）是模型想写而没按格式写：删除必须一起放弃。"""
+    from support import pkg_memstore
+
+    store = pkg_memstore.MemoryStore(tmp_path / "memories").notebook_scope("Bot-A")
+    run(store.write("a.md", thing("a", description="甲", body="旧内容")))
+    run(store.write("b.md", thing("b", description="乙", body="待合并")))
+    plan = [
+        {"op": "update", "file": "a.md", "content": "旧内容\n待合并", "reason": "追加"},
+        {"op": "delete", "file": "b.md", "reason": "已合并"},
+    ]
+    raw = "<operations>" + json.dumps(plan) + "</operations>"
+    ops = consolidate.parse_operations(raw, {"a.md", "b.md"})
+    assert [(op.op, op.file) for op in ops] == [("delete", "b.md")]
+    assert consolidate.missing_write_files(raw, ops) == {"a.md"}
+
+    proposal = run(pkg_tidy.propose(store, "小本本", replies(raw)))
+    assert all(op.op != "delete" for op in proposal.operations)
+    assert "a.md" in proposal.skipped
+    run(pkg_tidy.apply(store, proposal.operations))
+    assert run(store.read("a.md")).count("待合并") == 0
+    assert "待合并" in run(store.read("b.md"))
+
+
 def test_valid_person_merge_still_deletes_source(tmp_path):
     """合法的主题档案写入仍按先写后删执行。"""
     from support import pkg_memstore

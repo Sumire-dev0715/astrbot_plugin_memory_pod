@@ -433,6 +433,34 @@ def test_consolidate_apply_blocks_delete_when_write_invalid(tmp_path):
     assert any("删除" in message for message in messages)
 
 
+def test_consolidate_apply_blocks_delete_on_duplicate_or_unknown_writes(tmp_path):
+    """重复写入与不认识的 op 都不能算写入成功，同方案的删除必须放弃。"""
+    plugin, dashboard = setup(tmp_path)
+    notebook = plugin._store.notebook_scope("Bot-A")
+    call(notebook.write("a.md", thing("a", description="甲", body="甲的内容")))
+    call(notebook.write("b.md", thing("b", description="乙", body="待合并")))
+    for plan in (
+        [
+            {"op": "write", "file": "a.md", "type": "note",
+             "description": "合并", "content": "甲的内容"},
+            {"op": "write", "file": "a.md", "type": "note",
+             "description": "合并", "content": "待合并"},
+            {"op": "delete", "file": "b.md", "reason": "已合并"},
+        ],
+        [
+            {"op": "update", "file": "a.md", "content": "甲的内容\n待合并"},
+            {"op": "delete", "file": "b.md", "reason": "已合并"},
+        ],
+    ):
+        body({"scope": "notebook", "key": "Bot-A", "operations": plan})
+        result = route(dashboard, "consolidate_apply")
+        assert result["status"] == "ok", result
+        assert call(notebook.read("a.md")).count("待合并") == 0
+        assert "待合并" in call(notebook.read("b.md"))
+        skipped = raw(result)["results"]
+        assert any(item["file"] == "a.md" and not item["ok"] for item in skipped)
+
+
 def test_board_consolidate_keeps_signature_through_preview_and_apply(tmp_path):
     plugin, dashboard = setup(tmp_path)
     board = plugin._store.board_scope()

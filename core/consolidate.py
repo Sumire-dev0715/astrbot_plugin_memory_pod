@@ -171,6 +171,23 @@ def _load_array(text: str):
             return None
 
 
+def _plan_file(entry: dict) -> str:
+    """方案条目里的文件名：去空白并补 .md 后缀；空文件名返回空串。"""
+    file = str(entry.get("file", "")).strip()
+    if file and not file.endswith(MEMORY_FILE_SUFFIX):
+        file += MEMORY_FILE_SUFFIX
+    return file
+
+
+def _is_write_intent(entry: dict) -> bool:
+    """这条方案条目是否在要求写入。
+
+    op 缺省按 write 处理；不认识的 op（例如 update）说明模型想写却没按
+    格式写，也按写入意图对待——宁可放弃同方案的删除，也不能丢内容。
+    """
+    return str(entry.get("op", "") or "write").strip().lower() != "delete"
+
+
 def parse_operations(
     text: str,
     existing: set[str],
@@ -181,24 +198,32 @@ def parse_operations(
     """解析并校验整理方案；输出无法解析时返回 None（区别于"无需整理"的空列表）。
 
     丢弃的条目：文件名不合法、指向 MEMORY.md、删除不存在的文件、
-    写入缺正文、正文超长或类型非法、同一文件出现多次（只认第一次）。
+    写入缺正文、正文超长或类型非法、同一文件出现多次写入（整条不应用，
+    两条可能各只含一部分合并结果，写哪条都会丢内容）、不认识的 op。
     allow_expires 只在整理留言板、应用页面回传的方案时为真；其他作用域
     的 expires 字段一律忽略（PLAN 3.9.2 第 3 条只让留言板有到期日）。
     """
     data = _load_array(text)
     if not isinstance(data, list):
         return None
+    # 先数一遍每个文件被要求写入几次：重复写入的方案自相矛盾，整条不应用，
+    # 并由 missing_write_files 让调用方放弃同方案的删除。
+    write_counts: dict[str, int] = {}
+    for entry in data:
+        if isinstance(entry, dict) and _is_write_intent(entry):
+            file = _plan_file(entry)
+            if file:
+                write_counts[file] = write_counts.get(file, 0) + 1
     ops: list[Operation] = []
     seen: set[str] = set()
     for entry in data:
         if len(ops) >= MAX_OPERATIONS or not isinstance(entry, dict):
             continue
         op = str(entry.get("op", "")).strip().lower()
-        file = str(entry.get("file", "")).strip()
-        if not file.endswith(MEMORY_FILE_SUFFIX):
-            file += MEMORY_FILE_SUFFIX
+        file = _plan_file(entry)
         if (
-            file in seen
+            not file
+            or file in seen
             or file.lower() == INDEX_FILENAME.lower()
             or not _SAFE_FILE_RE.match(file)
         ):
@@ -215,6 +240,10 @@ def parse_operations(
                 Operation(op="delete", file=file, reason=reason, base_mtime=base_mtime)
             )
         elif op == "write":
+            if write_counts.get(file, 0) > 1:
+                # 文件名占住，同方案里针对它的删除也不能应用
+                seen.add(file)
+                continue
             mem_type = (
                 "" if board else str(entry.get("type", "")).strip().lower()
             )
@@ -279,24 +308,19 @@ def _plan_entries(raw) -> list:
     return []
 
 
-def requested_files(raw, *, op: str | None = None) -> set[str]:
-    """方案里点到的文件名（不论是否通过校验），用于报告被跳过的条目。
+def requested_files(raw) -> set[str]:
+    """方案里点到的文件名（不论 op 是否认识、是否通过校验）。
 
-    raw 可以是模型返回的文本，也可以是管理页回传的列表；op 只统计指定操作。
+    raw 可以是模型返回的文本，也可以是管理页回传的列表；调用方据此
+    报告被跳过的条目。
     """
     files: set[str] = set()
     for entry in _plan_entries(raw):
         if not isinstance(entry, dict):
             continue
-        entry_op = str(entry.get("op", "") or "write").strip().lower()
-        if op is not None and entry_op != op:
-            continue
-        file = str(entry.get("file", "")).strip()
-        if not file:
-            continue
-        if not file.endswith(MEMORY_FILE_SUFFIX):
-            file += MEMORY_FILE_SUFFIX
-        files.add(file)
+        file = _plan_file(entry)
+        if file:
+            files.add(file)
     return files
 
 
@@ -305,9 +329,25 @@ def missing_write_files(raw, ops: list[Operation]) -> set[str]:
 
     有这种情况时调用方必须放弃同方案里的删除：写入没落盘，合并目标不存在，
     再删源文件就会丢内容（tidy.apply 的 write_failed 只覆盖已进入 ops 的写）。
+    同一文件被要求写入两次也算：两条可能各只含一部分合并结果，而落盘
+    只能有一条。未知 op 同样算写入意图（见 _is_write_intent）。
     """
-    applied = {op.file for op in ops if op.op == "write"}
-    return requested_files(raw, op="write") - applied
+    requested: dict[str, int] = {}
+    for entry in _plan_entries(raw):
+        if not isinstance(entry, dict) or not _is_write_intent(entry):
+            continue
+        file = _plan_file(entry)
+        if file:
+            requested[file] = requested.get(file, 0) + 1
+    applied: dict[str, int] = {}
+    for op in ops:
+        if op.op == "write":
+            applied[op.file] = applied.get(op.file, 0) + 1
+    return {
+        file
+        for file, count in requested.items()
+        if count != 1 or applied.get(file, 0) != 1
+    }
 
 
 def is_stale(op: Operation, current_mtime: float | None) -> bool:
