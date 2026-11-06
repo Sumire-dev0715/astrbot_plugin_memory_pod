@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 import types
 
@@ -660,6 +661,31 @@ def test_notebook_write_updates_opening_index_next_turn(tmp_path):
 
 
 # ------------------------------------------------- 其他审查问题的回归
+
+
+def test_forgotten_whisper_profile_restored_on_next_private_message(tmp_path):
+    plugin = make_plugin(tmp_path, enable_forgetting=True, forget_after_days=1)
+    event = FakeEvent("Bot-A", "123", umo="Bot-A:FriendMessage:123")
+    whisper = plugin._store.whisper_scope(
+        pkg_memstore.safe_key(event.unified_msg_origin)
+    )
+    old = time.time() - 10 * 86400
+    run(
+        whisper.write(
+            "user-123.md", person_file("123", "私密档案内容"), now=old
+        )
+    )
+    path = whisper.root / "user-123.md"
+    os.utime(path, (old, old))
+    run(whisper.forget_stale(86400.0))
+    assert whisper.has_forgotten("user-123.md")
+
+    req = make_request("我回来了")
+    run(plugin._process_request(event, req))
+    assert not whisper.has_forgotten("user-123.md")
+    opening = opening_text(req)
+    assert "### whisper/user-123.md" in opening
+    assert "私密档案内容" in opening
 
 
 def test_read_with_leading_slash_still_counts_as_read(tmp_path):

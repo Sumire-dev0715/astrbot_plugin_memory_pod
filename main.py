@@ -594,6 +594,9 @@ class MemoryPodPlugin(Star):
         if memory_on:
             # 关闭记忆后不再动磁盘：历史与回收站的保留期清理也不跑
             self._schedule_history_cleanup()
+            # 被遗忘的身份必选档案先恢复，开头块和本轮召回才能拿到全文；
+            # 也要赶在遗忘扫描之前，恢复会记为刚用过，不能再被扫出去
+            await self._restore_identities(event, umo, query)
             # ---- 遗忘扫描：长期没用到的记忆退出索引与召回（后台，按目录节流） ----
             self._maybe_forget(event, now)
 
@@ -988,10 +991,6 @@ class MemoryPodPlugin(Star):
             forced = recall.identity_files(
                 sender_id, self._mentioned_ids(event), query
             )
-            if forced and self._forgetting_on():
-                await self._remember_identity(
-                    scopes, forced, self._event_actor(event)
-                )
             pinned = dict(rt.index_pinned) if rt is not None else {}
             updates = await self._pinned_updates(stores, pinned)
             candidates: list[recall.Candidate] = []
@@ -1070,29 +1069,70 @@ class MemoryPodPlugin(Star):
             )
         return updates
 
+    async def _restore_identities(
+        self, event: AstrMessageEvent, umo: str, query: str
+    ) -> None:
+        """身份必选的人物档案被遗忘后，这个人又出现时先恢复再建开头块。
+
+        小本本档案在所有会话里按身份必选恢复；私聊里还要恢复当前这段
+        对话的悄悄话档案——它固定进开头块，不恢复就会从开头块消失
+        （PLAN 3.8.3：私聊时对方的小本本和悄悄话档案都放进开头块）。
+        """
+        if not self._forgetting_on():
+            return
+        sender_id, _ = self._sender_identity(event)
+        forced = recall.identity_files(
+            sender_id, self._mentioned_ids(event), query
+        )
+        if not forced:
+            return
+        private = bool(self._pin_profile_key(event))
+        scopes = [
+            (memstore.SCOPE_NOTEBOOK, self._notebook_scope(event)),
+            (memstore.SCOPE_WHISPER, self._whisper_scope(umo)),
+        ]
+        restored = await self._remember_identity(
+            scopes,
+            forced,
+            self._event_actor(event),
+            whisper_name=f"user-{sender_id}.md" if private and sender_id else "",
+        )
+        for label in {label for label, _ in restored}:
+            key = memstore.safe_key(umo) if label == memstore.SCOPE_WHISPER else None
+            self.invalidate_scope(label, key)
+
     async def _remember_identity(
         self,
         scopes: list[tuple[str, memstore.ScopeStore]],
         forced: list[str],
         actor: str = "",
-    ) -> None:
-        """身份必选的人物文件若已被遗忘，这个人又出现了——先恢复再召回。
+        whisper_name: str = "",
+    ) -> list[tuple[str, str]]:
+        """把已遗忘的身份必选档案恢复回在册，返回恢复的 (作用域, 文件名)。
 
-        只恢复小本本里的档案：它们本来是这台机器人在所有会话共享的记忆。
+        小本本用 forced（发送者、被 @ 的人、正文里的数字 ID）；悄悄话只在
+        私聊里恢复发送者本人的档案，避免群聊把别人的悄悄话档案翻出来。
         """
+        restored: list[tuple[str, str]] = []
         for label, store in scopes:
-            if label not in recall.FORCED_SCOPES:
+            if label in recall.FORCED_SCOPES:
+                names = forced
+            elif label == memstore.SCOPE_WHISPER and whisper_name:
+                names = [whisper_name]
+            else:
                 continue
-            for name in forced:
+            for name in names:
                 if store.exists(name) or not store.has_forgotten(name):
                     continue
                 report = await store.restore(name, actor=actor)
                 if report.ok:
+                    restored.append((label, name))
                     logger.info(
                         LOG_PREFIX + f"{label} 记忆 {name} 已从遗忘中恢复（此人再次出现）"
                     )
                 else:
                     logger.debug(LOG_PREFIX + f"恢复 {label}/{name} 失败：{report.message}")
+        return restored
 
     # ============================================================ 遗忘
 

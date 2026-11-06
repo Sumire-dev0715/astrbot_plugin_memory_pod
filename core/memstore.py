@@ -1757,6 +1757,9 @@ class ScopeStore:
             used.uses += 1
             data[name] = used
             self._save_usage(data)
+        # _sync_index_line 可能已经把头信息重新缓存成恢复前的统计；使用统计
+        # 变了要再丢掉缓存，否则同一轮的遗忘扫描会立刻把刚恢复的档案移走
+        self._drop_header(name)
         self._prune_forgotten_dir()
         return WriteReport(True, f"已恢复 {name}，索引行已同步")
 
