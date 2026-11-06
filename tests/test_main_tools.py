@@ -102,6 +102,36 @@ def test_forgotten_person_profile_not_restored_by_other_user(tmp_path):
     assert not notebook.has_forgotten("user-456.md")
 
 
+def test_forgotten_topic_profile_not_restored_by_other_user(tmp_path):
+    """主题档案和主档案一样：别人读过不替人恢复，本人读才恢复。"""
+    plugin = make_plugin(tmp_path, enable_forgetting=True, forget_after_days=1)
+    notebook = plugin._store.notebook_scope("Bot-A")
+    notebook.root.mkdir(parents=True, exist_ok=True)
+    path = notebook.root / "user-456-games.md"
+    path.write_text(
+        thing(
+            "user-456-games",
+            description="游戏",
+            body="喜欢英雄联盟",
+            mem_type="person",
+        ),
+        "utf-8",
+    )
+    old = time.time() - 10 * 86400
+    os.utime(path, (old, old))
+    run(notebook.forget_stale(86400.0))
+
+    stranger = FakeEvent("Bot-A", "123")
+    result = run(plugin.memory_read(stranger, "notebook", "user-456-games.md"))
+    assert "喜欢英雄联盟" in result
+    assert notebook.has_forgotten("user-456-games.md")
+
+    owner = FakeEvent("Bot-A", "456")
+    result = run(plugin.memory_read(owner, "notebook", "user-456-games.md"))
+    assert "喜欢英雄联盟" in result
+    assert not notebook.has_forgotten("user-456-games.md")
+
+
 def test_forgotten_board_notice_only_restored_by_admin(tmp_path):
     plugin = make_plugin(tmp_path, enable_forgetting=True)
     board = plugin._store.board_scope()

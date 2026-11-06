@@ -317,6 +317,37 @@ def test_person_profile_can_be_edited_on_management_page(tmp_path):
     assert "新身份" in call(notebook.read("user-456.md"))
 
 
+def test_legacy_types_are_listed_and_detailed_as_note_and_person(tmp_path):
+    """管理页读旧类型文件不报错：普通文件显示 note，user- 文件名显示 person。"""
+    plugin, dashboard = setup(tmp_path)
+    notebook = plugin._store.notebook_scope("Bot-A")
+    call(
+        notebook.write(
+            "legacy.md",
+            thing("legacy", description="旧类型", body="旧内容", mem_type="legacy"),
+        )
+    )
+    call(
+        notebook.write(
+            "user-456.md",
+            thing("user-456", description="阿杰", body="旧档案", mem_type="user"),
+        )
+    )
+    query(scope="notebook", key="Bot-A")
+    files = {item["file"]: item for item in raw(route(dashboard, "scope_detail"))["files"]}
+    assert files["legacy.md"]["type"] == "note"
+    assert files["user-456.md"]["type"] == "person"
+
+    query(scope="notebook", key="Bot-A", file="legacy.md")
+    detail = raw(route(dashboard, "file_detail"))
+    assert detail["type"] == "note"
+    assert detail["body"] == "旧内容"
+    query(scope="notebook", key="Bot-A", file="user-456.md")
+    detail = raw(route(dashboard, "file_detail"))
+    assert detail["type"] == "person"
+    assert detail["body"] == "旧档案"
+
+
 def test_legacy_person_profile_raw_save_keeps_old_type_and_extra_fields(tmp_path):
     """旧人物档案（type: user）在原文模式里能保存，自定义字段不丢。"""
     plugin, dashboard = setup(tmp_path)

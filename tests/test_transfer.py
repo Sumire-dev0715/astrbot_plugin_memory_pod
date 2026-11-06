@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from support import pkg_memstore, pkg_registry, run, thing
@@ -147,3 +149,38 @@ def test_cross_scope_transfer_to_board_rejects_unsigned(tmp_path):
     )
     assert report["counts"]["invalid"] == 1
     assert run(store.board_scope().read("note.md")) is None
+
+
+def test_export_and_import_keep_legacy_type_content(tmp_path):
+    """旧类型文件原样搬迁，读的时候按 note 处理，不丢正文、不报错。"""
+    transfer, mover, store, _ = make(tmp_path)
+    run(
+        store.notebook_scope("Bot-A").write(
+            "legacy.md",
+            thing("legacy", description="旧类型", body="旧内容", mem_type="legacy"),
+        )
+    )
+    bundle = run(mover.export([transfer.ScopeRef("notebook", "Bot-A")]))
+    payload = json.dumps(bundle, ensure_ascii=False)
+    assert "旧内容" in payload and "type: legacy" in payload
+
+    scopes = transfer.parse_bundle(bundle)
+    reports = run(
+        mover.import_bundle(
+            [
+                transfer.BundleScope(
+                    ref=transfer.ScopeRef("notebook", "Bot-B"),
+                    entries=scopes[0].entries,
+                    index=scopes[0].index,
+                )
+            ],
+            policy=pkg_memstore.CONFLICT_OVERWRITE,
+        )
+    )
+    assert reports[0]["counts"]["added"] == 1
+    imported = run(store.notebook_scope("Bot-B").read("legacy.md"))
+    assert "旧内容" in imported and "type: legacy" in imported
+    header = next(
+        h for h in store.notebook_scope("Bot-B").headers() if h.file == "legacy.md"
+    )
+    assert header.type == "note"

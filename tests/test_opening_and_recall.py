@@ -314,3 +314,36 @@ def test_topic_profile_not_pinned_and_not_forced(tmp_path):
     assert block is not None
     assert "notebook/user-123-games.md" in block
     assert "英雄联盟" in block
+
+
+def test_legacy_types_are_rendered_as_note_and_person_by_filename(tmp_path):
+    """旧类型不报错：普通文件按 note 注入，user- 文件名按人物档案钉住。"""
+    plugin = make_plugin(tmp_path)
+    notebook = plugin._store.notebook_scope("Bot-A")
+    run(
+        notebook.write(
+            "legacy.md",
+            thing("legacy", description="旧类型的笔记", body="旧类型的内容", mem_type="legacy"),
+        )
+    )
+    run(
+        notebook.write(
+            "user-123.md",
+            thing("user-123", description="阿杰", body="旧档案的正文", mem_type="user"),
+        )
+    )
+    event = FakeEvent("Bot-A", sender_id="123")
+    opening = run(plugin._index_block(main.RuntimeSession(), event))
+    assert "legacy.md" in opening
+    # 私聊时 user-123.md 按文件名是人物档案，正文进开头块
+    assert "### notebook/user-123.md（person｜" in opening
+    assert "旧档案的正文" in opening
+
+    # 群聊里不钉档案，但旧类型的笔记照常按 note 召回并标注类型
+    group = FakeEvent("Bot-A", sender_id="123", umo="Bot-A:GroupMessage:900")
+    block = run(
+        plugin._recall_message(group, group.unified_msg_origin, "旧类型的内容", None)
+    )
+    assert block is not None
+    assert "notebook/legacy.md（note｜" in block
+    assert "旧类型的内容" in block

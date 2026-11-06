@@ -132,7 +132,11 @@ def test_board_rewrite_keeps_signature_and_new_notice_gets_one(tmp_path):
     assert proposal.operations[0].signature == "甲管理员"
     assert proposal.operations[0].to_dict()["signature"] == "甲管理员"
     run(pkg_tidy.apply(store, proposal.operations))
-    assert pkg_memstore.parse_memory(run(store.read("a.md"))).signature == "甲管理员"
+    # 留言板不再有类型：方案里带 type=note 也不会写进文件（PLAN 3.10.1）
+    merged = run(store.read("a.md"))
+    assert pkg_memstore.parse_memory(merged).signature == "甲管理员"
+    assert pkg_memstore.parse_memory(merged).type == ""
+    assert "type:" not in merged
 
     new_plan = [
         {
@@ -154,7 +158,10 @@ def test_board_rewrite_keeps_signature_and_new_notice_gets_one(tmp_path):
     )
     assert proposal.operations[0].signature
     run(pkg_tidy.apply(store, proposal.operations))
-    assert pkg_memstore.parse_memory(run(store.read("merged.md"))).signature
+    merged = run(store.read("merged.md"))
+    assert pkg_memstore.parse_memory(merged).signature
+    assert pkg_memstore.parse_memory(merged).type == ""
+    assert "type:" not in merged
 
 
 def test_board_rewrite_keeps_expiry_and_new_notice_has_none(tmp_path):
