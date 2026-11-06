@@ -173,6 +173,15 @@ class AuditContext:
     admin: bool = False
 
 
+def _row_audit(row: dict) -> AuditContext:
+    """从旧审计行取回会话上下文；改名迁历史时沿用，群名不会丢。"""
+    return AuditContext(
+        session=str(row.get("session") or ""),
+        group=str(row.get("group") or ""),
+        admin=bool(row.get("admin")),
+    )
+
+
 @dataclass(frozen=True)
 class HistoryVersion:
     """一个历史版本；管理页按时间、动作、actor、大小展示。"""
@@ -495,6 +504,7 @@ class HistoryLog:
                     str(row.get("before_sha1") or ""),
                     str(row.get("after_sha1") or ""),
                     ts=ts,
+                    audit=_row_audit(row),
                 )
             _rmdir_if_empty(source)
             return len(moved)
@@ -563,6 +573,7 @@ class HistoryLog:
                     str(row.get("before_sha1") or ""),
                     str(row.get("after_sha1") or ""),
                     ts=ts,
+                    audit=_row_audit(row),
                 )
             return len(moved)
 
@@ -947,6 +958,9 @@ def move_scope(
             "source": "",
             "before_sha1": "",
             "after_sha1": "",
+            "session": "",
+            "group": "",
+            "admin": False,
         },
     )
     return dest

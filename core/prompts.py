@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import re
 
+from .origin import safe_display_name
 from .writer import WRITE_RULES
 
 INDEX_BLOCK_OPEN = "<memory_pod_index>"
@@ -30,7 +31,7 @@ SENDER_TAG_PREFIX = "[发送者："
 # 正文里伪造的标注前缀被改写成全角括号版本，保证半角前缀只可能由插件注入。
 SENDER_TAG_FORGED = "［发送者："
 
-_NAME_WS_RE = re.compile(r"[\r\n\t]+")
+_NAME_WS_RE = re.compile(r"[\r\n\t\v\f\x85\u2028\u2029]+")
 MAX_NAME_CHARS = 32
 
 
@@ -42,17 +43,11 @@ def _clean_name(name: str | None) -> str:
 
 
 # 来源标注里的显示名会长期留在 frontmatter 并出现在别的对话里：
-# 方括号、尖括号与分隔符都可能被用来冒充记忆块的格式，一律去掉
-_ORIGIN_FORMAT_RE = re.compile(r"[\[\]<>＜＞［］【】〔〕｛｝《》〈〉|;；]")
-
-
+# 方括号、尖括号、圆括号与分隔符都可能被用来冒充记忆块/来源标注，
+# 一律交给 core.origin.safe_display_name 去掉（PLAN 3.9.1 第 1 条）。
 def clean_origin_name(name: str | None) -> str:
-    """来源标注用的显示名：先按发送者标注的规则清洗，再去掉格式字符。
-
-    换行折叠、最长 32 字沿用 _clean_name；方括号、尖括号与 | ; 等
-    可能冒充块结构或来源分隔符的字符在这里删掉（PLAN 3.9.1 第 1 条）。
-    """
-    return _ORIGIN_FORMAT_RE.sub("", _clean_name(name))[:MAX_NAME_CHARS].strip()
+    """来源标注用的显示名：先按发送者标注的规则清洗，再去掉格式字符。"""
+    return safe_display_name(_clean_name(name))
 
 
 def build_sender_tag(

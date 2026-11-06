@@ -395,24 +395,71 @@ def rewrite_description(content: str, description: str) -> str:
     return content[: match.start(1)] + result + content[match.end(1):]
 
 
+def _legacy_frontmatter(
+    content: str,
+    now: float,
+    source: str,
+    origin_record: origin_mod.Origin | None,
+    name: str,
+) -> str:
+    """给没有 frontmatter 的旧文件补标准头；类型按文件名推断。"""
+    body = (content or "").strip("\n")
+    description = ""
+    for line in body.splitlines():
+        cleaned = line.strip().lstrip("#").strip()
+        if cleaned:
+            description = cleaned
+            break
+    mem_type = "reference"
+    if journal.is_journal_name(name):
+        mem_type = "journal"
+    elif is_person_file(name):
+        mem_type = "user"
+    meta = [
+        f"  type: {mem_type}",
+        f"  created: {format_stamp(now)}",
+        f"  updated: {format_stamp(now)}",
+    ]
+    sources = merge_sources("", source)
+    if sources:
+        meta.append(f"  source: {sources}")
+    origin_text = origin_mod.merge("", origin_record)
+    if origin_text:
+        meta.append(f"  origin: {origin_text}")
+    stem = name[: -len(MEMORY_FILE_SUFFIX)] if name.endswith(MEMORY_FILE_SUFFIX) else name
+    return (
+        "---\n"
+        f"name: {stem or 'memory'}\n"
+        f"description: {description or '（无描述）'}\n"
+        "metadata:\n" + "\n".join(meta) + "\n"
+        "---\n\n"
+        f"{body}\n"
+    )
+
+
 def stamp_memory(
     content: str,
     now: float,
     source: str = "",
     previous: str | None = None,
     origin_record: origin_mod.Origin | None = None,
+    name: str = "",
 ) -> str:
     """补齐 metadata 下的 created / updated / source / origin，其余内容一字不动。
 
     created 先取已有文件的（改写、整理都不会把老记忆变"新"），没有才取
     内容里写的，再没有才取现在；updated 一律取现在；source 取内容里写的
     （没写则继承已有文件的），再并入本次的来源 ID。origin 同样继承已有
-    记录，并在这次是工具写入时并入新的一条（PLAN 3.9.1）。没有 frontmatter
-    的内容原样返回。
+    记录，并在这次是工具写入时并入新的一条（PLAN 3.9.1）。
+
+    没有 frontmatter 的文件在工具写入时按标准格式补一个（类型按文件名
+    推断），这样来源记录不会因为旧文件格式而丢失；其他写入路径保持原样。
     """
     match = _FRONTMATTER_RE.match(content or "")
     if not match:
-        return content
+        if origin_record is None and not source:
+            return content
+        return _legacy_frontmatter(content, now, source, origin_record, name)
     doc = parse_memory(content)
     prev = parse_memory(previous) if previous else None
     created = ""
@@ -1276,6 +1323,7 @@ class ScopeStore:
             source,
             previous,
             origin_record=origin_record,
+            name=name,
         )
         if len(content.encode("utf-8")) > MAX_FILE_BYTES:
             return WriteReport(
@@ -1309,7 +1357,7 @@ class ScopeStore:
             ts=version.ts if version is not None else None,
             audit=audit,
         )
-        await asyncio.to_thread(self._discard_forgotten, name, actor, source)
+        await asyncio.to_thread(self._discard_forgotten, name, actor, source, audit)
         lines, size = await asyncio.to_thread(
             self._sync_index_line, name, description
         )
@@ -1770,7 +1818,11 @@ class ScopeStore:
         return True
 
     async def restore(
-        self, name: str, now: float | None = None, actor: str = ""
+        self,
+        name: str,
+        now: float | None = None,
+        actor: str = "",
+        audit: history.AuditContext | None = None,
     ) -> WriteReport:
         """把已遗忘的文件恢复在册：回到索引与召回，并记为刚被用到。"""
         name = (name or "").strip().lstrip("/")
@@ -1778,9 +1830,17 @@ class ScopeStore:
             return WriteReport(False, f"文件名不合法：{self.path_rules()}")
         now = time.time() if now is None else now
         async with self._lock:
-            return await asyncio.to_thread(self._restore_sync, name, now, actor)
+            return await asyncio.to_thread(
+                self._restore_sync, name, now, actor, audit
+            )
 
-    def _restore_sync(self, name: str, now: float, actor: str = "") -> WriteReport:
+    def _restore_sync(
+        self,
+        name: str,
+        now: float,
+        actor: str = "",
+        audit: history.AuditContext | None = None,
+    ) -> WriteReport:
         src = self._forgotten_path(name)
         dst = self.root / name
         if not src.is_file():
@@ -1811,6 +1871,7 @@ class ScopeStore:
             "",
             after_sha1,
             ts=now,
+            audit=audit,
         )
         self._drop_header(name)
         self._sync_index_line(name, description)
@@ -1854,14 +1915,23 @@ class ScopeStore:
         )
 
     def _discard_forgotten(
-        self, name: str, actor: str = "", source: str = ""
+        self,
+        name: str,
+        actor: str = "",
+        source: str = "",
+        audit: history.AuditContext | None = None,
     ) -> None:
         """在册文件刚被重写：同名的遗忘副本移进回收站，使用统计里的遗忘标记清掉。"""
         path = self._forgotten_path(name)
         if path.is_file():
             try:
                 self._history.move_to_trash(
-                    path, name, history.ACTION_DISCARD_FORGOTTEN, actor, source
+                    path,
+                    name,
+                    history.ACTION_DISCARD_FORGOTTEN,
+                    actor,
+                    source,
+                    audit=audit,
                 )
             except OSError:
                 # 旧副本没留住就不删它；宁可留一份重复，也不丢内容
@@ -2771,8 +2841,11 @@ class ScopeStore:
             else:
                 mem_type = header.type
                 updated = header.updated
+            # origin 原始字段不给模型（PLAN 3.9.1 第 4 条）：搜索片段与
+            # 命中判断都只看去掉 origin 的内容
+            searchable = origin_mod.strip_from_frontmatter(content)
             hit = insights.build_hit(
-                name, mem_type, updated, content, terms, mode
+                name, mem_type, updated, searchable, terms, mode
             )
             if hit is not None:
                 hits.append(hit)
@@ -2802,8 +2875,9 @@ class ScopeStore:
             content = await self.read_forgotten(header.file)
             if content is None:
                 continue
+            searchable = origin_mod.strip_from_frontmatter(content)
             hit = insights.build_hit(
-                header.file, header.type, header.updated, content, terms, mode
+                header.file, header.type, header.updated, searchable, terms, mode
             )
             if hit is not None:
                 hits.append(hit)

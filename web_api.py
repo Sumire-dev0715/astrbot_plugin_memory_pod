@@ -166,15 +166,33 @@ def _origin_info(
         row for row in store.audit_entries() if str(row.get("file") or "") == name
     ]
     latest: dict = {}
-    latest_by_source: dict[str, dict] = {}
+    by_source: dict[str, list[dict]] = {}
+    by_session: dict[str, list[dict]] = {}
     for row in rows:
         latest = row
         source = str(row.get("source") or "")
         if source:
-            latest_by_source[source] = row
+            by_source.setdefault(source, []).append(row)
+        session = str(row.get("session") or "")
+        if session:
+            by_session.setdefault(origin.session_hash(session), []).append(row)
+
+    def pick(record: origin.Origin) -> dict:
+        """按会话短哈希精确对上审计行；对不上再取说话人里最近的。"""
+        same_session = by_session.get(record.session)
+        if same_session:
+            return same_session[-1]
+        candidates = by_source.get(record.speaker)
+        if not candidates:
+            return latest
+        return min(
+            candidates,
+            key=lambda row: abs(float(row.get("ts") or 0) - record.ts),
+        )
+
     result: list[dict] = []
     for record in records:
-        row = latest_by_source.get(record.speaker) or latest
+        row = pick(record)
         item = {
             "kind": record.kind,
             "speaker": record.speaker,

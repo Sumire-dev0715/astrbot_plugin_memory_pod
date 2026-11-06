@@ -456,3 +456,104 @@ def test_trash_count_matches_list_and_ignores_junk(tmp_path):
     (trash / "notes.txt").write_text("不是回收站条目", "utf-8")
     (trash / "99999999-000000-000__bad.md").write_text("坏时间戳", "utf-8")
     assert scope.trash_count() == len(scope.trash_entries()) == 2
+
+
+def _audit_rows(scope):
+    return [
+        json.loads(line)
+        for line in (scope.root / pkg_history.AUDIT_FILENAME)
+        .read_text("utf-8")
+        .splitlines()
+    ]
+
+
+def test_restore_and_discard_audit_keep_session_context(tmp_path):
+    scope = store(tmp_path)
+    ctx = pkg_history.AuditContext(
+        session="Bot-A:GroupMessage:987654321",
+        group="星河秘密基地-甲子园",
+        admin=False,
+    )
+    run(scope.write("a.md", thing("a", body="第一版"), actor="Bot-A"))
+    run(scope.forget("a.md"))
+    run(scope.restore("a.md", actor="Bot-A", audit=ctx))
+    restore = [
+        row for row in _audit_rows(scope) if row["action"] == pkg_history.ACTION_RESTORE
+    ][-1]
+    assert restore["session"] == ctx.session
+    assert restore["group"] == ctx.group
+    assert restore["admin"] is False
+
+    run(scope.write("b.md", thing("b", body="旧")))
+    run(scope.forget("b.md"))
+    run(scope.write("b.md", thing("b", body="新"), actor="Bot-A", audit=ctx))
+    discarded = [
+        row
+        for row in _audit_rows(scope)
+        if row["action"] == pkg_history.ACTION_DISCARD_FORGOTTEN
+    ][-1]
+    assert discarded["session"] == ctx.session
+    assert discarded["group"] == ctx.group
+
+
+def test_purge_audit_row_keeps_context_keys(tmp_path):
+    scope = pkg_memstore.MemoryStore(tmp_path / "memories").notebook_scope("Bot-B")
+    run(scope.write("c.md", thing("c", body="正文")))
+    run(scope.purge(actor="webui"))
+    archives = tmp_path / "memories" / pkg_history.SCOPE_TRASH_DIRNAME
+    archive = next(path for path in archives.iterdir() if path.is_dir())
+    rows = [
+        json.loads(line)
+        for line in (archive / pkg_history.AUDIT_FILENAME).read_text("utf-8").splitlines()
+    ]
+    purge = next(row for row in rows if row["action"] == pkg_history.ACTION_PURGE_SCOPE)
+    assert {"session", "group", "admin"} <= set(purge)
+    assert purge["session"] == "" and purge["group"] == ""
+    assert purge["admin"] is False
+
+
+def test_rename_keeps_audit_session_context(tmp_path):
+    scope = store(tmp_path)
+    ctx = pkg_history.AuditContext(
+        session="Bot-A:GroupMessage:987654321",
+        group="星河秘密基地-甲子园",
+        admin=True,
+    )
+    run(scope.write("a.md", thing("a", body="旧")))
+    run(scope.write("a.md", thing("a", body="第二版"), actor="Bot-A", audit=ctx))
+    run(scope.write("b.md", thing("b", body="新"), actor="Bot-A"))
+    report = run(scope.finalize_rename("a.md", "b.md", actor="webui"))
+    assert report.ok
+    moved = [
+        row
+        for row in _audit_rows(scope)
+        if row["file"] == "b.md" and row["action"] == pkg_history.ACTION_WRITE
+    ]
+    assert any(
+        row["session"] == ctx.session
+        and row["group"] == ctx.group
+        and row["admin"] is True
+        for row in moved
+    )
+
+
+def test_rename_keeps_trash_audit_session_context(tmp_path):
+    scope = store(tmp_path)
+    ctx = pkg_history.AuditContext(
+        session="Bot-A:GroupMessage:987654321",
+        group="星河秘密基地-甲子园",
+        admin=False,
+    )
+    run(scope.write("a.md", thing("a", body="旧")))
+    run(scope.delete("a.md", actor="Bot-A", reason="清理", audit=ctx))
+    run(scope.write("a.md", thing("a", body="重建")))
+    run(scope.write("b.md", thing("b", body="新")))
+    report = run(scope.finalize_rename("a.md", "b.md", actor="webui"))
+    assert report.ok
+    moved = [
+        row
+        for row in _audit_rows(scope)
+        if row["file"] == "b.md" and row["action"] == pkg_history.ACTION_DELETE
+    ]
+    assert moved and moved[-1]["session"] == ctx.session
+    assert moved[-1]["group"] == ctx.group

@@ -2,7 +2,14 @@
 
 from __future__ import annotations
 
-from support import pkg_history, pkg_memstore, run, thing
+from support import (
+    FakeEvent,
+    make_plugin,
+    pkg_history,
+    pkg_memstore,
+    run,
+    thing,
+)
 
 
 def store(tmp_path):
@@ -62,3 +69,54 @@ def test_cleanup_removes_old_trash_and_keeps_recent(tmp_path):
     now = old.ts + 10 * 86400
     scope.cleanup_history(now=now, force=True)
     assert not scope.trash_entries()
+
+
+def test_model_tools_cannot_reach_audit_history_or_trash(tmp_path):
+    """审计、历史与回收站不是记忆，模型的工具读不到（含群名的审计尤其重要）。"""
+    plugin = make_plugin(tmp_path)
+    event = FakeEvent(
+        "Bot-A",
+        "123",
+        umo="Bot-A:GroupMessage:987654321",
+        group_id="987654321",
+        group_name="星河秘密基地-甲子园",
+    )
+    run(
+        plugin.memory_write(
+            event, "notebook", "note.md", "reference", "摘要", "正文"
+        )
+    )
+    run(plugin.memory_read(event, "notebook", "note.md"))
+    run(
+        plugin.memory_write(
+            event, "notebook", "note.md", "reference", "摘要", "第二版"
+        )
+    )
+    run(
+        plugin.memory_write(
+            event, "notebook", "gone.md", "reference", "摘要", "要删"
+        )
+    )
+    run(plugin.memory_delete(event, "notebook", "gone.md", "清理"))
+    store = plugin._store.notebook_scope("Bot-A")
+    assert (store.root / pkg_history.AUDIT_FILENAME).is_file()
+    assert store.history_versions("note.md")
+    assert store.trash_entries()
+
+    for name in (
+        pkg_history.AUDIT_FILENAME,
+        ".history/note.md/20260101-000000-000-write.md",
+        ".trash/20260101-000000-000__gone.md",
+        "forgotten/gone.md",
+    ):
+        text = run(plugin.memory_read(event, "notebook", name))
+        assert "星河秘密基地" not in text
+        assert "987654321" not in text
+        assert "before_sha1" not in text and "after_sha1" not in text
+        assert "第二版" not in text and "要删" not in text
+
+    for query in ("audit", "origin", "before_sha1", ".history", ".trash"):
+        text = run(plugin.memory_search(event, query))
+        assert "before_sha1" not in text
+        assert pkg_history.AUDIT_FILENAME not in text
+        assert "星河秘密基地" not in text and "987654321" not in text

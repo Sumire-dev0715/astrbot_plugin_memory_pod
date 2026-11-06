@@ -466,3 +466,51 @@ def test_management_page_can_write_feedback_without_admin_gate(tmp_path):
     result = route(dashboard, "file_save")
     assert result["status"] == "ok", result
     assert "再动手" in call(plugin._store.notebook_scope("Bot-A").read("rule.md"))
+
+
+def test_file_detail_origin_matches_group_by_time(tmp_path):
+    """同一个人在不同群写过时，每条来源按时间对上自己的群，而不是都取最新。"""
+    plugin, dashboard = setup(tmp_path)
+    store = plugin._store.notebook_scope("Bot-A")
+    now = time.time()
+    first = pkg_origin.Origin(
+        "group",
+        "123",
+        "小明",
+        now,
+        pkg_origin.session_hash("Bot-A:GroupMessage:900"),
+    )
+    call(
+        store.write(
+            "note.md",
+            thing("note", description="合成记忆", body="合成正文"),
+            source="123",
+            actor="Bot-A",
+            origin_record=first,
+            audit=pkg_history.AuditContext(
+                session="Bot-A:GroupMessage:900", group="A 合成群"
+            ),
+        )
+    )
+    second = pkg_origin.Origin(
+        "group",
+        "123",
+        "小明",
+        now + 30,
+        pkg_origin.session_hash("Bot-A:GroupMessage:901"),
+    )
+    call(
+        store.write(
+            "note.md",
+            thing("note", description="合成记忆", body="合成正文"),
+            source="123",
+            actor="Bot-A",
+            origin_record=second,
+            audit=pkg_history.AuditContext(
+                session="Bot-A:GroupMessage:901", group="B 合成群"
+            ),
+        )
+    )
+    query(scope="notebook", key="Bot-A", file="note.md")
+    origins = raw(route(dashboard, "file_detail"))["origin"]
+    assert [item["group"] for item in origins] == ["A 合成群", "B 合成群"]

@@ -39,6 +39,24 @@ _FRONTMATTER_RE = re.compile(r"\A---\s*\n(.*?)\n---\s*\n?", re.S)
 _ORIGIN_LINE_RE = re.compile(r"^[ \t]*origin[ \t]*:[^\n]*(?:\n|$)", re.M)
 _PERSON_FILE_RE = re.compile(r"^user-(\d+)\.md$", re.I)
 
+# 显示名里可能冒充标注结构或截断来源记录的字符：圆括号能提前闭合
+# “（小明在群聊里说的…）”，换行/行分隔符会把 frontmatter 的一行拆开。
+_UNSAFE_NAME_RE = re.compile(r"[\[\]<>＜＞［］【】〔〕｛｝《》〈〉()（）|;；]")
+_WS_RE = re.compile(r"\s+")
+MAX_NAME_CHARS = 32
+
+
+def safe_display_name(name: str | None, limit: int = MAX_NAME_CHARS) -> str:
+    """来源显示名的最后一道清洗：折叠所有空白、去掉格式字符、限长。
+
+    调用方已经按发送者名字的规则洗过一遍（core.prompts.clean_origin_name）；
+    这里再兜一次底，保证手改过 origin 的历史文件也不能伪造来源标注，或
+    用 U+2028 之类的行分隔符把一条来源记录截断。
+    """
+    text = _WS_RE.sub(" ", str(name or "")).strip()
+    text = _UNSAFE_NAME_RE.sub("", text)
+    return text[:limit].strip()
+
 
 @dataclass(frozen=True)
 class Origin:
@@ -61,7 +79,7 @@ def _encode_one(record: Origin) -> str:
         (
             record.kind,
             record.speaker,
-            record.name,
+            safe_display_name(record.name),
             time.strftime(ORIGIN_TIME_FORMAT, time.localtime(record.ts)),
             record.session,
         )
@@ -91,7 +109,7 @@ def parse(text: str) -> list[Origin]:
             Origin(
                 kind=kind,
                 speaker=speaker.strip(),
-                name=name.strip(),
+                name=safe_display_name(name),
                 ts=ts,
                 session=session.strip(),
             )
@@ -155,7 +173,7 @@ def note(
         if subject and record.speaker == subject:
             parts.append("本人说的")
         else:
-            name = record.name or "某人"
+            name = safe_display_name(record.name) or "某人"
             where = "群聊" if record.kind == KIND_GROUP else "私聊"
             parts.append(f"{name}在{where}里说的，{_age_label(record.ts, now)}")
         if len(parts) >= MAX_NOTE_SOURCES:
@@ -169,7 +187,7 @@ def journal_line(record: Origin | None) -> str:
     """日记追加段落前的来源行，如"08:30 小明（群聊）"；不写群名。"""
     if record is None:
         return ""
-    name = record.name or "某人"
+    name = safe_display_name(record.name) or "某人"
     where = "群聊" if record.kind == KIND_GROUP else "私聊"
     stamp = time.strftime("%H:%M", time.localtime(record.ts))
     return f"{stamp} {name}（{where}）"

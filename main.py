@@ -415,15 +415,29 @@ class MemoryPodPlugin(Star):
             session=origin.session_hash(umo),
         )
 
-    def _audit_context(self, event: AstrMessageEvent) -> history.AuditContext:
+    async def _audit_context(self, event: AstrMessageEvent) -> history.AuditContext:
         """审计用的会话上下文：会话键、群名与发送者是否管理员。
 
         这些字段只进 .audit.jsonl，供管理页显示来源；记忆文件与交给模型的
-        内容里都没有它们（PLAN 3.9.1 第 1、2 条）。
+        内容里都没有它们（PLAN 3.9.1 第 1、2 条）。事件里没有群名时用
+        AstrBot 的 event.get_group() 补齐（aiocqhttp 会去平台查一次），
+        查不到就留空，不影响写入。
         """
         umo = str(getattr(event, "unified_msg_origin", "") or "")
         msg_obj = getattr(event, "message_obj", None)
-        group = self._session_label(event) if getattr(msg_obj, "group_id", "") else ""
+        group = ""
+        if getattr(msg_obj, "group_id", ""):
+            group = self._session_label(event)
+            if not group:
+                getter = getattr(event, "get_group", None)
+                if callable(getter):
+                    try:
+                        info = await self._maybe_await(getter())
+                        group = str(
+                            getattr(info, "group_name", "") or ""
+                        ).strip()
+                    except Exception:  # noqa: BLE001 - 群名只是审计附注
+                        group = ""
         return history.AuditContext(
             session=umo, group=group, admin=self._is_admin_event(event)
         )
@@ -1148,6 +1162,7 @@ class MemoryPodPlugin(Star):
             forced,
             self._event_actor(event),
             whisper_name=f"user-{sender_id}.md" if private and sender_id else "",
+            audit=await self._audit_context(event),
         )
         for label in {label for label, _ in restored}:
             key = memstore.safe_key(umo) if label == memstore.SCOPE_WHISPER else None
@@ -1159,6 +1174,7 @@ class MemoryPodPlugin(Star):
         forced: list[str],
         actor: str = "",
         whisper_name: str = "",
+        audit: history.AuditContext | None = None,
     ) -> list[tuple[str, str]]:
         """把已遗忘的身份必选档案恢复回在册，返回恢复的 (作用域, 文件名)。
 
@@ -1176,7 +1192,7 @@ class MemoryPodPlugin(Star):
             for name in names:
                 if store.exists(name) or not store.has_forgotten(name):
                     continue
-                report = await store.restore(name, actor=actor)
+                report = await store.restore(name, actor=actor, audit=audit)
                 if report.ok:
                     restored.append((label, name))
                     logger.info(
@@ -1535,7 +1551,11 @@ class MemoryPodPlugin(Star):
         if content is None and self._forgetting_on() and store.has_forgotten(file):
             if self._can_restore(event, scope, file):
                 # 模型主动读一条已遗忘的记忆：读取即恢复在册
-                report = await store.restore(file, actor=self._event_actor(event))
+                report = await store.restore(
+                    file,
+                    actor=self._event_actor(event),
+                    audit=await self._audit_context(event),
+                )
                 if report.ok:
                     content = await store.read(file)
                     restored = True
@@ -1925,7 +1945,7 @@ class MemoryPodPlugin(Star):
             actor=self._event_actor(event),
             source=sender_id,
             origin_record=self._origin_for(event),
-            audit=self._audit_context(event),
+            audit=await self._audit_context(event),
         )
         if not result.ok:
             return self._failed_receipt(result)
@@ -2009,7 +2029,7 @@ class MemoryPodPlugin(Star):
             actor=self._event_actor(event),
             source=sender_id,
             origin_record=self._origin_for(event),
-            audit=self._audit_context(event),
+            audit=await self._audit_context(event),
         )
         if not result.ok:
             return self._failed_receipt(result)
@@ -2073,7 +2093,7 @@ class MemoryPodPlugin(Star):
             ops,
             actor=self._event_actor(event),
             source=sender_id,
-            audit=self._audit_context(event),
+            audit=await self._audit_context(event),
         )
         if not result.ok:
             return self._failed_receipt(result)
