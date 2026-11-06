@@ -25,7 +25,7 @@ import re
 import time
 from dataclasses import dataclass, field
 
-from . import history, journal, memstore, origin as origin_mod
+from . import expiry, history, journal, memstore, origin as origin_mod
 
 # 单条正文与描述的长度上限；超长整条拒绝，不截断
 MAX_CONTENT_CHARS = 8000
@@ -84,6 +84,8 @@ class Operation:
     reason: str = ""
     # 留言板告示的署名；由调用方按 3.8.3 生成
     signature: str = ""
+    # 留言板告示的到期日（YYYY-MM-DD）；其他作用域不使用（PLAN 3.9.2）
+    expires: str = ""
 
 
 @dataclass
@@ -312,6 +314,13 @@ def validate_operations(
             if len(signature) > memstore.MAX_SIGNATURE_CHARS:
                 skipped.append(f"{label}：署名过长")
                 continue
+            # expires 只对留言板生效；写其他作用域时整条忽略（PLAN 3.9.2）
+            expires = ""
+            if scope == memstore.SCOPE_BOARD:
+                expires, error = expiry.normalize(entry.get("expires"))
+                if error:
+                    skipped.append(f"{label}：{error}")
+                    continue
             ops.append(
                 Operation(
                     op=op,
@@ -321,6 +330,7 @@ def validate_operations(
                     description=description,
                     content=content.strip(),
                     signature=signature,
+                    expires=expires,
                 )
             )
         elif op == OP_EDIT:
@@ -399,6 +409,7 @@ async def _apply_one(
             op.content,
             source=source,
             signature=op.signature,
+            expires=op.expires,
         )
         return await store.write(
             op.file,

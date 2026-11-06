@@ -141,6 +141,7 @@ def load_main():
 
 main = load_main()
 pkg_context_stats = importlib.import_module(f"{PACKAGE}.core.context_stats")
+pkg_expiry = importlib.import_module(f"{PACKAGE}.core.expiry")
 pkg_history = importlib.import_module(f"{PACKAGE}.core.history")
 pkg_injection = importlib.import_module(f"{PACKAGE}.core.injection")
 pkg_journal = importlib.import_module(f"{PACKAGE}.core.journal")
@@ -253,9 +254,21 @@ def make_plugin(tmp_path, **config):
     return plugin
 
 
-def thing(name, description="合成记忆", body="合成正文", mem_type="reference", signature=""):
+def thing(
+    name,
+    description="合成记忆",
+    body="合成正文",
+    mem_type="reference",
+    signature="",
+    expires="",
+):
     return pkg_memstore.compose_memory(
-        name, description, mem_type, body, signature=signature
+        name,
+        description,
+        mem_type,
+        body,
+        signature=signature,
+        expires=expires,
     )
 
 

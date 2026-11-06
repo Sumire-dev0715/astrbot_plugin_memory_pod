@@ -263,12 +263,17 @@ async def propose(
     # 别人告示的署名），这里一律覆盖。
     if store.layer == memstore.SCOPE_BOARD:
         signatures = {}
+        expiries = {}
         for header, content in files:
-            signatures[header.file] = memstore.parse_memory(content).signature
+            doc = memstore.parse_memory(content)
+            signatures[header.file] = doc.signature
+            expiries[header.file] = doc.expires
         fallback = next((value for value in signatures.values() if value), "管理员")
         for op in ops:
             if op.op == "write":
                 op.signature = signatures.get(op.file) or fallback
+                # 到期日同样沿用原告示；合并出的新告示不凭空设日期
+                op.expires = expiries.get(op.file) or ""
     # 记下复盘时各目标文件的写入时间，应用时据此识别期间被改过的文件
     for op in ops:
         op.base_mtime = store.mtime(op.file) or 0.0

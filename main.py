@@ -39,6 +39,7 @@ import json
 import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
+from datetime import date
 from pathlib import Path
 
 from astrbot.api import AstrBotConfig, logger
@@ -48,6 +49,7 @@ from astrbot.api.star import Context, Star, StarTools
 
 from .core import (
     context_stats,
+    expiry,
     history,
     injection,
     insights,
@@ -117,13 +119,16 @@ class RuntimeSession:
     开头的注入内容一变，整段历史的缓存全部失效）。对话中途模型新写的
     记忆只落盘、不刷新快照——需要时由每轮的相关记忆召回带上全文。
     对话切换、重置、管理员在 WebUI 改动记忆、检测到 AstrBot 截断或压缩
-    改动了历史开头时刷新快照（那时提示词缓存本来就已经失效）。
+    改动了历史开头时刷新快照（那时提示词缓存本来就已经失效）。此外每天
+    的第一轮也刷新一次，让过期的留言板告示最晚第二天撤下（PLAN 3.9.2）。
     """
 
     # 快照锚定的对话 id；变了说明换了对话或被重置
     cid: str = ""
     index_block: str | None = None
     index_loaded: bool = False
+    # 生成快照时的本地日期；跨天后第一轮重建（按 AstrBot 配置的时区算）
+    index_day: date | None = None
     # 私聊人物档案的快照签名（(pin, 平台, 发送者)）；身份变了就重建
     index_pin_key: tuple = ()
     # 开头块里已钉住的人物档案：ref -> 注入时的内容摘要（检测快照后的修改）
@@ -150,6 +155,7 @@ class RuntimeSession:
         """作废开头块快照以及随快照生成的人物档案与索引引用集合。"""
         self.index_block = None
         self.index_loaded = False
+        self.index_day = None
         self.index_pin_key = ()
         self.index_pinned = {}
         self.index_refs = set()
@@ -857,17 +863,25 @@ class MemoryPodPlugin(Star):
     ) -> str | None:
         """开头块：留言板全文、小本本与当前悄悄话的索引、私聊人物档案。
 
-        快照只在对话切换、重置、历史开头被 AstrBot 改动、管理页改动或
-        身份变化时刷新；记忆不变时逐轮逐字不变，才能命中模型服务的
-        前缀缓存。contexts 是构建快照时的历史，用来记下开头指纹。
-        record_usage 只在真正发给模型的请求路径上置真：管理指令里估算
-        开头块时不能把人物档案记成用过。
+        快照只在对话切换、重置、历史开头被 AstrBot 改动、管理页改动、
+        身份变化或跨天后的第一轮刷新；记忆不变时逐轮逐字不变，才能命中
+        模型服务的前缀缓存。每天第一轮刷新是为了让过期的留言板告示最晚
+        第二天撤下（PLAN 3.9.2）。contexts 是构建快照时的历史，用来记下
+        开头指纹。record_usage 只在真正发给模型的请求路径上置真：管理指令
+        里估算开头块时不能把人物档案记成用过。
 
         群聊里只放这个群自己的悄悄话索引，别的对话（包括任何人的私聊）
         的悄悄话不会出现在候选里（PLAN 3.8.3 第 1 条）。
         """
         pin_key = self._pin_profile_key(event)
-        if rt.index_loaded and rt.index_pin_key == pin_key:
+        now = time.time()
+        # 跨天后第一轮重建快照；时区与告示到期判断用的是同一个
+        today = expiry.local_date(now, self.expiry_timezone())
+        if (
+            rt.index_loaded
+            and rt.index_day == today
+            and rt.index_pin_key == pin_key
+        ):
             if record_usage:
                 # 钉在开头块的档案与留言板每轮都真的发给了模型，使用统计也要记；
                 # 模型也确实看过这些全文，整篇重写前不必再读一遍（PLAN 3.8.4）
@@ -876,7 +890,7 @@ class MemoryPodPlugin(Star):
                 rt.seen.update(rt.index_seen)
             return rt.index_block
         umo = str(getattr(event, "unified_msg_origin", "") or "")
-        notices = await self._board_notices()
+        notices = await self._board_notices(now)
         board_text = injection.render_board_notices(notices)
         notebook_snap = await self._notebook_scope(event).load_index()
         whisper_snap = await self._whisper_scope(umo).load_index()
@@ -888,6 +902,7 @@ class MemoryPodPlugin(Star):
             board_text, notebook_snap.text, whisper_snap.text, profiles
         )
         rt.index_loaded = True
+        rt.index_day = today
         rt.index_pin_key = pin_key
         rt.index_pinned = pinned
         if contexts is not None:
@@ -928,9 +943,16 @@ class MemoryPodPlugin(Star):
         if names:
             await asyncio.to_thread(store.note_used, names)
 
-    async def _board_notices(self) -> list[injection.BoardNotice]:
-        """读全部留言板告示，带磁盘内容摘要供"看过"记录使用。"""
+    async def _board_notices(
+        self, now: float | None = None
+    ) -> list[injection.BoardNotice]:
+        """读全部留言板告示，带磁盘内容摘要供"看过"记录使用。
+
+        已过期的告示不再放进开头块（文件保留，仍可用 memory_read 读到）；
+        到期日当天仍有效，按 AstrBot 配置的时区算（PLAN 3.9.2）。
+        """
         store = self._board_scope()
+        now = time.time() if now is None else now
         headers = await asyncio.to_thread(store.headers)
         notices: list[injection.BoardNotice] = []
         for header in headers:
@@ -938,6 +960,8 @@ class MemoryPodPlugin(Star):
             if content is None:
                 continue
             doc = memstore.parse_memory(content)
+            if self.notice_expired(doc.expires, now):
+                continue
             notices.append(
                 injection.BoardNotice(
                     file=header.file,
@@ -949,6 +973,16 @@ class MemoryPodPlugin(Star):
                 )
             )
         return notices
+
+    def notice_expired(self, expires: str, now: float | None = None) -> bool:
+        """留言板告示是否已过期（到期日当天仍有效）。
+
+        时区取 AstrBot 的全局配置，没有配置时用本机时区；没写 expires
+        或写坏了都当作长期有效，避免旧文件被误判。
+        """
+        return expiry.is_expired(
+            expires, time.time() if now is None else now, self.expiry_timezone()
+        )
 
     def _pin_profile_key(self, event: AstrMessageEvent) -> tuple:
         """私聊人物档案的快照签名；不是私聊时为空元组（不钉档案）。
@@ -1356,6 +1390,17 @@ class MemoryPodPlugin(Star):
         except Exception:  # noqa: BLE001
             return {}
 
+    def expiry_timezone(self):
+        """AstrBot 配置的时区；没有配置或名字无效时返回 None（用本机时区）。
+
+        AstrBot 4.29.4 把时区放在全局配置的 ``timezone``（默认
+        ``Asia/Shanghai``，见 astrbot/core/config/default.py 第 319 行），
+        自己用 ``context.get_config().get("timezone")`` 读取
+        （astrbot/core/astr_main_agent.py 第 1083 行）。这里走同一个入口，
+        不改插件自己的配置。
+        """
+        return expiry.timezone(self._astrbot_config().get("timezone"))
+
     @staticmethod
     def _dict_at(conf: object, *keys: str) -> dict:
         """沿键路径取嵌套字典；中间不是字典时返回空字典。"""
@@ -1602,6 +1647,12 @@ class MemoryPodPlugin(Star):
             )
         if restored:
             notes.append("（这条记忆此前因长期未用已被遗忘，刚刚已恢复在册）")
+        if scope == memstore.SCOPE_BOARD and self.notice_expired(doc.expires):
+            # 过期的告示仍可读：文件保留，管理页可续期或删除（PLAN 3.9.2）
+            notes.append(
+                "（这条告示已过期，不再放进开头块；可以在管理页改到期日续期，"
+                "或删除）"
+            )
         note = recall.freshness_note(written) if written else ""
         if note:
             notes.append(note)
@@ -1679,12 +1730,21 @@ class MemoryPodPlugin(Star):
         shown_active = hits[: memstore.MAX_SEARCH_RESULTS]
         remaining = max(0, memstore.MAX_SEARCH_RESULTS - len(shown_active))
         shown_forgotten = forgotten_hits[:remaining]
+        now = time.time()
+        tz = self.expiry_timezone()
+
+        def expired(label: str, hit: insights.SearchHit) -> bool:
+            # 只有留言板有到期日；过期的告示仍能搜到，结果里标注（PLAN 3.9.2）
+            return label == memstore.SCOPE_BOARD and expiry.is_expired(
+                hit.expires, now, tz
+            )
+
         lines = [
-            self._format_search_hit(label, hit)
+            self._format_search_hit(label, hit, expired(label, hit))
             for label, hit in shown_active
         ]
         forgotten = [
-            self._format_forgotten_hit(label, hit)
+            self._format_forgotten_hit(label, hit, expired(label, hit))
             for label, hit in shown_forgotten
         ]
         hidden = (
@@ -1708,25 +1768,31 @@ class MemoryPodPlugin(Star):
         return text
 
     @staticmethod
-    def _format_search_hit(label: str, hit: insights.SearchHit) -> str:
+    def _format_search_hit(
+        label: str, hit: insights.SearchHit, expired: bool = False
+    ) -> str:
         """一条搜索结果：文件名、类型、更新日期，以及最多两行片段。"""
         updated = (
             time.strftime("%Y-%m-%d", time.localtime(hit.updated))
             if hit.updated > 0
             else "未知"
         )
+        mark = "，已过期" if expired else ""
         head = (
             f"[{label}] {hit.file}"
-            f"（{hit.mem_type or '未分类'}，更新 {updated}）"
+            f"（{hit.mem_type or '未分类'}，更新 {updated}{mark}）"
         )
         snippets = hit.snippets or ("（正文匹配）",)
         return head + "\n" + "\n".join(f"  {line}" for line in snippets)
 
     @staticmethod
-    def _format_forgotten_hit(label: str, hit: insights.SearchHit) -> str:
+    def _format_forgotten_hit(
+        label: str, hit: insights.SearchHit, expired: bool = False
+    ) -> str:
         """已遗忘结果沿用原来的单行标注与片段格式。"""
         snippet = hit.snippets[0] if hit.snippets else "（正文匹配）"
-        return f"[{label}·已遗忘] {hit.file}: {snippet}"
+        mark = "·已过期" if expired else ""
+        return f"[{label}·已遗忘{mark}] {hit.file}: {snippet}"
 
     # ------------------------------------------------------------ 写工具
 
@@ -1886,6 +1952,7 @@ class MemoryPodPlugin(Star):
         type: str,
         description: str,
         content: str,
+        expires: str = "",
     ) -> str:
         """新建记忆文件，或整篇重写已有文件。
 
@@ -1897,6 +1964,7 @@ class MemoryPodPlugin(Star):
             type(string): 类型：user、feedback、project 或 reference
             description(string): 一句话摘要，写清什么时候该读全文
             content(string): 完整正文，不含 frontmatter
+            expires(string): 可选到期日 YYYY-MM-DD，只对留言板生效
         """
         disabled = self._tool_disabled()
         if disabled:
@@ -1924,6 +1992,8 @@ class MemoryPodPlugin(Star):
             "type": type,
             "description": description,
             "content": content,
+            # 只对留言板生效；writer 校验留言板的格式，其他作用域整条忽略
+            "expires": expires,
         }
         if scope == memstore.SCOPE_BOARD:
             # 留言板告示必须带署名：机器人代发时由插件生成（PLAN 3.8.3）

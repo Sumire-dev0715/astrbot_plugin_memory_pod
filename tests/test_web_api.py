@@ -16,6 +16,7 @@ import pytest
 from support import (
     PACKAGE,
     pkg_context_stats,
+    pkg_expiry,
     pkg_history,
     pkg_memstore,
     pkg_origin,
@@ -86,9 +87,20 @@ class FakePlugin:
         self.invalidated: list = []
         self.reply = ""
         self.prompts: list[str] = []
+        self.astrbot_config: dict = {}
 
     def _bool(self, key, default):
         return self.config.get(key, default)
+
+    def _astrbot_config(self, umo=None):
+        return self.astrbot_config
+
+    def notice_expired(self, expires, now=None):
+        return pkg_expiry.is_expired(
+            expires,
+            time.time() if now is None else now,
+            pkg_expiry.timezone(self.astrbot_config.get("timezone")),
+        )
 
     def _forgetting_on(self):
         return self.config.get("enable_forgetting", False)
@@ -514,3 +526,109 @@ def test_file_detail_origin_matches_group_by_time(tmp_path):
     query(scope="notebook", key="Bot-A", file="note.md")
     origins = raw(route(dashboard, "file_detail"))["origin"]
     assert [item["group"] for item in origins] == ["A 合成群", "B 合成群"]
+
+
+def test_board_publish_and_detail_expose_expiry(tmp_path):
+    plugin, dashboard = setup(tmp_path)
+    body(
+        {
+            "signature": "管理员",
+            "description": "新告示",
+            "body": "正文",
+            "expires": "2999-12-31",
+        }
+    )
+    result = route(dashboard, "board_publish")
+    assert result["status"] == "ok", result
+    name = raw(result)["file"]
+    doc = pkg_memstore.parse_memory(call(plugin._store.board_scope().read(name)))
+    assert doc.expires == "2999-12-31"
+
+    query(scope="board", key="")
+    data = raw(route(dashboard, "scope_detail"))
+    item = next(item for item in data["files"] if item["file"] == name)
+    assert item["expires"] == "2999-12-31"
+    assert item["expired"] is False
+
+    query(scope="board", key="", file=name)
+    detail = raw(route(dashboard, "file_detail"))
+    assert detail["expires"] == "2999-12-31"
+    assert detail["expired"] is False
+
+    # 已经过了到期日的告示在列表里标成已过期
+    body(
+        {
+            "signature": "管理员",
+            "description": "旧告示",
+            "body": "旧正文",
+            "expires": "2000-01-01",
+        }
+    )
+    old = raw(route(dashboard, "board_publish"))["file"]
+    query(scope="board", key="")
+    data = raw(route(dashboard, "scope_detail"))
+    old_item = next(item for item in data["files"] if item["file"] == old)
+    assert old_item["expired"] is True
+
+    body({"signature": "管理员", "description": "坏日期", "body": "正文",
+          "expires": "2999/12/31"})
+    result = route(dashboard, "board_publish")
+    assert result["status"] == "error"
+    assert "YYYY-MM-DD" in result["message"]
+
+
+def test_board_expiry_can_be_renewed_from_file_save(tmp_path):
+    plugin, dashboard = setup(tmp_path)
+    store = plugin._store.board_scope()
+    call(
+        store.write(
+            "notice.md",
+            thing(
+                "notice",
+                description="告示",
+                body="正文",
+                signature="管理员",
+                expires="2000-01-01",
+            ),
+        )
+    )
+    before = len(plugin.invalidated)
+
+    def save(expires_marker):
+        payload = {
+            "scope": "board",
+            "key": "",
+            "file": "notice.md",
+            "oldFile": "notice.md",
+            "mode": "fields",
+            "type": "reference",
+            "description": "告示",
+            "body": "正文",
+            "signature": "管理员",
+        }
+        payload.update(expires_marker)
+        body(payload)
+        return route(dashboard, "file_save")
+
+    result = save({"expires": "2999-12-31"})
+    assert result["status"] == "ok", result
+    renewed = pkg_memstore.parse_memory(call(store.read("notice.md")))
+    assert renewed.expires == "2999-12-31"
+    assert renewed.signature == "管理员"
+    assert len(plugin.invalidated) > before
+    assert plugin.invalidated[-1][0] == "board"
+
+    # 表单没带 expires 时沿用原值，不会因为旧页面保存把日期清掉
+    result = save({})
+    assert result["status"] == "ok", result
+    assert pkg_memstore.parse_memory(call(store.read("notice.md"))).expires == "2999-12-31"
+
+    result = save({"expires": "2999/12/31"})
+    assert result["status"] == "error"
+    assert "YYYY-MM-DD" in result["message"]
+    assert pkg_memstore.parse_memory(call(store.read("notice.md"))).expires == "2999-12-31"
+
+    body({"scope": "board", "key": "", "file": "notice.md"})
+    result = route(dashboard, "file_delete")
+    assert result["status"] == "ok", result
+    assert plugin.invalidated[-1][0] == "board"

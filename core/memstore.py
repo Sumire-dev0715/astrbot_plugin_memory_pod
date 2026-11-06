@@ -26,7 +26,8 @@ updated 算），feedback 类最后丢；剩下的行保持原顺序，末尾注
 见 core/journal.py。
 
 留言板每条告示带署名（写在 frontmatter 的 metadata.signature），开头块
-按从新到旧注入全文。
+按从新到旧注入全文；告示还可以带可选的到期日（metadata.expires，
+YYYY-MM-DD），到期后不再进开头块（PLAN 3.9.2）。
 
 使用统计与遗忘：每个作用域目录下有一份 .usage.json，记每个文件最近一次
 被召回或读取的时间与次数。开启遗忘后，长期没用到的文件移进 forgotten/
@@ -216,15 +217,19 @@ class MemoryDoc:
     source: str = ""
     # 留言板告示的署名，由插件写进 metadata.signature
     signature: str = ""
+    # 留言板告示的到期日（YYYY-MM-DD），写在 metadata.expires；空串为长期有效
+    expires: str = ""
     # 来源记录（PLAN 3.9.1）：会话类型、说话人、时间与会话键短哈希
     origin: str = ""
 
 
 def parse_memory(content: str) -> MemoryDoc:
-    """拆解记忆文件：frontmatter 的 name / description / type、三个戳、署名与正文。
+    """拆解记忆文件：frontmatter 的 name / description / type、三个戳、署名、
+    到期日与正文。
 
     type 按规范写在 metadata 下一级（metadata:\\n  type: user），也兼容
-    直接写在顶层的 type:，两处都有时以 metadata 下的为准。
+    直接写在顶层的 type:，两处都有时以 metadata 下的为准。expires 同样
+    兼容 metadata.expires 与顶层 expires，以 metadata 下的为准。
     """
     match = _FRONTMATTER_RE.match(content or "")
     fields: dict[str, str] = {}
@@ -243,12 +248,12 @@ def parse_memory(content: str) -> MemoryDoc:
                 if in_metadata and (
                     key == "type"
                     or key in STAMP_KEYS
-                    or key in ("signature", "origin")
+                    or key in ("signature", "origin", "expires")
                 ):
                     nested.setdefault(key, value)
                 continue
             in_metadata = key == "metadata" and not value
-            if key in ("name", "description", "type"):
+            if key in ("name", "description", "type", "expires"):
                 fields.setdefault(key, value)
     body = content[match.end():] if match else (content or "")
     mem_type = (nested.get("type") or fields.get("type", "")).lower()
@@ -262,6 +267,7 @@ def parse_memory(content: str) -> MemoryDoc:
         updated=nested.get("updated", ""),
         source=nested.get("source", ""),
         signature=nested.get("signature", ""),
+        expires=nested.get("expires") or fields.get("expires", ""),
         origin=nested.get("origin", ""),
     )
 
@@ -275,11 +281,12 @@ def compose_memory(
     updated: str = "",
     source: str = "",
     signature: str = "",
+    expires: str = "",
 ) -> str:
     """按标准格式拼出记忆文件：frontmatter（name / description / metadata.type）+ 正文。
 
     三个戳平时不用传——写入时由 stamp_memory 自动补；传了就原样写进 metadata。
-    signature 只用于留言板告示，同样写进 metadata。
+    signature 与 expires 只用于留言板告示，同样写进 metadata。
     """
     description = _HOOK_WS_RE.sub(" ", description or "").strip()
     meta = [f"  type: {mem_type.strip()}"]
@@ -291,6 +298,9 @@ def compose_memory(
     signature = " ".join(str(signature or "").split())[:MAX_SIGNATURE_CHARS]
     if signature:
         meta.append(f"  signature: {signature}")
+    expires = " ".join(str(expires or "").split())
+    if expires:
+        meta.append(f"  expires: {expires}")
     return (
         "---\n"
         f"name: {name.strip()}\n"
@@ -564,6 +574,8 @@ class MemoryHeader:
     source: str = ""
     # 留言板告示的署名
     signature: str = ""
+    # 留言板告示的到期日（YYYY-MM-DD）；空串为长期有效
+    expires: str = ""
     # 来源记录（PLAN 3.9.1）：召回、开头块与搜索列表按它标注来源
     origin: str = ""
     # 使用统计（来自 .usage.json）：最近一次被召回或读取的时间、累计次数
@@ -930,6 +942,7 @@ class ScopeStore:
             created=parse_stamp(doc.created) or 0.0,
             source=doc.source,
             signature=doc.signature,
+            expires=doc.expires,
             origin=doc.origin,
         )
 
@@ -2838,14 +2851,16 @@ class ScopeStore:
                 doc = parse_memory(content)
                 mem_type = doc.type
                 updated = parse_stamp(doc.updated) or self.mtime(name) or 0.0
+                expires = doc.expires
             else:
                 mem_type = header.type
                 updated = header.updated
+                expires = header.expires
             # origin 原始字段不给模型（PLAN 3.9.1 第 4 条）：搜索片段与
             # 命中判断都只看去掉 origin 的内容
             searchable = origin_mod.strip_from_frontmatter(content)
             hit = insights.build_hit(
-                name, mem_type, updated, searchable, terms, mode
+                name, mem_type, updated, searchable, terms, mode, expires
             )
             if hit is not None:
                 hits.append(hit)
@@ -2877,7 +2892,13 @@ class ScopeStore:
                 continue
             searchable = origin_mod.strip_from_frontmatter(content)
             hit = insights.build_hit(
-                header.file, header.type, header.updated, searchable, terms, mode
+                header.file,
+                header.type,
+                header.updated,
+                searchable,
+                terms,
+                mode,
+                header.expires,
             )
             if hit is not None:
                 hits.append(hit)

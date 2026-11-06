@@ -32,6 +32,7 @@ from astrbot.api import logger
 from .core import (
     consolidate,
     context_stats,
+    expiry,
     history,
     insights,
     memstore,
@@ -119,6 +120,7 @@ def _header_dict(header: memstore.MemoryHeader) -> dict:
         "created": header.created,
         "source": header.source,
         "signature": header.signature,
+        "expires": header.expires,
         "size": header.size,
         "links": header.links,
         "lastUsed": header.last_used,
@@ -501,6 +503,8 @@ class MemoryDashboard:
 
     async def scope_detail(self) -> dict:
         scope, key, store = self._scope_from_query()
+        # 到期标记按管理员打开列表这一刻算；时区由插件按 AstrBot 配置取
+        now = time.time()
 
         def collect() -> dict:
             headers = store.headers()
@@ -510,14 +514,20 @@ class MemoryDashboard:
                 index_path.read_text("utf-8") if index_path.is_file() else ""
             )
             flags = _file_flags(store, headers)
+
+            def row(header: memstore.MemoryHeader) -> dict:
+                item = _header_dict(header)
+                item["expired"] = self.plugin.notice_expired(header.expires, now)
+                return item
+
             files = []
             for header in headers:
-                item = _header_dict(header)
+                item = row(header)
                 item.update(flags.get(header.file, {}))
                 files.append(item)
             return {
                 "files": files,
-                "forgotten": [_header_dict(h) for h in store.forgotten_headers()],
+                "forgotten": [row(h) for h in store.forgotten_headers()],
                 # 回收站条目只在打开标签时按需拉取，这里只给数量
                 "trashCount": store.trash_count(),
                 "index": {
@@ -572,6 +582,8 @@ class MemoryDashboard:
                 "updated": doc.updated,
                 "source": doc.source,
                 "signature": doc.signature,
+                "expires": doc.expires,
+                "expired": self.plugin.notice_expired(doc.expires),
                 "origin": origins,
                 "hasFrontmatter": doc.has_frontmatter,
                 "links": memstore.extract_links(content),
@@ -638,9 +650,22 @@ class MemoryDashboard:
         renaming = bool(old) and old != name
 
         current_content = await store.read(old or name) if old or store.exists(name) else None
+        current_doc = (
+            memstore.parse_memory(current_content) if current_content else None
+        )
         signature = " ".join(_text(body.get("signature")).split())
-        if not signature and current_content:
-            signature = memstore.parse_memory(current_content).signature
+        if not signature and current_doc is not None:
+            signature = current_doc.signature
+        # 到期日只有留言板告示用；表单没带这个字段时沿用原值，带上空串
+        # 表示清掉到期日。raw 模式以管理员给的 frontmatter 为准。
+        expires = ""
+        if scope == SCOPE_BOARD:
+            if "expires" in body:
+                expires, error = expiry.normalize(body.get("expires"))
+                if error:
+                    raise ApiError(error)
+            elif current_doc is not None:
+                expires = current_doc.expires
 
         if _text(body.get("mode")).strip().lower() == "raw":
             content = _text(body.get("content"))
@@ -659,6 +684,7 @@ class MemoryDashboard:
                 mem_type,
                 _text(body.get("body")).strip("\n"),
                 signature=signature,
+                expires=expires,
             )
         if not content.strip():
             raise ApiError("内容不能为空")
@@ -733,6 +759,9 @@ class MemoryDashboard:
             raise ApiError("正文不能为空")
         if len(content) > MAX_BOARD_BODY:
             raise ApiError(f"正文最长 {MAX_BOARD_BODY} 个字")
+        expires, error = expiry.normalize(body.get("expires"))
+        if error:
+            raise ApiError(error)
         store = self.plugin._store.board_scope()
         name = self._board_file_name(body.get("file"), store)
         text = memstore.compose_memory(
@@ -741,6 +770,7 @@ class MemoryDashboard:
             "reference",
             content,
             signature=signature,
+            expires=expires,
         )
         report = await store.write(name, text, actor=history.ACTOR_WEBUI)
         if not report.ok:

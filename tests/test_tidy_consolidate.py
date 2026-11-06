@@ -153,3 +153,59 @@ def test_board_rewrite_keeps_signature_and_new_notice_gets_one(tmp_path):
     assert proposal.operations[0].signature
     run(pkg_tidy.apply(store, proposal.operations))
     assert pkg_memstore.parse_memory(run(store.read("merged.md"))).signature
+
+
+def test_board_rewrite_keeps_expiry_and_new_notice_has_none(tmp_path):
+    from support import pkg_memstore
+
+    store = pkg_memstore.MemoryStore(tmp_path / "memories").board_scope()
+    run(
+        store.write(
+            "a.md",
+            thing(
+                "a",
+                description="甲",
+                body="内容甲",
+                signature="管理员",
+                expires="2026-11-11",
+            ),
+        )
+    )
+    plan = [
+        {
+            "op": "write",
+            "file": "a.md",
+            "type": "reference",
+            "description": "改写",
+            "content": "内容甲改",
+            "reason": "改正文",
+        }
+    ]
+    proposal = run(
+        pkg_tidy.propose(
+            store, "留言板", replies("<operations>" + json.dumps(plan) + "</operations>")
+        )
+    )
+    assert proposal.operations[0].expires == "2026-11-11"
+    assert proposal.operations[0].to_dict()["expires"] == "2026-11-11"
+    run(pkg_tidy.apply(store, proposal.operations))
+    assert pkg_memstore.parse_memory(run(store.read("a.md"))).expires == "2026-11-11"
+
+    new_plan = [
+        {
+            "op": "write",
+            "file": "merged.md",
+            "type": "reference",
+            "description": "合并告示",
+            "content": "合并后的正文",
+            "reason": "合并",
+        }
+    ]
+    proposal = run(
+        pkg_tidy.propose(
+            store, "留言板", replies("<operations>" + json.dumps(new_plan) + "</operations>")
+        )
+    )
+    assert proposal.operations[0].expires == ""
+    run(pkg_tidy.apply(store, proposal.operations))
+    assert pkg_memstore.parse_memory(run(store.read("merged.md"))).expires == ""

@@ -15,6 +15,7 @@ import json
 import re
 from dataclasses import dataclass
 
+from . import expiry
 from .memstore import (
     INDEX_FILENAME,
     MEMORY_FILE_SUFFIX,
@@ -72,6 +73,8 @@ class Operation:
     content: str = ""
     # 留言板告示的署名；整理时从原文件继承，新建的告示由调用方给默认值
     signature: str = ""
+    # 留言板告示的到期日；整理时从原文件继承，避免一次复盘把日期清掉
+    expires: str = ""
     # 预览时目标文件的写入时间（不存在为 0），应用时据此识别期间被改过的文件
     base_mtime: float = 0.0
 
@@ -83,6 +86,7 @@ class Operation:
             self.type,
             self.content,
             signature=self.signature,
+            expires=self.expires,
         )
 
     def to_dict(self) -> dict:
@@ -100,6 +104,7 @@ class Operation:
                 # 预览要能看到并原样带回署名：留言板告示的署名由插件写进
                 # frontmatter，页面回传方案时少一个字段就会把它清空
                 signature=self.signature,
+                expires=self.expires,
             )
         return data
 
@@ -197,6 +202,8 @@ def parse_operations(text: str, existing: set[str]) -> list[Operation] | None:
             ):
                 continue
             signature = " ".join(str(entry.get("signature", "")).split())
+            # 页面回传的方案会带回到期日；格式不对就当没有，不因此丢掉整条
+            expires, _ = expiry.normalize(entry.get("expires"))
             ops.append(
                 Operation(
                     op="write",
@@ -206,6 +213,7 @@ def parse_operations(text: str, existing: set[str]) -> list[Operation] | None:
                     description=" ".join(str(entry.get("description", "")).split()),
                     content=content,
                     signature=signature,
+                    expires=expires,
                     base_mtime=base_mtime,
                 )
             )

@@ -92,3 +92,34 @@ def test_management_page_has_signature_input_and_remembers_last_value():
     assert "signatureText" in body
     assert 'apiPost("board/publish"' in body
     assert 't("fieldSignature")' in body
+
+
+def test_management_page_has_optional_expiry_date_and_expired_tag():
+    source = (
+        Path(__file__).resolve().parent.parent / "pages" / "memory" / "app.js"
+    ).read_text("utf-8")
+    editor = source.split("function renderEditor()", 1)[1].split(
+        "async function saveFile", 1
+    )[0]
+    assert 't("fieldExpires")' in editor
+    assert 'type: "date"' in editor
+    assert "ed.expires" in editor
+
+    publish = source.split("function publishNotice()", 1)[1].split(
+        "// ------------------------------------------------------------ 搜索", 1
+    )[0]
+    assert 't("fieldExpires")' in publish
+    assert 'type: "date"' in publish
+    assert "expires: expires.value" in publish
+
+    save = source.split("async function saveFile", 1)[1].split(
+        "async function deleteFile", 1
+    )[0]
+    assert 'expires: ed.scope === "board"' in save
+
+    # 告示列表显示到期日，过期的标"已过期"
+    file_list = source.split("function renderFileList", 1)[1].split(
+        "async function openFile", 1
+    )[0]
+    assert 't("expiresLine"' in file_list
+    assert 't("expired")' in file_list

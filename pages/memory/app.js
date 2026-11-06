@@ -68,6 +68,10 @@
     fieldSignatureHint: "会记到 frontmatter 里；下次发布自动填上次的署名",
     signatureRequired: "请填写署名",
     published: "已发布",
+    fieldExpires: "到期日（可选）",
+    fieldExpiresHint: "YYYY-MM-DD；当天结束后过期，留空表示长期有效",
+    expiresLine: "到期日 {date}",
+    expired: "已过期",
     typeAll: "全部",
     typeOther: "未分类",
     type_user: "人物",
@@ -1213,6 +1217,8 @@
             "div",
             { class: "file-age" },
             relTime(file.updated),
+            file.expires ? h("span", { class: "tag" }, t("expiresLine", { date: file.expires })) : null,
+            file.expired ? h("span", { class: "tag warn" }, t("expired")) : null,
             file.forgottenAt ? h("span", { class: "tag warn" }, t("forgotten")) : null,
             (file.dangling || []).length ? h("span", { class: "tag warn" }, t("fileDangling")) : null,
             (file.long || []).length ? h("span", { class: "tag" }, t("fileLong")) : null
@@ -1237,6 +1243,7 @@
         description: data.description || "",
         body: data.body || "",
         signature: data.signature || "",
+        expires: data.expires || "",
         origin: data.origin || [],
         raw: data.content || "",
         hasFrontmatter: data.hasFrontmatter,
@@ -1262,6 +1269,7 @@
       description: "",
       body: "",
       signature: "",
+      expires: "",
       origin: [],
       raw: "",
       hasFrontmatter: true,
@@ -1411,6 +1419,21 @@
             })
           )
         );
+        box.append(
+          field(
+            t("fieldExpires"),
+            t("fieldExpiresHint"),
+            h("input", {
+              class: "input",
+              type: "date",
+              value: ed.expires || "",
+              oninput: function (event) {
+                ed.expires = event.target.value;
+                markDirty();
+              },
+            })
+          )
+        );
       }
       box.append(
         field(
@@ -1511,6 +1534,7 @@
       description: ed.description,
       body: ed.body,
       signature: ed.signature,
+      expires: ed.scope === "board" ? (ed.expires || "") : "",
       content: ed.raw,
       baseMtime: ed.baseMtime,
     };
@@ -1612,6 +1636,7 @@
     });
     const title = h("input", { class: "input", placeholder: t("fieldDescription") });
     const body = h("textarea", { class: "textarea", placeholder: t("fieldBody") });
+    const expires = h("input", { class: "input", type: "date" });
     const ctrl = openDialog({
       title: t("publishTitle"),
       wide: true,
@@ -1621,6 +1646,7 @@
         h("p", { class: "hint-line" }, t("publishHint")),
         field(t("fieldSignature"), t("fieldSignatureHint"), signature),
         field(t("fieldDescription"), t("fieldDescriptionHint"), title),
+        field(t("fieldExpires"), t("fieldExpiresHint"), expires),
         field(t("fieldBody"), t("fieldBodyHint"), body)
       ),
     });
@@ -1640,6 +1666,7 @@
           signature: signatureText,
           description: title.value.trim(),
           body: body.value,
+          expires: expires.value || "",
         });
         rememberSignature(signatureText);
         ctrl.busy = false;

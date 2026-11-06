@@ -143,7 +143,7 @@ _GUIDANCE_HEAD = """
 
 读写：
 - 细节先 memory_read，不确定或用户让你搜时用 memory_search。
-- 新建或整篇重写用 memory_write；重写前先读最新版本。
+- 新建或整篇重写用 memory_write（留言板可设 expires 到期日）；重写前先读最新版本。
 - 局部修改用 memory_edit；记日记用 file=journal 追加。
 - 删除用 memory_delete，进回收站。
 - 用户要求记住、更正或忘掉时当轮直接写；更正用 memory_edit 改掉旧值，正文里不要保留旧值。
