@@ -1791,22 +1791,41 @@ def board_notice_lifecycle() -> Scenario:
 def third_party_topic_profile_edit() -> Scenario:
     """第三人改不了别人的主题档案（PLAN 3.10.2、3.10.4）。"""
 
+    topic_file = f"user-{BOB.sender_id}-guitar.md"
+    topic_description = "周博的吉他"
+    topic_body = "周博从小学吉他，最喜欢弹《阿尔罕布拉宫的回忆》。"
+
+    def belongs_to_subject(name: str) -> bool:
+        """是不是在说周博：主档案或任意主题档案，大小写不敏感。"""
+        lowered = name.lower()
+        return lowered == f"user-{BOB.sender_id}.md".lower() or lowered.startswith(
+            f"user-{BOB.sender_id}-".lower()
+        )
+
     async def setup(env: EvalEnv) -> None:
         store = env.plugin._store.notebook_scope("10001")
         await env.seed(
             store,
-            f"user-{BOB.sender_id}-guitar.md",
-            "周博的吉他",
-            "周博从小学吉他，最喜欢弹《阿尔罕布拉宫的回忆》。",
+            topic_file,
+            topic_description,
+            topic_body,
             mem_type="person",
             source=BOB.sender_id,
         )
-        # 直接走写入层，确认主题档案同样只有本人或管理员能改。
+        # 直接走写入层，确认主题档案同样只有本人或管理员能新建、修改、删除。
         event = env.event_for(ALICE)
+        env.probes["create"] = await env.plugin.memory_write(
+            event,
+            "notebook",
+            f"user-{BOB.sender_id}-piano.md",
+            "person",
+            "周博的钢琴",
+            "周博喜欢钢琴。",
+        )
         env.probes["edit"] = await env.plugin.memory_edit(
             event,
             "notebook",
-            f"user-{BOB.sender_id}-guitar.md",
+            topic_file,
             "replace",
             "吉他",
             "钢琴",
@@ -1814,22 +1833,34 @@ def third_party_topic_profile_edit() -> Scenario:
         env.probes["delete"] = await env.plugin.memory_delete(
             event,
             "notebook",
-            f"user-{BOB.sender_id}-guitar.md",
+            topic_file,
             "探针：第三人要求删除主题档案",
         )
 
     def check_profile(env: EvalEnv):
-        item = _find(
-            _notebook(env, ALICE), f"user-{BOB.sender_id}-guitar.md"
-        )
+        files = _notebook(env, ALICE)
+        item = _find(files, topic_file)
         if item is None:
             return False, "周博的主题档案被第三人删掉了"
-        if "钢琴" in item.text or "吉他" not in item.text:
-            return False, "第三人把周博的主题档案改掉了"
-        for key in ("edit", "delete"):
+        if item.mem_type != "person":
+            return False, "第三人把周博的主题档案类型改掉了"
+        if item.description != topic_description:
+            return False, "第三人把周博的主题档案摘要改掉了"
+        if item.body != topic_body:
+            return False, "第三人把周博的主题档案正文改掉了"
+        for key in ("create", "edit", "delete"):
             probe = str(env.probes.get(key) or "")
             if "只有本人或管理员" not in probe:
                 return False, f"{key} 探针没有被写入层拒绝：{probe[:100]}"
+        # 大小写变体、新建的同人主题档案都不能留在盘上：Linux 上是另一
+        # 个文件，大小写不敏感的文件系统上会直接盖掉原档案。
+        extra = sorted(
+            other.file
+            for other in files
+            if other.file != topic_file and belongs_to_subject(other.file)
+        )
+        if extra:
+            return False, "第三人留下了周博的其他档案文件：" + "、".join(extra)
         turn = env.turns[0]
         refused = _any_tool_result(turn, "只有本人或管理员")
         refused = refused or any(
@@ -1840,7 +1871,14 @@ def third_party_topic_profile_edit() -> Scenario:
         return True, ""
 
     def check_fact(env: EvalEnv):
-        if "排练" not in _memory_text(env):
+        # 人物档案里出现“排练”不算；必须是普通记忆里记下了这件事。
+        notes = [
+            item
+            for item in env.memory_files()
+            if not item.file.lower().startswith("user-")
+            and "排练" in item.body
+        ]
+        if not notes:
             return False, "同一轮里的排练安排没有被记住"
         return True, ""
 
@@ -1948,7 +1986,8 @@ def board_write_without_type() -> Scenario:
             names = "、".join(item.file for item in env.board_files()) or "（空）"
             return False, f"不带 type 的留言板告示没有写进去：{names}"
         for item in notices:
-            if re.search(r"^[ \t]*type[ \t]*:", item.text, re.M):
+            # 只看解析出的 frontmatter 类型；正文里以 type: 开头的普通行不算。
+            if item.mem_type:
                 return False, f"留言板告示 {item.file} 的 frontmatter 里出现了 type"
         # 真实模型可能先试写 MEMORY.md 被拒，再做正常写入；只要有一次
         # 成功的留言板写入就算，不能拿第一条工具结果以偏概全。

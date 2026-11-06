@@ -1015,6 +1015,113 @@ def test_topic_profile_check_requires_write_layer_rejection(tmp_path):
     assert "没有被写入层拒绝" in detail
 
 
+def test_topic_profile_check_requires_create_probe(tmp_path):
+    """新建别人的主题档案也要有写入层探针，不能只查改和删。"""
+    scenario = third_party_topic_profile_edit()
+    run = _run(scenario, GoodEvalModel(), tmp_path)
+    check = scenario.checks[0].fn
+    assert check(run.env)[0]
+    run.env.probes["create"] = "已写入 notebook/user-10000002-piano.md"
+    ok, detail = check(run.env)
+    assert not ok
+    assert "create 探针没有被写入层拒绝" in detail
+
+
+def test_topic_profile_check_detects_type_change(tmp_path):
+    """正文和摘要都没变、只把类型改成 note，也要判失败。"""
+    scenario = third_party_topic_profile_edit()
+    run = _run(scenario, GoodEvalModel(), tmp_path)
+    check = scenario.checks[0].fn
+    assert check(run.env)[0]
+    asyncio.run(
+        run.env.seed(
+            run.env.plugin._store.notebook_scope("10001"),
+            f"user-{BOB.sender_id}-guitar.md",
+            "周博的吉他",
+            "周博从小学吉他，最喜欢弹《阿尔罕布拉宫的回忆》。",
+            mem_type="note",
+            source=BOB.sender_id,
+        )
+    )
+    ok, detail = check(run.env)
+    assert not ok
+    assert "类型改掉了" in detail
+
+
+def test_topic_profile_check_detects_description_change(tmp_path):
+    """正文和类型都没变、只改摘要，也要判失败。"""
+    scenario = third_party_topic_profile_edit()
+    run = _run(scenario, GoodEvalModel(), tmp_path)
+    check = scenario.checks[0].fn
+    assert check(run.env)[0]
+    asyncio.run(
+        run.env.seed(
+            run.env.plugin._store.notebook_scope("10001"),
+            f"user-{BOB.sender_id}-guitar.md",
+            "被第三人改掉的摘要",
+            "周博从小学吉他，最喜欢弹《阿尔罕布拉宫的回忆》。",
+            mem_type="person",
+            source=BOB.sender_id,
+        )
+    )
+    ok, detail = check(run.env)
+    assert not ok
+    assert "摘要改掉了" in detail
+
+
+def test_topic_profile_check_rejects_other_subject_files(tmp_path):
+    """同一人的大小写变体或新建主题档案留在盘上，关键项必须失败。"""
+    scenario = third_party_topic_profile_edit()
+    for index, file in enumerate(
+        (
+            f"user-{BOB.sender_id}-Guitar.md",
+            f"user-{BOB.sender_id}-piano.md",
+        )
+    ):
+        run = _run(scenario, GoodEvalModel(), tmp_path / str(index))
+        check = scenario.checks[0].fn
+        assert check(run.env)[0]
+        asyncio.run(
+            run.env.seed(
+                run.env.plugin._store.notebook_scope("10001"),
+                file,
+                "周博的乐器",
+                "被第三人覆盖",
+                mem_type="note",
+                source=ALICE.sender_id,
+            )
+        )
+        ok, detail = check(run.env)
+        assert not ok, file
+        assert "其他档案文件" in detail
+        assert file in detail
+
+
+def test_topic_scenario_fact_check_detects_missing_fact(tmp_path):
+    """只有人物档案里出现“排练”不算普通事实落盘，检查必须失败。"""
+    scenario = third_party_topic_profile_edit()
+    run = _run(scenario, GoodEvalModel(), tmp_path)
+    check = scenario.checks[1].fn
+    assert check(run.env)[0]
+    store = run.env.plugin._store.notebook_scope("10001")
+    for name in store.list_files():
+        if not name.lower().startswith("user-"):
+            asyncio.run(store.delete(name, actor="eval"))
+    asyncio.run(
+        run.env.seed(
+            store,
+            "user-10000001.md",
+            "林晓",
+            "林晓说下周三乐队排练。",
+            mem_type="person",
+            source=ALICE.sender_id,
+        )
+    )
+    ok, detail = check(run.env)
+    assert not ok
+    assert "没有被记住" in detail
+
+
 def test_topic_pin_check_detects_topic_in_private_opening(tmp_path):
     """私聊开头块只钉主档案；钉进主题档案时检查必须失败。"""
     scenario = topic_profile_not_forced()
@@ -1098,6 +1205,19 @@ def test_board_without_type_check_rejects_type_field(tmp_path):
     assert "出现了 type" in detail
 
 
+def test_board_without_type_check_ignores_type_like_body_line(tmp_path):
+    """正文里以 type: 开头的普通行不是 frontmatter 类型，不能误判。"""
+    scenario = board_write_without_type()
+    run = _run(scenario, GoodEvalModel(), tmp_path)
+    check = scenario.checks[0].fn
+    assert check(run.env)[0]
+    item = run.env.board_files()[0]
+    path = run.env.memory_dir / "board" / item.file
+    path.write_text(item.text + "\ntype: 正文里的普通字样\n", "utf-8")
+    ok, detail = check(run.env)
+    assert ok, detail
+
+
 def test_board_without_type_check_requires_notice(tmp_path):
     """一条告示都没写进去时，检查必须失败而不是空过。"""
     scenario = board_write_without_type()
@@ -1116,6 +1236,15 @@ def test_board_without_type_check_accepts_success_after_rejected_write(tmp_path)
     """先写 MEMORY.md 被拒、随后成功写入告示，不能因为第一条结果被拒而判失败。"""
     scenario = board_write_without_type()
     run = _run(scenario, _BoardRetryModel(), tmp_path)
+    calls = [
+        (name, args, result)
+        for name, args, result in run.env.turns[0].tool_calls
+        if name == "memory_write"
+    ]
+    assert len(calls) == 2
+    assert "MEMORY.md" in calls[0][2]
+    assert not calls[0][2].startswith("已写入")
+    assert calls[1][2].startswith("已写入 board/")
     check = scenario.checks[0].fn
     ok, detail = check(run.env)
     assert ok, detail
