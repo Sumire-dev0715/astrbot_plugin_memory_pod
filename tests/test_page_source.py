@@ -518,11 +518,16 @@ def test_dialog_cover_hides_the_busy_spinner_of_the_trigger_button():
 
 def test_narrow_layout_rules_exist():
     css = _page("style.css")
+    tablet = css.split("@media (max-width: 900px) {", 1)[1].split("@media (max-width: 640px) {", 1)[0]
+    # 五个导航项等宽、独占一行：图标在上、文字在下，数量变成角标。
+    # 这组规则必须从 900px（单栏布局）起生效：一行放不下英文的导航，横向滚动条又是
+    # 藏起来的，最后几项会被裁掉（在真 Chrome 里 700 / 780px 量到过）
+    assert "grid-template-columns: repeat(5, minmax(0, 1fr))" in tablet
+    assert "flex-direction: column" in tablet
+    assert ".nav-count" in tablet and "position: absolute" in tablet
+    assert "flex-wrap: wrap" in tablet and "flex-basis: 100%" in tablet
     narrow = css.split("@media (max-width: 640px) {", 1)[1].split("@media (prefers-reduced-motion", 1)[0]
-    # 五个导航项等宽排成一行：图标在上、文字在下，数量变成角标
-    assert "grid-template-columns: repeat(5, minmax(0, 1fr))" in narrow
-    assert "flex-direction: column" in narrow
-    assert ".nav-count" in narrow and "position: absolute" in narrow
+    assert "repeat(5" not in narrow
     # 元信息两列排；弹窗在手机上贴底
     assert "repeat(2, minmax(0, 1fr))" in narrow
     assert "border-radius: var(--r-lg) var(--r-lg) 0 0" in narrow

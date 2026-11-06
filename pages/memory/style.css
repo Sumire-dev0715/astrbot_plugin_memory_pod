@@ -2646,17 +2646,13 @@ select.input {
     justify-content: flex-start;
     width: 100%;
   }
-}
 
-@media (max-width: 640px) {
+  /* 导航独占一行，五项等宽：图标在上、文字在下，数量变成角标。
+   * 和单栏布局一起从 900px 起启用：一行放不下英文等较长的文字，
+   * 横向滚动条又是藏起来的，最后几项会被裁掉而且看不出来 */
   .topbar {
     flex-wrap: wrap;
-    gap: var(--sp-2);
-    padding: var(--sp-2) var(--sp-3);
-  }
-
-  .brand-sub {
-    display: none;
+    gap: var(--sp-2) var(--sp-4);
   }
 
   .nav {
@@ -2701,6 +2697,17 @@ select.input {
 
   .topbar-actions {
     margin-left: auto;
+  }
+}
+
+@media (max-width: 640px) {
+  .topbar {
+    gap: var(--sp-2);
+    padding: var(--sp-2) var(--sp-3);
+  }
+
+  .brand-sub {
+    display: none;
   }
 
   .detail {
