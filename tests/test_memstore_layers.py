@@ -148,6 +148,18 @@ def test_person_file_name_is_case_insensitive():
     assert pkg_memstore.is_person_file("User-123.md")
 
 
+def test_person_file_name_accepts_non_numeric_platform_ids():
+    """PLAN 3.10.2 说的是平台 ID：Slack 之类平台的 ID 带字母也认。"""
+    assert pkg_memstore.is_person_file("user-U0123ABC.md")
+    assert pkg_memstore.is_person_file("user-U0123ABC-games.md")
+    assert pkg_memstore.is_primary_person_file("user-U0123ABC.md")
+    assert pkg_memstore.person_id("user-U0123ABC.md") == "U0123ABC"
+    # 不合规的 user- 写法仍按这个人的档案执行所有权规则
+    assert pkg_memstore.person_owner("user-123-Games.md") == "123"
+    assert pkg_memstore.person_owner("user-U0123ABC-work_notes.md") == "U0123ABC"
+    assert pkg_memstore.person_owner("notes.md") == ""
+
+
 def test_person_file_name_accepts_lowercase_topics_only():
     assert pkg_memstore.is_person_file("user-123-games.md")
     assert pkg_memstore.is_person_file("user-123-games-2026.md")

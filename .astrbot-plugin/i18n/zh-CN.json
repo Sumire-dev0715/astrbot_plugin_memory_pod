@@ -77,7 +77,7 @@
       "modeRaw": "原文",
       "unsaved": "有未保存的修改",
       "fieldFile": "文件名",
-      "fieldFileHint": "人物主档案用 user-<数字ID>.md；一个主题一个文件 user-<数字ID>-<主题>.md，主题只用小写英文、数字、连字符",
+      "fieldFileHint": "人物主档案用 user-<平台ID>.md；一个主题一个文件 user-<平台ID>-<主题>.md，主题只用小写英文、数字、连字符",
       "fieldType": "类型",
       "fieldDescription": "描述",
       "fieldDescriptionHint": "一句话说明这是什么、什么时候用得上；它会成为索引里的那一行",

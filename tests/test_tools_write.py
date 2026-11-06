@@ -1470,6 +1470,64 @@ def test_topic_profile_only_self_or_admin_can_create_and_change(tmp_path):
     )
 
 
+def test_person_like_uppercase_topic_cannot_be_written_by_others(tmp_path):
+    """不合规的 user- 文件名不能成为绕过档案保护的普通笔记。"""
+    plugin = make_plugin(tmp_path)
+    store = notebook(plugin)
+    admin = FakeEvent("Bot-A", "1", admin=True)
+    assert "已写入 notebook/user-456-games.md" in run(
+        plugin.memory_write(
+            admin, "notebook", "user-456-games.md", "person", "游戏", "喜欢英雄联盟"
+        )
+    )
+    third = FakeEvent("Bot-A", "789", umo="Bot-A:GroupMessage:900")
+    run(plugin.memory_read(third, "notebook", "user-456-games.md"))
+    for name in ("user-456-Games.md", "user-456-GAMES.md", "user-456-a_b.md"):
+        receipt = run(
+            plugin.memory_write(
+                third, "notebook", name, "note", "覆盖", "坏内容"
+            )
+        )
+        assert "只有本人或管理员" in receipt, (name, receipt)
+        assert run(store.read(name)) is None
+    assert sorted(store.list_files()) == ["user-456-games.md"]
+    assert "喜欢英雄联盟" in run(store.read("user-456-games.md"))
+
+    # 本人或管理员写这种名字也要被命名规则拒绝，不能落成不合规的档案
+    owner = FakeEvent("Bot-A", "456", umo="Bot-A:GroupMessage:900")
+    for event in (owner, admin):
+        # 大小写不敏感的文件系统上这个名字指向已有档案，先读过再过读后重写校验
+        run(plugin.memory_read(event, "notebook", "user-456-games.md"))
+        receipt = run(
+            plugin.memory_write(
+                event, "notebook", "user-456-Games.md", "person", "游戏", "改掉"
+            )
+        )
+        assert "类型和文件名必须对上" in receipt
+    assert run(store.read("user-456-Games.md")) is None
+
+
+def test_non_numeric_platform_person_profile_is_protected(tmp_path):
+    """平台 ID 不是纯数字（如 Slack 的 U0123ABC）时，人物档案照样受保护。"""
+    plugin = make_plugin(tmp_path)
+    store = notebook(plugin)
+    owner = FakeEvent("Bot-A", "U0123ABC")
+    assert "已写入 notebook/user-U0123ABC.md" in run(
+        plugin.memory_write(owner, "notebook", "user-U0123ABC.md", "person", "档案", "本人")
+    )
+    third = FakeEvent("Bot-A", "789")
+    run(plugin.memory_read(third, "notebook", "user-U0123ABC.md"))
+    receipt = run(
+        plugin.memory_write(third, "notebook", "user-U0123ABC.md", "note", "覆盖", "坏内容")
+    )
+    assert "只有本人或管理员" in receipt
+    assert "本人" in run(store.read("user-U0123ABC.md"))
+    receipt = run(
+        plugin.memory_write(third, "notebook", "user-U0123ABC-games.md", "person", "游戏", "改")
+    )
+    assert "只有本人或管理员" in receipt
+
+
 def test_agreement_edit_and_delete_refresh_every_session_opening(tmp_path):
     """agreement 的修改、删除也要让所有会话的开头块马上刷新。"""
     plugin = make_plugin(tmp_path)

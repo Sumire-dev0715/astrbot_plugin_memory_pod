@@ -55,8 +55,8 @@ def test_guidance_keeps_reminder_actionable():
 def test_write_rules_pin_person_profile_filenames():
     """人物档案规范必须给出主档案与主题档案的文件名和 person 类型。"""
     text = pkg_prompts.memory_guidance()
-    assert "主档案 user-<数字ID>.md" in text
-    assert "主题档案 user-<数字ID>-<主题>.md" in text
+    assert "主档案 user-<平台ID>.md" in text
+    assert "主题档案 user-<平台ID>-<主题>.md" in text
     assert "type=person" in text
     assert "公开部分放小本本，私密部分放悄悄话" in text
 

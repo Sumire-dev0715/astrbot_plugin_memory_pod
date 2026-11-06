@@ -38,7 +38,8 @@ _DAY_SECONDS = 86400
 _FRONTMATTER_RE = re.compile(r"\A---\s*\n(.*?)\n---\s*\n?", re.S)
 _ORIGIN_LINE_RE = re.compile(r"^[ \t]*origin[ \t]*:[^\n]*(?:\n|$)", re.M)
 _PERSON_FILE_RE = re.compile(
-    r"^user-(?P<id>\d+)(?:-(?P<topic>[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*))?"
+    r"^user-(?P<id>[A-Za-z0-9_]+)"
+    r"(?:-(?P<topic>[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*))?"
     r"\.md$",
     re.I,
 )

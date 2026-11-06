@@ -83,7 +83,7 @@
       "modeRaw": "Raw",
       "unsaved": "Unsaved changes",
       "fieldFile": "File name",
-      "fieldFileHint": "Use user-<numeric ID>.md for a person's main profile, or user-<numeric ID>-<topic>.md for a topic (lowercase letters, digits, hyphens)",
+      "fieldFileHint": "Use user-<platform ID>.md for a person's main profile, or user-<platform ID>-<topic>.md for a topic (lowercase letters, digits, hyphens)",
       "fieldType": "Type",
       "fieldDescription": "Description",
       "fieldDescriptionHint": "One sentence on what this is and when it matters; it becomes this memory's line in the index",

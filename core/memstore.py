@@ -2973,12 +2973,18 @@ class ScopeStore:
 
 # 人物档案（PLAN 3.10.2）：主档案 user-<平台ID>.md，主题档案
 # user-<平台ID>-<主题>.md，主题只用小写英文、数字和连字符。
-# 平台 ID 是数字；前缀与扩展名的匹配不区分大小写，主题必须小写。
+# 平台 ID 是字母、数字或下划线（QQ 是数字，Slack 等平台可能带字母）；
+# 前缀与扩展名的匹配不区分大小写，主题必须小写。
 _PERSON_FILE_RE = re.compile(
-    r"^user-(?P<id>\d+)(?:-(?P<topic>[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*))?"
+    r"^user-(?P<id>[A-Za-z0-9_]+)"
+    r"(?:-(?P<topic>[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*))?"
     r"\.md$",
     re.I,
 )
+# user- 前缀加 .md 是人物档案的命名空间。不合规的写法（大写主题、
+# 主题里有下划线等）也要认成"某个人的档案"来执行所有权规则，否则
+# 第三人可以借一个不合规的文件名把内容写成没人保护的普通笔记。
+_PERSON_OWNER_RE = re.compile(r"^user-(?P<id>[A-Za-z0-9_]+)(?:-.*)?\.md$", re.I)
 
 
 def _person_match(name: str) -> re.Match | None:
@@ -3003,8 +3009,19 @@ def is_primary_person_file(name: str) -> bool:
 
 
 def person_id(name: str) -> str:
-    """档案文件名里的平台 ID；不是人物档案返回空串。"""
+    """合规人物档案文件名里的平台 ID；不是人物档案返回空串。"""
     match = _person_match(name)
+    return match.group("id") if match else ""
+
+
+def person_owner(name: str) -> str:
+    """文件名声称属于哪个平台 ID；不合规的 user- 写法也算。
+
+    给所有权校验用：`user-<ID>-<含大写主题>.md` 这类不合规的名字已经在
+    写入时被拒绝，但磁盘上如果已经有这种文件，也不能因为命名不合规就
+    变成谁都能改的普通笔记。
+    """
+    match = _PERSON_OWNER_RE.match((name or "").strip())
     return match.group("id") if match else ""
 
 
@@ -3039,8 +3056,17 @@ def person_type_problem(
     （比如 user），就不算一次新的不匹配写入：否则旧人物档案在原文
     编辑器里永远保存不了。类型改了或者旧类型本身是认识的，照样拒绝。
     """
+    filename_is_person = is_person_file(name)
+    if not filename_is_person and _PERSON_OWNER_RE.match((name or "").strip()):
+        # 形似人物档案但命名不合规：任何类型都不允许写，免得它落成一份
+        # 不受"本人或管理员"保护的普通笔记
+        return (
+            "人物档案的文件名不符合规定：以 user- 开头的档案必须是 "
+            "user-<平台ID>.md（主档案）或 user-<平台ID>-<主题>.md"
+            "（主题只用小写英文、数字和连字符）；类型和文件名必须对上"
+        )
     type_is_person = (mem_type or "").strip().lower() == PERSON_TYPE
-    if type_is_person == is_person_file(name):
+    if type_is_person == filename_is_person:
         return ""
     incoming = (mem_type or "").strip().lower()
     if (
