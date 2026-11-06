@@ -15,7 +15,9 @@
   const store = MP.store;
   const S = store.S;
   const TYPES = ["person", "agreement", "note", "journal"];
-  const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,120}\.md$/;
+  // 与 core/memstore.py 的 _SAFE_NAME_RE 同长度：整个文件名（含 .md）最多 121 个字符，
+  // 所以 .md 之前最多 1 + 117 个字符（tests/test_page_source.py 逐个长度核对过）
+  const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,117}\.md$/;
   // 与 core/memstore.py 的人物档案文件名规则一致（PLAN 3.10.2）
   const PERSON_RE = /^user-[A-Za-z0-9_]+(?:-[a-z0-9]+(?:-[a-z0-9]+)*)?\.md$/i;
   const PERSON_OWNER_RE = /^user-[A-Za-z0-9_]+(?:-.*)?\.md$/i;

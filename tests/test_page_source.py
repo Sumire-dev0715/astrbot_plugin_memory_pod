@@ -7,6 +7,7 @@
 在迷你 DOM 里跑真实脚本来测。
 """
 
+import json
 import re
 import shutil
 import subprocess
@@ -14,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+from support import pkg_memstore
 from test_web_api import setup
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -119,6 +121,38 @@ def test_every_js_file_passes_node_check():
             ["node", "--check", str(PAGE / name)], capture_output=True, text=True
         )
         assert result.returncode == 0, (name, result.stderr)
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="没有 node")
+def test_page_file_name_rule_is_not_looser_than_the_backend():
+    """表单里放行的文件名，后端必须也认：否则要到保存时才被服务端报"文件名不合法"。"""
+    names = ["a" * (total - 3) + ".md" for total in range(4, 131)]
+    names += [
+        "a.md", ".md", "md", "-a.md", "_a.md", "a b.md", "a/b.md", "../a.md", "ä.md", "A-b_c.d.md",
+        "a.md.md", "a.MD", "a.md\n", " a.md", "a.md ", "MEMORY.md", "user-10001.md",
+    ]
+    runner = (
+        "const fs = require('fs');"
+        "const m = /const NAME_RE = (\\/.*\\/);/.exec(fs.readFileSync(process.argv[1], 'utf8'));"
+        "const re = eval(m[1]);"
+        "const names = JSON.parse(fs.readFileSync(0, 'utf8'));"
+        "console.log(JSON.stringify(names.map((n) => re.test(n))));"
+    )
+    result = subprocess.run(
+        ["node", "-e", runner, str(PAGE / "memory.js")],
+        input=json.dumps(names),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    assert result.returncode == 0, result.stderr
+    page_says = json.loads(result.stdout)
+    backend_says = [pkg_memstore.ScopeStore.is_valid_name(name) for name in names]
+    differing = [(len(n), n[:12]) for n, a, b in zip(names, page_says, backend_says) if a != b]
+    assert not differing, differing
+    # 两边都按"整个名字（含 .md）最多 121 个字符"算：这一条防的是两边一起错
+    longest_ok = max(len(n) for n, ok in zip(names, backend_says) if ok and n.startswith("aaa"))
+    assert longest_ok == 121
 
 
 # ------------------------------------------------------------ 接口对得上
