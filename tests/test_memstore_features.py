@@ -5,6 +5,8 @@ from __future__ import annotations
 import os
 import time
 
+import pytest
+
 from support import pkg_memstore, run, thing
 
 
@@ -117,3 +119,76 @@ def test_delete_trash_removes_bytes(tmp_path):
     report = run(scope.delete_trash(entry.entry))
     assert report.ok
     assert scope.trash_entries() == []
+
+
+# ---------------------------------------------------------------- 路径与索引守门
+
+
+def test_resolve_rejects_traversal(tmp_path):
+    scope = store(tmp_path)
+    for name in ("../evil.md", "sub/evil.md", "no-suffix", ".hidden.md", ""):
+        assert scope._resolve(name) is None, name
+    assert scope._resolve("note.md") is not None
+
+
+def test_write_index_refused(tmp_path):
+    scope = store(tmp_path)
+    report = run(scope.write(pkg_memstore.INDEX_FILENAME, "# 乱写"))
+    assert not report.ok and "自动维护" in report.message
+    assert run(scope.read(pkg_memstore.INDEX_FILENAME)) is None
+
+
+def test_delete_index_refused(tmp_path):
+    scope = store(tmp_path)
+    run(scope.write("a.md", thing("a", body="甲")))
+    report = run(scope.delete(pkg_memstore.INDEX_FILENAME))
+    assert not report.ok
+    assert run(scope.read(pkg_memstore.INDEX_FILENAME)) is not None
+
+
+def test_index_guard_ignores_padding_and_case(tmp_path):
+    scope = store(tmp_path)
+    run(scope.write("a.md", thing("a", body="甲")))
+    before = run(scope.read(pkg_memstore.INDEX_FILENAME))
+    for name in ("/MEMORY.md", " MEMORY.md", "MEMORY.md ", "memory.md"):
+        assert not run(scope.write(name, "# 乱写")).ok, name
+        assert not run(scope.delete(name)).ok, name
+    assert run(scope.read(pkg_memstore.INDEX_FILENAME)) == before
+
+
+def test_write_refuses_unreadable_existing_file(tmp_path):
+    if os.geteuid() == 0:  # root 不受权限位限制
+        pytest.skip("以 root 运行时无法用权限位模拟读失败")
+    scope = store(tmp_path)
+    run(scope.write("a.md", thing("a", body="第一版")))
+    path = scope.root / "a.md"
+    path.chmod(0o000)
+    try:
+        report = run(scope.write("a.md", thing("a", body="第二版")))
+    finally:
+        path.chmod(0o644)
+    assert not report.ok and "读取" in report.message
+    assert "第一版" in path.read_text("utf-8")
+    assert scope.history_versions("a.md") == []
+
+
+def test_search_excludes_index(tmp_path):
+    scope = store(tmp_path)
+    run(scope.write("empty.md", "---\nname: empty\n---\n"))
+    # 钩子兜底文案只存在于 MEMORY.md，搜索不应命中索引文件
+    assert "（无描述）" in run(scope.read(pkg_memstore.INDEX_FILENAME))
+    assert run(scope.search("无描述")) == []
+
+
+def test_memory_store_scopes_are_isolated(tmp_path):
+    memory_store = pkg_memstore.MemoryStore(tmp_path / "memories")
+    first = memory_store.notebook_scope("Bot-A")
+    second = memory_store.notebook_scope("Bot-B")
+    run(first.write("note.md", thing("note", description="A 的钩子", body="A 的内容")))
+    run(second.write("note.md", thing("note", description="B 的钩子", body="B 的内容")))
+    assert "A 的内容" in run(first.read("note.md"))
+    assert "B 的内容" in run(second.read("note.md"))
+    assert memory_store.notebook_scope("Bot-A") is first
+    assert run(first.search("B 的内容")) == []
+    assert "B 的钩子" not in run(first.read(pkg_memstore.INDEX_FILENAME))
+    assert "A 的钩子" not in run(second.read(pkg_memstore.INDEX_FILENAME))

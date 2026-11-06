@@ -4,7 +4,14 @@ from __future__ import annotations
 
 import json
 
-from support import pkg_history, pkg_memstore, run, thing
+from support import (
+    import_core,
+    pkg_history,
+    pkg_memstore,
+    pkg_registry,
+    run,
+    thing,
+)
 
 
 def store(tmp_path):
@@ -178,3 +185,219 @@ def test_cleanup_scope_archives(tmp_path):
     removed = pkg_history.cleanup_scope_archives(archives, 1, 1e12)
     assert removed >= 1
     assert not archives.exists() or not any(archives.iterdir())
+
+
+# ---------------------------------------------------------------- 每条变更路径都可恢复
+
+
+def test_write_over_forgotten_name_keeps_copy_in_trash(tmp_path):
+    scope = store(tmp_path)
+    run(scope.write("p.md", thing("p", body="第一版")))
+    run(scope.forget("p.md"))
+    forgotten = run(scope.read_forgotten("p.md"))
+    run(scope.write("p.md", thing("p", body="第二版")))
+    assert scope.forgotten_files() == []
+    entries = [
+        item
+        for item in scope.trash_entries()
+        if item.file == "p.md"
+        and item.action == pkg_history.ACTION_DISCARD_FORGOTTEN
+    ]
+    assert len(entries) == 1
+    assert scope.read_trash(entries[0].entry) == forgotten
+
+
+def test_import_overwrite_keeps_old_version(tmp_path):
+    scope = store(tmp_path)
+    run(scope.write("a.md", thing("a", body="现有")))
+    before = run(scope.read("a.md"))
+    results = run(
+        scope.import_files(
+            [pkg_memstore.ImportEntry("a.md", thing("a", body="导入的"))],
+            pkg_memstore.CONFLICT_OVERWRITE,
+            actor="transfer",
+        )
+    )
+    assert results[0].landed
+    versions = scope.history_versions("a.md")
+    assert versions[0].action == pkg_history.ACTION_IMPORT
+    assert versions[0].actor == "transfer"
+    assert scope.read_history("a.md", versions[0].version) == before
+
+
+def test_restore_trash_over_active_saves_current_first(tmp_path):
+    scope = store(tmp_path)
+    run(scope.write("a.md", thing("a", body="回收站版本")))
+    archived = run(scope.read("a.md"))
+    run(scope.delete("a.md"))
+    run(scope.write("a.md", thing("a", body="在册版本")))
+    current = run(scope.read("a.md"))
+    entry = next(item for item in scope.trash_entries() if item.file == "a.md")
+    assert run(scope.restore_trash(entry.entry)).ok
+    assert run(scope.read("a.md")) == archived
+    assert any(
+        scope.read_history("a.md", version.version) == current
+        for version in scope.history_versions("a.md")
+    )
+
+
+def test_transfer_move_keeps_source_in_scope_trash(tmp_path):
+    transfer = import_core("transfer")
+    memory_store = pkg_memstore.MemoryStore(tmp_path / "memories")
+    registry = pkg_registry.SessionRegistry(tmp_path / "sessions.json")
+    mover = transfer.MemoryTransfer(memory_store, registry)
+    source = memory_store.notebook_scope("Bot-A")
+    run(source.write("a.md", thing("a", body="要搬走")))
+    before = run(source.read("a.md"))
+    report = run(
+        mover.transfer(
+            transfer.ScopeRef("notebook", "Bot-A"),
+            transfer.ScopeRef("notebook", "Bot-B"),
+            mode=transfer.MODE_MOVE,
+        )
+    )
+    assert report["moved"] == 1
+    assert source.list_files() == []
+    entries = [item for item in source.trash_entries() if item.file == "a.md"]
+    assert len(entries) == 1
+    assert source.read_trash(entries[0].entry) == before
+
+
+def test_history_and_trash_never_show_up_as_memory(tmp_path):
+    scope = store(tmp_path)
+    now = 1_800_000_000.0
+    run(scope.write("a.md", thing("a", body="绝密旧版本一号")))
+    run(scope.write("a.md", thing("a", body="当前版本")))
+    run(scope.write("b.md", thing("b", body="回收站内容二号")))
+    run(scope.delete("b.md"))
+    scope.note_used(["a.md"], now=now - 86400)
+    assert run(scope.forget_stale(30 * 86400, now)) == []
+
+    assert scope.list_files() == ["a.md"]
+    header = scope.headers()[0]
+    assert header.file == "a.md"
+    assert "绝密旧版本一号" not in header.text
+    assert "回收站内容二号" not in header.text
+    index = run(scope.read("MEMORY.md"))
+    assert "a.md" in index and "b.md" not in index
+    assert "绝密旧版本一号" not in index and "回收站内容二号" not in index
+    assert run(scope.search("绝密旧版本一号")) == []
+    assert run(scope.search("回收站内容二号")) == []
+    assert run(scope.search("当前版本")) == ["a.md: 当前版本"]
+    report = scope.index_report()
+    assert report.missing == [] and report.dangling == []
+    assert set(scope.usage()) == {"a.md"}
+    # 历史与回收站原样留着，只是不参与上面的任何扫描
+    assert scope.history_versions("a.md")
+    assert scope.trash_entries()
+
+
+# ---------------------------------------------------------------- 保留期与审计
+
+
+def test_history_cleanup_keeps_latest_ten_versions(tmp_path, monkeypatch):
+    base = 1_800_000_000.0
+    monkeypatch.setattr(pkg_history, "_now", lambda: base)
+    scope = store(tmp_path)
+    for index in range(13):
+        run(scope.write("a.md", thing("a", body=f"第 {index} 版")))
+    versions = scope.history_versions("a.md")
+    assert len(versions) == 12
+
+    scope.set_retention(30, 0)
+    removed = scope.cleanup_history(now=base + 100 * 86400, force=True)
+    assert removed["versions"] == 2
+    kept = scope.history_versions("a.md")
+    assert len(kept) == pkg_history.MIN_KEEP_VERSIONS
+    assert kept[0].version == versions[0].version
+    assert kept[-1].version == versions[9].version
+    # 非 force 的调用被 6 小时间隔挡住
+    assert scope.cleanup_history(now=base + 100 * 86400) == {}
+
+
+def test_history_cleanup_zero_keeps_everything(tmp_path, monkeypatch):
+    base = 1_800_000_000.0
+    monkeypatch.setattr(pkg_history, "_now", lambda: base)
+    scope = store(tmp_path)
+    for index in range(13):
+        run(scope.write("a.md", thing("a", body=f"第 {index} 版")))
+    scope.set_retention(0, 0)
+    assert scope.cleanup_history(now=base + 100 * 86400, force=True) == {
+        "versions": 0,
+        "trash": 0,
+    }
+    assert len(scope.history_versions("a.md")) == 12
+
+
+def test_trash_cleanup_respects_keep_days(tmp_path, monkeypatch):
+    base = 1_800_000_000.0
+    monkeypatch.setattr(pkg_history, "_now", lambda: base)
+    scope = store(tmp_path)
+    run(scope.write("a.md", thing("a", body="甲")))
+    run(scope.write("b.md", thing("b", body="乙")))
+    run(scope.delete("a.md"))
+    run(scope.delete("b.md"))
+    scope.set_retention(0, 30)
+    assert scope.cleanup_history(now=base + 100 * 86400, force=True)["trash"] == 2
+    assert scope.trash_entries() == []
+
+    run(scope.write("c.md", thing("c", body="丙")))
+    run(scope.delete("c.md"))
+    scope.set_retention(0, 0)
+    assert scope.cleanup_history(now=base + 1000 * 86400, force=True)["trash"] == 0
+    assert len(scope.trash_entries()) == 1
+
+
+def test_audit_records_every_change(tmp_path):
+    scope = store(tmp_path)
+    run(scope.write("a.md", thing("a", body="第一版"), source="10001", actor="Bot-A"))
+    first = run(scope.read("a.md"))
+    run(scope.write("a.md", thing("a", body="第二版"), source="10001", actor="Bot-A"))
+    run(scope.edit("a.md", "第二版", "改过", source="10001", actor="Bot-A"))
+    run(scope.delete("a.md", actor="webui"))
+    rows = [
+        json.loads(line)
+        for line in (scope.root / pkg_history.AUDIT_FILENAME)
+        .read_text("utf-8")
+        .splitlines()
+    ]
+    assert [row["action"] for row in rows] == [
+        pkg_history.ACTION_WRITE,
+        pkg_history.ACTION_WRITE,
+        pkg_history.ACTION_EDIT,
+        pkg_history.ACTION_DELETE,
+    ]
+    assert rows[0]["before_sha1"] == "" and rows[0]["after_sha1"]
+    assert rows[1]["before_sha1"] == pkg_history.content_sha1(first)
+    assert rows[1]["actor"] == "Bot-A" and rows[1]["source"] == "10001"
+    for row in rows:
+        assert set(row) == {
+            "ts",
+            "action",
+            "file",
+            "actor",
+            "source",
+            "before_sha1",
+            "after_sha1",
+        }
+
+
+def test_import_refuses_non_utf8_existing_file_without_aborting_batch(tmp_path):
+    scope = store(tmp_path)
+    scope.root.mkdir(parents=True, exist_ok=True)
+    bad = scope.root / "bad.md"
+    bad.write_bytes(b"\xff\xfe\x00broken")
+    results = run(
+        scope.import_files(
+            [
+                pkg_memstore.ImportEntry("bad.md", thing("bad", body="坏的")),
+                pkg_memstore.ImportEntry("ok.md", thing("ok", body="好的")),
+            ],
+            pkg_memstore.CONFLICT_OVERWRITE,
+        )
+    )
+    assert results[0].outcome == pkg_memstore.IMPORT_INVALID
+    assert "读取现有文件失败" in results[0].reason
+    assert bad.read_bytes() == b"\xff\xfe\x00broken"
+    assert results[1].landed
+    assert "好的" in run(scope.read("ok.md"))
