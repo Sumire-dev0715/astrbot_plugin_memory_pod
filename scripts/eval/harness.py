@@ -454,6 +454,7 @@ class EvalEnv:
                     # resolve_context_compression_config 的 max_context_length。
                     "com" "pression": {
                         "max_turns": scenario.max_turns,
+                        "overflow_strategy": scenario.compression_strategy,
                         "fallback_max_tokens": 0,
                     }
                 }
@@ -606,6 +607,9 @@ class Scenario:
     config: dict = field(default_factory=dict)
     provider_window: int = 1_000_000
     max_turns: int = -1
+    # AstrBot 的 compressions.overflow_strategy；默认与
+    # AGENT_RUNNER_CONFIG_DEFAULTS 的 llm_compress 一致。
+    compression_strategy: str = "llm_compress"
     setup: Callable[[EvalEnv], Awaitable[None] | None] | None = None
 
 
@@ -817,6 +821,10 @@ def _compress_context(messages: list[dict]) -> tuple[list[dict], bool]:
     old_rounds = rounds[:recent_start]
     recent_rounds = rounds[recent_start:]
     if not old_rounds:
+        # AstrBot 在预算覆盖全部轮次、且最后一条是当前用户消息时原样返回，
+        # 不能把本轮用户消息一起当成旧轮次压缩掉（compressor.py:234-243）。
+        if recent_rounds and messages and messages[-1].get("role") == "user":
+            return messages, False
         old_rounds = rounds
         recent_rounds = []
     summary = f"评测桩：之前 {len(old_rounds)} 轮对话的摘要。"
@@ -835,10 +843,40 @@ def _compress_context(messages: list[dict]) -> tuple[list[dict], bool]:
     return result, True
 
 
+def _drop_oldest_turns(
+    messages: list[dict], drop_turns: int = 1
+) -> tuple[list[dict], bool]:
+    """AstrBot TruncateByTurnsCompressor 的等价实现：丢掉最旧的几轮。"""
+    if drop_turns <= 0:
+        return messages, False
+    system_messages, non_system = _split_system_rest(messages)
+    if len(non_system) // 2 <= drop_turns:
+        truncated: list[dict] = []
+    else:
+        truncated = non_system[drop_turns * 2 :]
+    index = next(
+        (i for i, item in enumerate(truncated) if item.get("role") == "user"),
+        None,
+    )
+    if index is not None:
+        truncated = truncated[index:]
+    if not (truncated and truncated[0].get("role") == "user"):
+        first_user = next(
+            (item for item in messages if item.get("role") == "user"), None
+        )
+        if first_user is not None:
+            truncated = [first_user, *truncated]
+    return _fix_messages(system_messages + truncated), True
+
+
 def _process_context(
     messages: list[dict], scenario: "Scenario", window: int
 ) -> tuple[list[dict], bool, bool]:
-    """AstrBot ContextManager.process：先按轮数截断，再按 0.82 压缩。"""
+    """AstrBot ContextManager.process：先按轮数截断，再按 0.82 压缩。
+
+    overflow_strategy 为 llm_compress 时生成摘要消息；其他策略按
+    TruncateByTurnsCompressor 丢掉最旧的一轮。两者都发生在插件钩子之后。
+    """
     truncated = False
     compressed = False
     processed = messages
@@ -849,7 +887,10 @@ def _process_context(
     if window > 0:
         tokens = _count_tokens(processed)
         if tokens > window * COMPRESSION_THRESHOLD:
-            processed, compressed = _compress_context(processed)
+            if scenario.compression_strategy == "llm_compress":
+                processed, compressed = _compress_context(processed)
+            else:
+                processed, compressed = _drop_oldest_turns(processed, 1)
             if compressed and _count_tokens(processed) > window * COMPRESSION_THRESHOLD:
                 system_messages, rest = _split_system_rest(processed)
                 rounds = _split_into_rounds(rest)
@@ -932,13 +973,26 @@ def _base_system_prompt(clock: FakeClock) -> str:
 
 
 async def _execute_tool(
-    plugin, event: EvalEvent, tools: dict[str, Callable], call: ToolCall
+    plugin,
+    event: EvalEvent,
+    tools: dict[str, Callable],
+    call: ToolCall,
+    allowed_arguments: set[str] | None = None,
 ) -> str:
     func = tools.get(call.name)
     if func is None:
         return f"工具 {call.name} 不存在"
+    arguments = dict(call.arguments)
+    if allowed_arguments is not None:
+        # AstrBot 按工具声明的 properties 过滤参数，多余参数直接忽略
+        # （tool_loop_agent_runner.py:1258-1274）。
+        arguments = {
+            key: value
+            for key, value in arguments.items()
+            if key in allowed_arguments
+        }
     try:
-        result = await func(event, **call.arguments)
+        result = await func(event, **arguments)
     except TypeError as exc:
         return f"工具参数错误：{exc}"
     except Exception as exc:  # noqa: BLE001 - 工具失败按真实工具结果回给模型
@@ -1010,6 +1064,12 @@ async def run_turn(env: EvalEnv, turn: Turn) -> TurnResult:
     umo = chat.umo
     conversation = SimpleNamespace(cid=f"cid-{umo}", token_usage=0, history="[]")
     tools, schemas = collect_tools(plugin)
+    allowed_arguments = {
+        schema["function"]["name"]: set(
+            schema["function"]["parameters"].get("properties") or {}
+        )
+        for schema in schemas
+    }
     req = env.plugin_module.ProviderRequest(
         prompt=turn.text,
         session_id=umo,
@@ -1066,7 +1126,13 @@ async def run_turn(env: EvalEnv, turn: Turn) -> TurnResult:
         }
         messages.append(assistant)
         for call in reply.tool_calls:
-            result = await _execute_tool(plugin, event, tools, call)
+            result = await _execute_tool(
+                plugin,
+                event,
+                tools,
+                call,
+                allowed_arguments.get(call.name),
+            )
             tool_records.append((call.name, dict(call.arguments), result))
             messages.append(
                 {
@@ -1075,6 +1141,14 @@ async def run_turn(env: EvalEnv, turn: Turn) -> TurnResult:
                     "content": result,
                 }
             )
+        if _step + 1 >= MAX_TOOL_STEPS and tool_records:
+            # AstrBot 在步数预算用尽时先把提示追加到最后一条工具结果
+            # （tool_loop_agent_runner.py:1067-1069），再在循环结束后补一条
+            # user 消息要求最终回复。
+            name, args, result = tool_records[-1]
+            notice = result + "\n\n" + MAX_STEPS_REACHED_PROMPT
+            tool_records[-1] = (name, args, notice)
+            messages[-1]["content"] = notice
     if final is None:
         # 工具循环达到上限：与 AstrBot 一样拔掉工具并注入步数耗尽提示，
         # 强制要一段最终回复（tool_loop_agent_runner.py:1146-1180）。

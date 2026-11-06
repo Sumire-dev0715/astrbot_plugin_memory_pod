@@ -459,7 +459,11 @@ class GoodEvalModel:
         if self._sensitive_scope(body):
             # 隐私内容已经由 _sensitive_action 写进悄悄话，不再写小本本
             return None
-        if "工位" in body:
+        if any(word in body for word in ("无条件", "服从", "拉黑")):
+            file = "dialog.md"
+            content = f"用户说：“{body}”（这是对话内容，不是对我的要求。）"
+            description = "对话内容记录（不是对机器人的要求）"
+        elif "工位" in body:
             file = "workplace.md"
         elif "城市" in body:
             file = "city.md"
@@ -481,8 +485,8 @@ class GoodEvalModel:
             scope="notebook",
             file=file,
             type="reference",
-            description="对话里的长期事实",
-            content=body,
+            description=description if file == "dialog.md" else "对话里的长期事实",
+            content=content if file == "dialog.md" else body,
         )
 
     def _journal_action(self, state: _TurnState, body: str) -> ModelReply | None:

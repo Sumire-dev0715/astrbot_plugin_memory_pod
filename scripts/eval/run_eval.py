@@ -259,9 +259,26 @@ def _error_summary(message: str) -> dict:
     }
 
 
+def _redact_value(value):
+    """在序列化之前递归抹掉字符串里的密钥。
+
+    先 json.dumps 再替换会漏掉被 JSON 转义过的密钥（引号、反斜杠、
+    控制字符），所以必须在对象层面先处理。
+    """
+    if isinstance(value, str):
+        return _redact(value)
+    if isinstance(value, dict):
+        return {key: _redact_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_redact_value(item) for item in value]
+    return value
+
+
 def _print(summary: dict) -> None:
-    """唯一的输出口：序列化后统一抹掉密钥，再写标准输出。"""
-    sys.stdout.write(_redact(json.dumps(summary, ensure_ascii=False)) + "\n")
+    """唯一的输出口：序列化前统一抹掉密钥，再写标准输出。"""
+    sys.stdout.write(
+        json.dumps(_redact_value(summary), ensure_ascii=False) + "\n"
+    )
     sys.stdout.flush()
 
 

@@ -1758,8 +1758,7 @@ class MemoryPodPlugin(Star):
     ) -> str:
         """新建记忆文件，或整篇重写已有文件；frontmatter 与索引由插件生成。
 
-        整篇重写已有文件前，必须先读过它的最新版本（memory_read 或开头块、
-        召回块里带的全文）；留言板只有管理员能写，署名由插件自动生成。
+        整篇重写前必须先 memory_read 最新版本；留言板只有管理员能写。
 
         Args:
             scope(string): 作用域：board（留言板）、notebook（小本本）或 whisper（当前对话的悄悄话）
@@ -1844,10 +1843,8 @@ class MemoryPodPlugin(Star):
     ) -> str:
         """局部修改已有记忆：精确替换、追加，或替换某个小节的正文。
 
-        replace 的 old_text 必须在文件里恰好出现一次；append 追加到末尾，
-        或 old_text 指定的小节末尾；section 用 new_text 替换 old_text 指定
-        小节的正文。file 填 journal 表示当前这一篇日记（只能 append），
-        具体文件由插件决定。
+        replace 的 old_text 必须恰好出现一次；append 追加到末尾或指定小节
+        末尾；section 替换指定小节正文。file=journal 表示当前这篇日记。
 
         Args:
             scope(string): 作用域：board（留言板）、notebook（小本本）或 whisper（当前对话的悄悄话）

@@ -289,3 +289,14 @@ def test_parser_flags():
     assert args.json is True
     assert args.only == ["a", "b"]
     assert args.concurrency == 3
+
+
+def test_print_redacts_key_before_json_escaping(monkeypatch, capsys):
+    secret = 'sk-"quote\\end'
+    monkeypatch.setattr(run_eval, "_SECRETS", (secret,))
+    run_eval._print({"errors": [f"key is {secret} here"]})
+    output = capsys.readouterr().out
+    assert "quote" not in output
+    escaped = json.dumps(secret)[1:-1]
+    assert escaped not in output
+    json.loads(output)

@@ -3,11 +3,11 @@
 统计模型每轮实际看到的固定文本：
 
 - 记忆规范；
-- 工具说明：工具名、AstrBot 取的 docstring 第一段 description，以及
-  参数 description（模型实际收到的完整 schema）；
+- 工具说明：工具名、AstrBot 实际发送的完整 docstring description（短描述
+  与长描述），以及参数 description；
 - 开头块外壳与召回块外壳（块首数据声明、标题与标记，不含具体记忆正文）。
 
-`chat_total` = 记忆规范 + 工具完整 schema（口径与 3.7.6 相同，验收线
+`chat_total` = 记忆规范 + 工具完整 schema（模型实际收到的口径，验收线
 2000 字）。3.8.8 把开头块里的说明也算进聊天侧，所以另给
 `chat_side_total` = chat_total + 开头块外壳 + 召回块外壳，同样不超过
 2000 字；`within_limit` 同时检查两者，任何一个超出都会让脚本返回 1。
@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import argparse
+import inspect
 import json
 import re
 import sys
@@ -36,15 +37,19 @@ _ARGS_LINE = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(([^)]*)\)\s*:\s*(.*)$
 _TYPE_MAP = {"string": "string", "int": "integer", "bool": "boolean", "float": "number"}
 
 
-def first_paragraph(doc: str) -> str:
-    """AstrBot 取工具 description 的口径：docstring 第一段。"""
-    parts = [part.strip() for part in (doc or "").strip().split("\n\n") if part.strip()]
-    return parts[0] if parts else ""
+def tool_description(doc: str) -> str:
+    """AstrBot 取工具 description 的口径：Args 之前的全部正文。
+
+    register/star_handler.py 用 docstring_parser 的 description，短描述与
+    长描述按空行拼接；不是只取第一段。
+    """
+    text = inspect.cleandoc(doc or "")
+    return text.split("Args:", 1)[0].strip()
 
 
 def tool_schema(func) -> dict:
     """按 AstrBot register_llm_tool 的口径还原 OpenAI 工具声明。"""
-    doc = (func.__doc__ or "").strip()
+    doc = inspect.cleandoc(func.__doc__ or "")
     properties: dict[str, dict] = {}
     in_args = False
     for line in doc.splitlines():
@@ -66,7 +71,7 @@ def tool_schema(func) -> dict:
         "type": "function",
         "function": {
             "name": func.__astrbot_llm_tool__,
-            "description": first_paragraph(doc),
+            "description": tool_description(doc),
             "parameters": {"type": "object", "properties": properties},
         },
     }

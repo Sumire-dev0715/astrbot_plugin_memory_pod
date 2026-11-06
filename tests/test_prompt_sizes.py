@@ -41,6 +41,9 @@ def test_collect_sizes_has_required_fields():
     # 3.8.8：记忆规范 + 开头块里的说明 + 5 个工具说明合计也不超过 2000
     assert sizes["chat_side_total"] <= 2000
     assert "background_prompt" not in sizes
+    # AstrBot 的 description 包含短描述与长描述，不能只量第一段
+    assert sizes["tools"]["memory_write"]["description"] > 38
+    assert sizes["tools"]["memory_edit"]["description"] > 100
 
 
 def test_cli_json_output():
