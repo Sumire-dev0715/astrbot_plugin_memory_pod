@@ -119,3 +119,26 @@ def test_prepare_view_trims_and_keeps_source_note():
     )
     assert "身份" in view.body
     assert "来源 456" in pkg_injection.render_title(view, now=1.0)
+
+
+def test_forced_profile_does_not_consume_full_text_quota(tmp_path):
+    store = pkg_memstore.MemoryStore(tmp_path / "memories").notebook_scope("Bot-A")
+    run(store.write("user-123.md", thing("user-123", description="我", body="身份", mem_type="user")))
+    run(store.write("a.md", thing("a", description="开黑", body="周六开黑")))
+    run(store.write("b.md", thing("b", description="开黑备用", body="开黑时间")))
+    candidates = [pkg_recall.Candidate("notebook", header) for header in store.headers()]
+    plan = run(
+        pkg_recall.assemble_recall(
+            {"notebook": store},
+            candidates,
+            query="开黑",
+            forced_files=["user-123.md"],
+            limit=5,
+            data_notice="数据",
+            full_files=1,
+        )
+    )
+    # 身份必选带全文；recall_full_files=1 的名额仍然留给一个关键词文件
+    assert plan.full_files[0] == "notebook/user-123.md"
+    assert len(plan.full_files) == 2
+    assert any(ref in plan.full_files for ref in ("notebook/a.md", "notebook/b.md"))
