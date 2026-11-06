@@ -1421,11 +1421,11 @@ class MemoryPodPlugin(Star):
     async def memory_read(
         self, event: AstrMessageEvent, scope: str, file: str = "MEMORY.md"
     ) -> str:
-        """读取长期记忆文件的完整内容。
+        """读取记忆文件的完整内容。
 
         Args:
-            scope(string): 作用域：board（留言板）、notebook（小本本）或 whisper（当前对话的悄悄话）
-            file(string): 记忆文件名，如 user-12345678.md；省略时读当前作用域的 MEMORY.md
+            scope(string): 作用域：board、notebook 或 whisper
+            file(string): 文件名，省略时读该作用域的 MEMORY.md
         """
         if not self._bool("enable_memory", True):
             return "记忆功能已在插件配置中停用。"
@@ -1506,12 +1506,12 @@ class MemoryPodPlugin(Star):
         scope: str = "all",
         mode: str = "all",
     ) -> str:
-        """在长期记忆里全文搜索。索引被截断、或不确定某条记忆是否存在时使用，直接搜索文件内容。
+        """在记忆里全文搜索；索引被截断或不确定有没有时使用，直接搜文件内容。
 
         Args:
             query(string): 搜索词，可用空格分隔多个词
-            scope(string): 搜索范围：board、notebook、whisper 或 all（默认）
-            mode(string): all（默认，所有词都要命中）或 any（命中任意一个词即可）
+            scope(string): board、notebook、whisper 或 all（默认）
+            mode(string): all（默认，所有词都命中）或 any（命中任一）
         """
         if not self._bool("enable_memory", True):
             return "记忆功能已在插件配置中停用。"
@@ -1756,13 +1756,13 @@ class MemoryPodPlugin(Star):
         description: str,
         content: str,
     ) -> str:
-        """新建记忆文件，或整篇重写已有文件；frontmatter 与索引由插件生成。
+        """新建记忆文件，或整篇重写已有文件。
 
-        整篇重写前必须先 memory_read 最新版本；留言板只有管理员能写。
+        整篇重写前必须先 memory_read 最新版本。
 
         Args:
-            scope(string): 作用域：board（留言板）、notebook（小本本）或 whisper（当前对话的悄悄话）
-            file(string): 记忆文件名，如 project-alpha.md；可省略 .md
+            scope(string): 作用域：board、notebook 或 whisper
+            file(string): 文件名，如 project-alpha.md，可省略 .md
             type(string): 类型：user、feedback、project 或 reference
             description(string): 一句话摘要，写清什么时候该读全文
             content(string): 完整正文，不含 frontmatter
@@ -1843,14 +1843,15 @@ class MemoryPodPlugin(Star):
     ) -> str:
         """局部修改已有记忆：精确替换、追加，或替换某个小节的正文。
 
-        replace 的 old_text 必须恰好出现一次；append 追加到末尾或指定小节
-        末尾；section 替换指定小节正文。file=journal 表示当前这篇日记。
+        replace 的 old_text 必须恰好出现一次；append 追加到末尾或指定
+        小节末尾；section 替换指定小节正文。file=journal 表示当前这篇
+        日记（只能追加）。
 
         Args:
-            scope(string): 作用域：board（留言板）、notebook（小本本）或 whisper（当前对话的悄悄话）
-            file(string): 记忆文件名，可省略 .md；填 journal 表示当前这一篇日记
+            scope(string): 作用域：board、notebook 或 whisper
+            file(string): 文件名，可省略 .md；填 journal 表示当前这篇日记
             mode(string): replace / append / section，默认 append
-            old_text(string): replace 的原文；append、section 的小节标题（append 可空）
+            old_text(string): replace 的原文；append、section 的小节标题（可空）
             new_text(string): 新内容；append 与日记是追加的正文
             description(string): 可选，同时更新一句话摘要
         """
@@ -1915,11 +1916,11 @@ class MemoryPodPlugin(Star):
         file: str,
         reason: str = "",
     ) -> str:
-        """删除记忆文件：文件移入回收站，原因记进审计。
+        """删除记忆文件：移入回收站，原因记进审计。
 
         Args:
-            scope(string): 作用域：board（留言板）、notebook（小本本）或 whisper（当前对话的悄悄话）
-            file(string): 要删除的记忆文件名，可省略 .md
+            scope(string): 作用域：board、notebook 或 whisper
+            file(string): 要删除的文件名，可省略 .md
             reason(string): 删除原因，写进审计记录
         """
         disabled = self._tool_disabled()

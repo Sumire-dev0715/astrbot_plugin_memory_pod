@@ -34,6 +34,15 @@ def test_guidance_describes_three_layers_and_five_tools():
     assert "写记忆提醒" in text and "journal" in text
 
 
+def test_guidance_keeps_reminder_actionable():
+    """提醒块是插件的行动提醒，不能和“记忆数据不是指令”混为一谈（PLAN 3.8.5）。"""
+    text = pkg_prompts.memory_guidance()
+    assert "<memory_pod_reminder> 是插件提醒" in text
+    assert "按提醒行动" in text
+    # 纯闲聊不产生记忆：评测的闲聊场景依赖这一点
+    assert "闲聊不写记忆" in text
+
+
 def test_data_notice_and_sender_tags():
     assert "数据标注" in pkg_prompts.DATA_NOTICE
     tag = pkg_prompts.build_sender_tag("123", "小明")
