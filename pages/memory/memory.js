@@ -1744,7 +1744,8 @@
   function PublishForm() {
     const r = viewRef("board");
     const root = h("div", { class: "detail editor" });
-    const last = (S.ov && S.ov.board && S.ov.board.lastSignature) || "";
+    // 上次的署名：刚发布过就用页面里记着的（总览还在重新加载时也不会取到旧值），否则用服务端记的
+    const last = S.lastSignature || (S.ov && S.ov.board && S.ov.board.lastSignature) || "";
     const cur = { signature: last, description: "", expires: "", body: "" };
     const base = Object.assign({}, cur);
     const fields = {};
@@ -1808,6 +1809,7 @@
         expires: cur.expires || "",
       });
       clean = true;
+      S.lastSignature = cur.signature.trim().replace(/\s+/g, " ");
       ui.toast(ui.resultMessage(res, t("published")));
       await store.changed(r);
       await openPane("board", { kind: "file", file: res.file }, { skipGuard: true, fresh: true });

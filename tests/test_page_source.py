@@ -373,6 +373,8 @@ def test_publish_form_prefills_last_signature_from_server():
     memory = _page("memory.js")
     publish = _between(memory, "function PublishForm() {", "/** 续期")
     assert "S.ov.board.lastSignature" in publish
+    # 刚发布过就用页面里记着的署名，总览还在重新加载时也不会取到旧值
+    assert "S.lastSignature" in publish
     assert "signature: last" in publish
     assert 't("signatureRequired")' in publish
     assert "signature: cur.signature.trim()" in publish
@@ -387,7 +389,10 @@ def test_replacing_content_keeps_keyboard_focus_inside_the_area():
     body = _between(ui, "function replace(el) {", "let idSeq")
     assert "hadFocus" in body
     assert 'setAttribute("tabindex", "-1")' in body
+    assert 'setAttribute("data-focus-anchor", "")' in body
     assert "el.focus()" in body
+    # 落脚点是脚本临时放的容器，不画焦点环
+    assert "[data-focus-anchor]:focus" in _page("style.css")
 
 
 def test_busy_buttons_keep_focus_and_ignore_repeat_clicks():

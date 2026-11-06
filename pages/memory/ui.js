@@ -82,6 +82,8 @@
         // 键盘用户接着按 Tab 就从这里往下走，而不是回到整个页面的开头
         if (!el.hasAttribute("tabindex")) {
           el.setAttribute("tabindex", "-1");
+          // 标记这是脚本放的"落脚点"，样式里不给它画焦点环
+          el.setAttribute("data-focus-anchor", "");
         }
         el.focus();
       }

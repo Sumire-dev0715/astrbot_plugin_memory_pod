@@ -178,10 +178,8 @@ ol {
   display: none !important;
 }
 
-/* 脚本为了"焦点留在原区域"临时放上 tabindex=-1 的容器，不画焦点环 */
-.pane:focus,
-.detail:focus,
-.dialog-body:focus {
+/* 脚本为了"焦点留在原区域"临时放上 tabindex=-1 的容器（见 ui.replace），不画焦点环 */
+[data-focus-anchor]:focus {
   outline: none;
 }
 

@@ -33,6 +33,8 @@
     },
     manage: { section: "overview", tidySid: "", maintSid: "", transferTab: "export" },
     paneVersion: 0,
+    // 刚发布告示用的署名（折叠空白）；总览重新加载完之前，下一次发布表单先用它预填
+    lastSignature: "",
   };
 
   // ------------------------------------------------------------ 作用域
