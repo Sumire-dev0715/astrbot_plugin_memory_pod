@@ -118,7 +118,7 @@
       tags.push(h("span", { class: "tag tag-warn", title: row.dangling.join("、") }, t("flagDangling")));
     }
     if ((row.long || []).length) {
-      tags.push(h("span", { class: "tag tag-muted", title: row.long.join("；") }, t("flagLong")));
+      tags.push(h("span", { class: "tag tag-muted", title: ui.zhOnly(row.long.join("；")) || null }, t("flagLong")));
     }
     return tags;
   }
@@ -236,6 +236,7 @@
       class: "input search-input",
       placeholder: opts.placeholder,
       "aria-label": opts.label || opts.placeholder,
+      title: opts.help || null,
       value: opts.value || "",
       "data-fk": opts.fk,
       "data-search": "",
@@ -426,7 +427,9 @@
         byFile[row.file] = row;
       });
       st.results = (data.results || []).map(function (item) {
-        return Object.assign({}, byFile[item.file] || { file: item.file, type: "", description: "" }, { hit: item.excerpt });
+        // 命中的片段是后端截出来的正文；只命中了文件头、没有片段时后端给的是一句中文占位
+        const hit = item.excerpt === "（正文匹配）" ? t("searchBodyMatch") : item.excerpt;
+        return Object.assign({}, byFile[item.file] || { file: item.file, type: "", description: "" }, { hit: hit });
       });
     } catch (err) {
       ui.toast(err.message, "error");
@@ -517,6 +520,7 @@
         { class: "tools-row" },
         searchBox({
           placeholder: t("searchPlaceholder"),
+          help: t("searchHelp"),
           value: st.query,
           fk: "search:" + store.sid(r),
           onInput: function (value) {
@@ -836,6 +840,7 @@
       { class: "list-tools" },
       searchBox({
         placeholder: t("boardSearchPlaceholder"),
+        help: t("boardSearchHelp"),
         value: st.query,
         fk: "search:board",
         onInput: function (value) {
@@ -1104,7 +1109,10 @@
       notices.push(ui.notice("warn", t("expiredNotice", { date: d.expires })));
     }
     if ((row.long || []).length) {
-      notices.push(ui.notice("warn", t("longNotice", { reasons: row.long.join("；") })));
+      // 过长的原因是后端写的中文句子：中文界面带上，其他语言只说"偏长"
+      notices.push(
+        ui.notice("warn", ui.zhOnly(row.long.join("；")) ? t("longNotice", { reasons: row.long.join("；") }) : t("longNoticePlain"))
+      );
     }
     if ((row.dangling || []).length) {
       notices.push(ui.notice("warn", t("danglingNotice", { files: row.dangling.join("、") })));

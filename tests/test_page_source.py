@@ -442,3 +442,50 @@ def test_lists_have_loading_empty_and_error_states():
         assert "ui.spinner()" in body
         assert "ui.errorState(" in body
         assert "ui.emptyState(" in body
+
+
+# ------------------------------------------------------------ 后端文案与窄屏
+
+
+def test_backend_written_chinese_is_not_shown_in_other_languages():
+    """后端的回执、理由只有中文：成功提示在非中文界面里改用页面自己的译文。"""
+    ui = _page("ui.js")
+    assert "function resultMessage(res, fallback)" in ui
+    assert "function zhOnly(text)" in ui
+    for name in ("memory.js", "manage.js"):
+        code = _strip_comments(_page(name))
+        # 成功提示一律经 resultMessage，不再直接用 res.message / done.message
+        assert not re.search(r"\b(?:res|done)\.message\b", code), name
+    manage = _page("manage.js")
+    # 导入问题的理由、迁移跳过的理由是后端写的中文句子
+    assert "ui.zhOnly(item.reason)" in manage
+    assert "ui.zhOnly(s.reason)" in manage
+    memory = _page("memory.js")
+    assert "ui.zhOnly(row.long.join" in memory and 't("longNoticePlain")' in memory
+    # 上下文窗口的来源说明由后端给稳定的代码，页面按语言写
+    assert 't("windowSource_" + ctx.windowSource' in manage
+
+
+def test_dialog_cover_hides_the_busy_spinner_of_the_trigger_button():
+    """弹窗盖在页面上时，触发它的按钮不转圈：那时是在等人确认，不是在等网络。"""
+    ui = _page("ui.js")
+    assert 'app.classList.toggle("is-covered", on)' in ui
+    css = _page("style.css")
+    assert ".app:not(.is-covered) .btn.is-busy" in css
+    assert ".app:not(.is-covered) .btn.is-busy::after" in css
+
+
+def test_narrow_layout_rules_exist():
+    css = _page("style.css")
+    narrow = css.split("@media (max-width: 640px) {", 1)[1].split("@media (prefers-reduced-motion", 1)[0]
+    # 五个导航项等宽排成一行：图标在上、文字在下，数量变成角标
+    assert "grid-template-columns: repeat(5, minmax(0, 1fr))" in narrow
+    assert "flex-direction: column" in narrow
+    assert ".nav-count" in narrow and "position: absolute" in narrow
+    # 元信息两列排；弹窗在手机上贴底
+    assert "repeat(2, minmax(0, 1fr))" in narrow
+    assert "border-radius: var(--r-lg) var(--r-lg) 0 0" in narrow
+    # 两栏在 900px 以下变成一次只看一栏，并有返回按钮
+    assert '.split[data-show="list"] .pane-detail' in css and ".only-narrow" in css
+    assert ".meta-item {\n  display: grid;\n  align-content: start;" in css
+    assert "justify-self: start" in css.split(".back-link {", 1)[1].split("}", 1)[0]

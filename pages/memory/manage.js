@@ -924,7 +924,7 @@
         "ul",
         null,
         issues.map(function (item) {
-          return h("li", null, h("span", { class: "mono" }, item.name), " · ", t("outcome_" + item.outcome), item.reason ? " · " + item.reason : "");
+          return h("li", null, h("span", { class: "mono" }, item.name), " · ", t("outcome_" + item.outcome), ui.zhOnly(item.reason) ? " · " + item.reason : "");
         })
       )
     );
@@ -1299,7 +1299,7 @@
         h("h3", { class: "card-title" }, title),
         h("p", { class: "hint" }, t("platformTotals", { items: (res.items || []).length, counts: countsLine(res.totals) })),
         reportList(res.items),
-        (res.skipped || []).length ? ui.notice("warn", t("migrateSkipped", { n: res.skipped.length }), h("ul", null, res.skipped.map(function (s) { return h("li", null, store.describeLabel(s), " · ", s.reason || ""); }))) : null,
+        (res.skipped || []).length ? ui.notice("warn", t("migrateSkipped", { n: res.skipped.length }), h("ul", null, res.skipped.map(function (s) { return h("li", null, store.describeLabel(s), ui.zhOnly(s.reason) ? " · " + s.reason : ""); }))) : null,
       ];
     }
 

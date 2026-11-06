@@ -486,15 +486,20 @@ code {
 }
 
 .btn.is-busy {
-  color: transparent !important;
   cursor: progress;
 }
 
-.btn.is-busy > * {
+/* 弹窗盖在页面上时（#app 带 is-covered），背景里触发弹窗的按钮不转圈：
+   那时是在等人确认，不是在等网络 */
+.app:not(.is-covered) .btn.is-busy {
+  color: transparent !important;
+}
+
+.app:not(.is-covered) .btn.is-busy > * {
   visibility: hidden;
 }
 
-.btn.is-busy::after {
+.app:not(.is-covered) .btn.is-busy::after {
   position: absolute;
   inset: 0;
   margin: auto;
@@ -509,6 +514,7 @@ code {
 
 .back-link {
   align-self: flex-start;
+  justify-self: start;
   margin-left: calc(var(--sp-2) * -1);
   color: var(--text-2);
 }
@@ -1343,6 +1349,7 @@ select.input {
 
 .meta-item {
   display: grid;
+  align-content: start;
   gap: 2px;
   min-width: 0;
 }
@@ -1391,6 +1398,11 @@ select.input {
   gap: var(--sp-2);
   min-width: 0;
   overflow-wrap: anywhere;
+}
+
+/* 提示里附带的按钮（比如"重试"）不要被拉成整行宽 */
+.notice-body > .btn {
+  justify-self: start;
 }
 
 .notice-info {
@@ -2640,10 +2652,41 @@ select.input {
   .nav {
     order: 3;
     flex-basis: 100%;
+    display: grid;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    gap: 2px;
   }
 
   .nav-item {
-    padding: 0 10px;
+    position: relative;
+    flex-direction: column;
+    justify-content: center;
+    gap: 2px;
+    height: 50px;
+    padding: 4px 2px;
+    font-size: 11.5px;
+    line-height: 1.2;
+  }
+
+  .nav-item svg.icon {
+    width: 18px;
+    height: 18px;
+  }
+
+  .nav-label {
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .nav-count {
+    position: absolute;
+    top: 3px;
+    left: calc(50% + 6px);
+    min-width: 16px;
+    padding: 0 4px;
+    font-size: 10px;
+    line-height: 16px;
   }
 
   .topbar-actions {
@@ -2659,7 +2702,8 @@ select.input {
   }
 
   .meta-grid {
-    grid-template-columns: minmax(0, 1fr);
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--sp-3);
     padding: var(--sp-3);
   }
 

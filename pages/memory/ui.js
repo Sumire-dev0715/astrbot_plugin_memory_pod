@@ -356,13 +356,23 @@
     arm();
   }
 
+  /** 界面是不是中文（后端写的说明只有中文） */
+  function isChinese() {
+    return /^zh/i.test(MP.i18n.locale());
+  }
+
+  /** 后端写的中文说明（理由、片段……）：只在中文界面里显示，其他语言不露出中文 */
+  function zhOnly(text) {
+    return isChinese() ? String(text || "") : "";
+  }
+
   /**
    * 操作成功后的提示文字：中文界面用后端写的回执（带具体文件名、索引同步情况），
    * 其他语言用页面自己的译文，因为后端的回执只有中文。
    */
   function resultMessage(res, fallback) {
     const message = res && typeof res.message === "string" ? res.message : "";
-    return message && /^zh/i.test(MP.i18n.locale()) ? message : fallback;
+    return message && isChinese() ? message : fallback;
   }
 
   // ------------------------------------------------------------ 状态块
@@ -404,7 +414,7 @@
     return h(
       "div",
       { class: "notice notice-" + kind, role: kind === "danger" ? "alert" : null },
-      icon(kind === "info" ? "info" : "warn"),
+      icon(kind === "info" ? "info" : kind === "ok" ? "check" : "warn"),
       h("div", { class: "notice-body" }, content, extra || null)
     );
   }
@@ -428,6 +438,7 @@
     const app = document.getElementById("app");
     if (app) {
       app.inert = on;
+      app.classList.toggle("is-covered", on);
       if (on) {
         app.setAttribute("aria-hidden", "true");
       } else {
@@ -917,6 +928,7 @@
     download: download,
     toast: toast,
     resultMessage: resultMessage,
+    zhOnly: zhOnly,
     spinner: spinner,
     emptyState: emptyState,
     errorState: errorState,
