@@ -129,6 +129,7 @@
       "searchEnterHint": "按回车在正文里搜索",
       "searchResults": "正文搜索到 {n} 条（最多显示 8 条）",
       "clearSearch": "清除搜索",
+      "searchBody": "在正文里搜索「{q}」",
       "searchBodyMatch": "正文里有匹配",
       "noSearchResults": "没有找到",
       "noTypeMatch": "这个类型下没有记忆",

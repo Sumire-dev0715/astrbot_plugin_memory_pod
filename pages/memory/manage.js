@@ -314,6 +314,8 @@
             toggle
           ),
           op.reason ? h("p", { class: "op-reason" }, op.reason) : null,
+          // 留言板的写入带署名（插件从原告示继承，新建的用默认值）：审阅时要看得到
+          op.op === "write" && op.signature ? h("p", { class: "op-reason" }, t("fieldSignature") + "：" + op.signature) : null,
           area
         )
       );

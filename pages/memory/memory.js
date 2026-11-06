@@ -366,6 +366,10 @@
           )
         );
       }
+      const searchNote = bodySearchNote(r, st);
+      if (searchNote) {
+        body.append(searchNote);
+      }
       if (!rows.length) {
         body.append(
           st.results || st.query
@@ -408,6 +412,28 @@
       body.append(list);
       ui.listNav(list);
     });
+  }
+
+  /** 输入了筛选词时，列表顶上给一个按钮：在正文里搜索（服务端全文搜索）；回车也一样 */
+  function bodySearchNote(r, st) {
+    const q = st.query.trim();
+    if (!q || st.results) {
+      return null;
+    }
+    if (st.searching) {
+      return h("div", { class: "list-note" }, h("span", null, t("loading")));
+    }
+    const shown = q.length > 24 ? q.slice(0, 24) + "…" : q;
+    return h(
+      "div",
+      { class: "list-note" },
+      h(
+        "button",
+        { type: "button", class: "btn btn-sm", "data-fk": "body-search", onclick: function () { runSearch(r, st, st.query); } },
+        icon("search"),
+        t("searchBody", { q: shown })
+      )
+    );
   }
 
   /** 全文搜索（服务端，最多 8 条）；结果按相关度排列，带命中片段 */
@@ -793,6 +819,10 @@
             h("button", { type: "button", class: "btn btn-ghost btn-sm", onclick: function () { st.results = null; MP.renderNow(); } }, t("clearSearch"))
           )
         );
+      }
+      const searchNote = bodySearchNote(r, st);
+      if (searchNote) {
+        body.append(searchNote);
       }
       if (!rows.length) {
         const none = !(entry.data.files || []).length;

@@ -168,6 +168,7 @@
       "searchEnterHint": "Press Enter to search the text",
       "searchResults": "{n} text matches (at most 8 are shown)",
       "clearSearch": "Clear search",
+      "searchBody": "Search the text for “{q}”",
       "searchBodyMatch": "Matches in the text",
       "noSearchResults": "Nothing found",
       "noTypeMatch": "No memories of this type",

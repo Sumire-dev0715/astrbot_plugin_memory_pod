@@ -506,3 +506,14 @@ def test_every_file_detail_offers_edit_forget_and_delete_including_board_notices
     # 续期只属于留言板；遗忘不再按作用域区分
     assert actions.index("renewNotice(r, name, d)") < actions.index("forgetFile(view, r, name)")
     assert "board\n          ? h(" in actions and ": null," in actions
+
+
+def test_body_search_is_reachable_by_mouse_and_by_enter():
+    """正文搜索（服务端全文）原来有个「搜索」按钮；新页面输入筛选词后列表顶上给按钮，回车也行。"""
+    memory = _page("memory.js")
+    note = _between(memory, "function bodySearchNote(r, st) {", "/** 全文搜索")
+    assert 'onclick: function () { runSearch(r, st, st.query); }' in note
+    assert 't("searchBody"' in note
+    assert memory.count("bodySearchNote(r, st)") == 3  # 定义 + 文件列表 + 告示列表
+    assert 'apiGet("search"' in memory
+    assert memory.count('event.key === "Enter"') >= 1 and "onEnter" in memory
