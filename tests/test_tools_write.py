@@ -1347,6 +1347,35 @@ def test_board_write_without_type_succeeds_and_ignores_type(tmp_path):
     assert "type:" not in content
 
 
+def test_board_edit_removes_legacy_type_from_frontmatter(tmp_path):
+    """memory_edit 也不能让旧告示的 type 留下来：留言板不再有类型。"""
+    plugin = make_plugin(tmp_path)
+    board = plugin._store.board_scope()
+    admin = FakeEvent("Bot-A", "1", admin=True)
+    run(
+        board.write(
+            "old.md",
+            "---\nname: old\ndescription: 旧告示\nmetadata:\n"
+            "  type: reference\n  signature: 管理员\n---\n\n正文\n",
+        )
+    )
+    receipt = run(plugin.memory_edit(admin, "board", "old.md", "append", "", "补充"))
+    assert "已修改 board/old.md" in receipt
+    content = run(board.read("old.md"))
+    assert "补充" in content
+    assert pkg_memstore.parse_memory(content).type == ""
+    assert "type:" not in content
+
+    # 没有 frontmatter 的旧告示：编辑后补的标准头里也不写 type
+    run(board.write("plain.md", "没有 frontmatter 的告示"))
+    receipt = run(plugin.memory_edit(admin, "board", "plain.md", "append", "", "补充"))
+    assert "已修改 board/plain.md" in receipt
+    content = run(board.read("plain.md"))
+    assert "补充" in content
+    assert pkg_memstore.parse_memory(content).type == ""
+    assert "type:" not in content
+
+
 def test_person_type_must_match_filename(tmp_path):
     """人物档案的类型和文件名必须对上，两边对不上的写入一律拒绝。"""
     plugin = make_plugin(tmp_path)

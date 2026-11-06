@@ -1363,6 +1363,10 @@ class ScopeStore:
             origin_record=origin_record,
             name=name,
         )
+        if self.layer == SCOPE_BOARD:
+            # 留言板没有类型（PLAN 3.10.1）：编辑旧告示时 frontmatter 里
+            # 残留的 type 一并去掉；没有 frontmatter 的旧文件也不补 type。
+            content = strip_frontmatter_type(content)
         if len(content.encode("utf-8")) > MAX_FILE_BYTES:
             return WriteReport(
                 False,
