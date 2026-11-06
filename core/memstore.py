@@ -2881,15 +2881,24 @@ class ScopeStore:
                 mem_type = self._display_type(self.layer, name, doc.type)
                 updated = parse_stamp(doc.updated) or self.mtime(name) or 0.0
                 expires = doc.expires
+                origin_text = doc.origin
             else:
                 mem_type = header.type
                 updated = header.updated
                 expires = header.expires
+                origin_text = header.origin
             # origin 原始字段不给模型（PLAN 3.9.1 第 4 条）：搜索片段与
-            # 命中判断都只看去掉 origin 的内容
+            # 命中判断都只看去掉 origin 的内容；来源改用可读标注附在结果上
             searchable = origin_mod.strip_from_frontmatter(content)
             hit = insights.build_hit(
-                name, mem_type, updated, searchable, terms, mode, expires
+                name,
+                mem_type,
+                updated,
+                searchable,
+                terms,
+                mode,
+                expires,
+                origin_text,
             )
             if hit is not None:
                 hits.append(hit)
@@ -2928,6 +2937,7 @@ class ScopeStore:
                 terms,
                 mode,
                 header.expires,
+                header.origin,
             )
             if hit is not None:
                 hits.append(hit)

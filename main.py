@@ -1770,6 +1770,7 @@ class MemoryPodPlugin(Star):
         shown_forgotten = forgotten_hits[:remaining]
         now = time.time()
         tz = self.expiry_timezone()
+        current_session = origin.session_hash(umo)
 
         def expired(label: str, hit: insights.SearchHit) -> bool:
             # 只有留言板有到期日；过期的告示仍能搜到，结果里标注（PLAN 3.9.2）
@@ -1778,11 +1779,15 @@ class MemoryPodPlugin(Star):
             )
 
         lines = [
-            self._format_search_hit(label, hit, expired(label, hit))
+            self._format_search_hit(
+                label, hit, expired(label, hit), current_session, now
+            )
             for label, hit in shown_active
         ]
         forgotten = [
-            self._format_forgotten_hit(label, hit, expired(label, hit))
+            self._format_forgotten_hit(
+                label, hit, expired(label, hit), current_session, now
+            )
             for label, hit in shown_forgotten
         ]
         hidden = (
@@ -1806,10 +1811,27 @@ class MemoryPodPlugin(Star):
         return text
 
     @staticmethod
-    def _format_search_hit(
-        label: str, hit: insights.SearchHit, expired: bool = False
+    def _hit_origin_note(
+        label: str,
+        hit: insights.SearchHit,
+        current_session: str,
+        now: float | None = None,
     ) -> str:
-        """一条搜索结果：文件名、类型、更新日期，以及最多两行片段。"""
+        """搜索结果的来源标注；只有小本本可能来自别的对话（PLAN 3.9.1）。"""
+        if label != memstore.SCOPE_NOTEBOOK or not hit.origin:
+            return ""
+        return origin.note(f"{label}/{hit.file}", hit.origin, current_session, now)
+
+    @classmethod
+    def _format_search_hit(
+        cls,
+        label: str,
+        hit: insights.SearchHit,
+        expired: bool = False,
+        current_session: str = "",
+        now: float | None = None,
+    ) -> str:
+        """一条搜索结果：文件名、类型、更新日期、来源，以及最多两行片段。"""
         updated = (
             time.strftime("%Y-%m-%d", time.localtime(hit.updated))
             if hit.updated > 0
@@ -1820,16 +1842,27 @@ class MemoryPodPlugin(Star):
             f"[{label}] {hit.file}"
             f"（{hit.mem_type or '未分类'}，更新 {updated}{mark}）"
         )
+        note = cls._hit_origin_note(label, hit, current_session, now)
+        if note:
+            head += f"  {note}"
         snippets = hit.snippets or ("（正文匹配）",)
         return head + "\n" + "\n".join(f"  {line}" for line in snippets)
 
-    @staticmethod
+    @classmethod
     def _format_forgotten_hit(
-        label: str, hit: insights.SearchHit, expired: bool = False
+        cls,
+        label: str,
+        hit: insights.SearchHit,
+        expired: bool = False,
+        current_session: str = "",
+        now: float | None = None,
     ) -> str:
-        """已遗忘结果沿用原来的单行标注与片段格式。"""
+        """已遗忘结果沿用原来的单行标注与片段格式，同样带来源标注。"""
         snippet = hit.snippets[0] if hit.snippets else "（正文匹配）"
         mark = "·已过期" if expired else ""
+        note = cls._hit_origin_note(label, hit, current_session, now)
+        if note:
+            snippet = f"{snippet}  {note}"
         return f"[{label}·已遗忘{mark}] {hit.file}: {snippet}"
 
     # ------------------------------------------------------------ 写工具

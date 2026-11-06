@@ -55,6 +55,8 @@ class SearchHit:
     journal: bool = False
     # 留言板告示的到期日（YYYY-MM-DD）；memory_search 据此标注"已过期"
     expires: str = ""
+    # 来源记录（PLAN 3.9.1）：搜索结果在别的对话里出现时也要注明来源
+    origin: str = ""
 
 
 @dataclass(frozen=True)
@@ -341,6 +343,7 @@ def build_hit(
     terms: list[str],
     mode: str = SEARCH_ALL,
     expires: str = "",
+    origin: str = "",
 ) -> SearchHit | None:
     """按模式判断内容是否命中，命中时给出片段与命中词数。"""
     if not terms:
@@ -360,6 +363,7 @@ def build_hit(
         snippets=_snippet_lines(content, present or terms),
         journal=journal.is_journal(name, mem_type),
         expires=expires or "",
+        origin=origin or "",
     )
 
 

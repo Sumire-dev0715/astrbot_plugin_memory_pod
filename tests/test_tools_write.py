@@ -895,15 +895,20 @@ def test_group_write_records_origin_and_audit_without_leaking_group(tmp_path):
     # 同一段对话里读：来源全部是当前对话，不标注
     same = run(plugin.memory_read(event, "notebook", "weekend.md"))
     assert "在群聊里说的" not in same
-    # memory_search：结果与片段里都没有群名、群号
+    # memory_search：别的对话写的内容带来源标注，结果与片段里都没有群名、群号
     found = run(plugin.memory_search(other, "开黑"))
     assert "weekend.md" in found
+    assert "小明卡片在群聊里说的" in found
     assert GROUP_NAME not in found and GROUP_NUMBER not in found
+    # 同一段对话里搜：来源全部是当前对话，不标注
+    same_found = run(plugin.memory_search(event, "开黑"))
+    assert "在群聊里说的" not in same_found
     # 搜索不把 frontmatter 里的 origin 原始字段交给模型
     for query in ("origin", "group", "小明卡片"):
         text = run(plugin.memory_search(other, query))
         assert "origin:" not in text
         assert "小明卡片" not in text
+        assert GROUP_NAME not in text and GROUP_NUMBER not in text
     # 拿群名去搜也不会回显群名
     missing = run(plugin.memory_search(other, GROUP_NAME))
     assert "没有找到" in missing
