@@ -62,7 +62,7 @@ def test_reminder_turns_config_defaults_to_10_and_can_be_disabled():
 
 def test_metadata_version_and_no_removed_features():
     text = (ROOT / "metadata.yaml").read_text("utf-8")
-    assert "version: v2.0.0-dev.2" in text
+    assert "version: v2.0.0-dev.3" in text
     assert "共享人物空间" not in text
     assert "memory_note" not in text
     assert "后台整理写入" not in text
