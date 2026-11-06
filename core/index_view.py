@@ -5,10 +5,10 @@ MEMORY.md 在磁盘上的格式不变，仍是 ``- [名称](文件.md) — 描�
 重复一遍只占字数。分组标题、手工加的行原样保留。
 
 注入的索引超过 200 行或 25KB 时不再从底部截断。底部截断会把真正有用的
-旧条目一起切掉，却留下排在前面的日志块。丢弃顺序：
+旧条目一起切掉，却留下排在前面的日记块。丢弃顺序：
 
-1. 日志块整块让位（日志是流水账，需要时按日期 memory_read）；
-2. 非日志条目按最近一次用到的时间从旧到新丢；使用统计里没有的按
+1. 日记块整块让位（日记是流水账，需要时按日期 memory_read）；
+2. 非日记条目按最近一次用到的时间从旧到新丢；使用统计里没有的按
    ``updated`` 算；
 3. feedback 类最后丢——行为指导长期没被提起不代表失效。
 
@@ -43,7 +43,7 @@ class IndexView:
     text: str
     total_lines: int
     loaded_lines: int
-    # 被丢掉的条目数：非日志按行计，日志块按块内日志篇数计
+    # 被丢掉的条目数：非日记按行计，日记块按块内日记篇数计
     dropped_entries: int = 0
 
     @property
@@ -117,10 +117,10 @@ def _lines_fit(
 def _journal_span(
     lines: list[str], journal_files: set[str] | None
 ) -> tuple[int, int] | None:
-    """日志块的范围 (起始行, 汇总行)；格式兼容紧凑行。
+    """日记块的范围 (起始行, 汇总行)；格式兼容紧凑行。
 
     不看 memstore 的 ``](文件)`` 链接格式：注入文本已经渲染成
-    ``- 文件.md — 描述``，这里直接按文件名认日志行。汇总行后面可能有
+    ``- 文件.md — 描述``，这里直接按文件名认日记行。汇总行后面可能有
     手工加的行（WebUI 编辑器允许），所以取最后一条汇总行往前认块，
     不要求它正好是索引最后一行。
     """
@@ -166,10 +166,10 @@ def render_for_injection(
 
     "还有 N 条未加载"的说明也计入 200 行 / 25KB 上限：它是注入文本的
     一部分，不能让最终结果因为多出这一行而超限。为它腾地方时仍按原来的
-    优先级继续丢行（日志 → 最久没用的非 feedback → feedback → 非条目行）。
+    优先级继续丢行（日记 → 最久没用的非 feedback → feedback → 非条目行）。
     """
     lines = [compact_index_line(line) for line in (raw or "").splitlines()]
-    # 首尾空行不占注入预算，也不影响日志块的识别
+    # 首尾空行不占注入预算，也不影响日记块的识别
     while lines and not lines[0].strip():
         lines.pop(0)
     while lines and not lines[-1].strip():
@@ -195,8 +195,8 @@ def render_for_injection(
             for target in dropped_targets
             if _is_journal_target(target, journal_files)
         }
-        # 日志块整块丢掉时，汇总行里的日志篇数才是"未加载"的条数；
-        # 只丢了块外零散日志行时按行计。
+        # 日记块整块丢掉时，汇总行里的日记篇数才是"未加载"的条数；
+        # 只丢了块外零散日记行时按行计。
         span = _journal_span(lines, journal_files)
         whole_block = span is not None and all(
             index in dropped for index in range(span[0], span[1] + 1)
@@ -233,8 +233,8 @@ def render_for_injection(
     note, dropped_entries = note_for(dropped)
     if not fits(dropped, note):
         span = _journal_span(lines, journal_files)
-        # 日志块整体先让位；散落在别处的日志行（手工编辑过的旧格式）
-        # 也按日志处理，保证日志永远最先丢。
+        # 日记块整体先让位；散落在别处的日记行（手工编辑过的旧格式）
+        # 也按日记处理，保证日记永远最先丢。
         journal_indexes: set[int] = set()
         if span is not None:
             journal_indexes.update(range(span[0], span[1] + 1))
@@ -245,7 +245,7 @@ def render_for_injection(
         note, dropped_entries = note_for(dropped)
 
         if not fits(dropped, note):
-            # 非日志条目：feedback 排最后；同组内按最近用到的时间从旧到新。
+            # 非日记条目：feedback 排最后；同组内按最近用到的时间从旧到新。
             candidates: list[tuple[int, float, int]] = []
             for index, line in enumerate(lines):
                 if index in dropped:

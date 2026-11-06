@@ -245,8 +245,8 @@ async def propose(
     ops = consolidate.parse_operations(text, existing)
     if ops is None:
         raise TidyError("模型返回的整理方案无法解析，请重试")
-    # 日志只作整理参考，不允许整理改写或删除：流水账过时与否不该由一次
-    # 复盘决定；误改也能撤销，但日志本就不该进入这套合并逻辑。
+    # 日记只作整理参考，不允许整理改写或删除：流水账过时与否不该由一次
+    # 复盘决定；误改也能撤销，但日记本就不该进入这套合并逻辑。
     journal_files = {
         header.file
         for header in headers

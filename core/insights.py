@@ -4,11 +4,11 @@
 
 - `replace_section` 供编辑与整理按小节替换正文使用，标题行保留，
   正文范围到下一个同级或更高级标题为止；
-- `build_hit` / `rank_hits` 供 memory_search 使用：非日志在前，再按命中
+- `build_hit` / `rank_hits` 供 memory_search 使用：非日记在前，再按命中
   词数、updated 倒序；每条最多两行命中片段；
 - `dangling_links` 只和调用方给的"当前机器人可见的文件名集合"比较，
   不猜测别的会话或别的机器人目录里有什么；
-- `long_file_reasons` 判断文件是否超过体积或日期密度阈值，日志只看体积。
+- `long_file_reasons` 判断文件是否超过体积或日期密度阈值，日记只看体积。
 
 可见性（哪些作用域算可见）由调用方决定：main.py 只传入当前机器人可见的
 留言板、小本本与当前这段对话的悄悄话，所以链接检查不会泄露别的机器人
@@ -32,7 +32,7 @@ SEARCH_MODES = (SEARCH_ALL, SEARCH_ANY)
 MAX_SNIPPETS = 2
 SNIPPET_CHARS = 160
 
-# 长文件阈值：非日志超过 8KB，或正文日期超过 15 个；日志只看体积
+# 长文件阈值：非日记超过 8KB，或正文日期超过 15 个；日记只看体积
 LONG_FILE_BYTES = 8 * 1024
 LONG_FILE_DATES = 15
 
@@ -360,7 +360,7 @@ def build_hit(
 
 
 def search_key(hit: SearchHit) -> tuple:
-    """结果排序键：非日志在前，再按命中词数、updated 倒序，文件名兜底。"""
+    """结果排序键：非日记在前，再按命中词数、updated 倒序，文件名兜底。"""
     return (hit.journal, -hit.matched, -hit.updated, hit.file)
 
 
@@ -406,7 +406,7 @@ def count_dates(body: str) -> int:
 def long_file_reasons(
     file: str, mem_type: str, body: str, size: int
 ) -> list[str]:
-    """超过阈值的具体原因；没有超过返回空列表。日志只看体积。"""
+    """超过阈值的具体原因；没有超过返回空列表。日记只看体积。"""
     reasons: list[str] = []
     if size > LONG_FILE_BYTES:
         reasons.append(

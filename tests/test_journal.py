@@ -1,4 +1,4 @@
-"""journal 日志：判定规则、索引折叠、召回与查重排除。"""
+"""journal 日记：判定规则、索引折叠与召回排除。"""
 
 import asyncio
 import time
@@ -103,8 +103,8 @@ def test_fold_moves_journals_to_end_and_keeps_non_journal_order():
         "",
         "- [journal-2026-11-03](journal-2026-11-03.md) — 新日志（2026-11-03）",
         "- [journal-2026-11-02](journal-2026-11-02.md) — 次新日志（2026-11-02）",
-        "- 日志共 3 篇（2026-10-15 ~ 2026-11-03），不自动召回；"
-        "按日期用 memory_read 读日志文件，或用 memory_search 搜",
+        "- 日记共 3 篇（2026-10-15 ~ 2026-11-03），不自动召回；"
+        "按日期用 memory_read 读日记文件，或用 memory_search 搜",
     ]
     # 重复折叠结果不变（每次索引同步都会跑一遍）
     assert journal.fold_index(folded, entries) == folded
@@ -114,7 +114,7 @@ def test_fold_removes_stale_block_when_no_journals_left():
     lines = [
         "- [alpha](alpha.md) — 甲",
         "- [journal-2026-11-03](journal-2026-11-03.md) — 新日志",
-        "- 日志共 1 篇（2026-11-03），不自动召回；按日期用 memory_read 读 journal-<日期>.md，或用 memory_search 搜",
+        "- 日记共 1 篇（2026-11-03），不自动召回；按日期用 memory_read 读 journal-<日期>.md，或用 memory_search 搜",
     ]
     assert journal.fold_index(lines, []) == ["- [alpha](alpha.md) — 甲"]
 
@@ -156,8 +156,8 @@ def test_store_sync_folds_legacy_index_without_losing_non_journal(tmp_path):
     assert lines[4:] == [
         "- [journal-2026-11-03](journal-2026-11-03.md) — 新日志（2026-11-03）",
         "- [journal-2026-11-02](journal-2026-11-02.md) — 次新日志（2026-11-02）",
-        "- 日志共 3 篇（2026-10-15 ~ 2026-11-03），不自动召回；"
-        "按日期用 memory_read 读日志文件，或用 memory_search 搜",
+        "- 日记共 3 篇（2026-10-15 ~ 2026-11-03），不自动召回；"
+        "按日期用 memory_read 读日记文件，或用 memory_search 搜",
     ]
     # 日志没有独占行，也不算索引缺行
     assert store.index_report().missing == []
@@ -183,7 +183,7 @@ def test_journal_write_keeps_only_recent_two_lines(tmp_path):
     assert len(lines) == 3
     assert lines[0] == "- [journal-2026-11-04](journal-2026-11-04.md) — 04 的日志（2026-11-04）"
     assert lines[1] == "- [journal-2026-11-03](journal-2026-11-03.md) — 03 的日志（2026-11-03）"
-    assert lines[2].startswith("- 日志共 4 篇（2026-11-01 ~ 2026-11-04），不自动召回")
+    assert lines[2].startswith("- 日记共 4 篇（2026-11-01 ~ 2026-11-04），不自动召回")
     assert "journal-2026-11-02" not in "\n".join(lines)
 
 
@@ -201,7 +201,7 @@ def test_rebuild_index_folds_journals(tmp_path):
     lines = (tmp_path / INDEX_FILENAME).read_text("utf-8").splitlines()
     assert lines[0] == "- [alpha](alpha.md) — 甲"
     assert lines[1] == "- [journal-2026-11-03](journal-2026-11-03.md) — 日志（2026-11-03）"
-    assert lines[2].startswith("- 日志共 1 篇（2026-11-03）")
+    assert lines[2].startswith("- 日记共 1 篇（2026-11-03）")
 
 
 def test_delete_forget_restore_update_journal_block(tmp_path):
@@ -214,24 +214,24 @@ def test_delete_forget_restore_update_journal_block(tmp_path):
         return (tmp_path / INDEX_FILENAME).read_text("utf-8").splitlines()
 
     assert index_lines()[0].startswith("- [journal-2026-11-03]")
-    assert index_lines()[-1].startswith("- 日志共 3 篇")
+    assert index_lines()[-1].startswith("- 日记共 3 篇")
 
     run(store.delete("journal-2026-11-03.md"))
     lines = index_lines()
     assert lines[0].startswith("- [journal-2026-11-02]")
     assert lines[1].startswith("- [journal-2026-11-01]")
-    assert lines[2].startswith("- 日志共 2 篇（2026-11-01 ~ 2026-11-02）")
+    assert lines[2].startswith("- 日记共 2 篇（2026-11-01 ~ 2026-11-02）")
 
     run(store.forget("journal-2026-11-02.md"))
     lines = index_lines()
     assert lines[0].startswith("- [journal-2026-11-01]")
-    assert lines[1].startswith("- 日志共 1 篇（2026-11-01）")
+    assert lines[1].startswith("- 日记共 1 篇（2026-11-01）")
 
     run(store.restore("journal-2026-11-02.md"))
     lines = index_lines()
     assert lines[0].startswith("- [journal-2026-11-02]")
     assert lines[1].startswith("- [journal-2026-11-01]")
-    assert lines[2].startswith("- 日志共 2 篇")
+    assert lines[2].startswith("- 日记共 2 篇")
 
 
 def test_index_report_flags_missing_or_stale_journal_block(tmp_path):
@@ -251,7 +251,7 @@ def test_index_report_flags_missing_or_stale_journal_block(tmp_path):
     # 折叠块过期（汇总行对不上）：同样报缺行，提示重建
     lines = index_path.read_text("utf-8").splitlines()
     lines[-1] = (
-        "- 日志共 9 篇（2026-11-03），不自动召回；"
+        "- 日记共 9 篇（2026-11-03），不自动召回；"
         "按日期用 memory_read 读 journal-<日期>.md，或用 memory_search 搜"
     )
     index_path.write_text("\n".join(lines) + "\n", "utf-8")
@@ -336,7 +336,7 @@ def test_load_index_truncates_type_only_journal_block(tmp_path, monkeypatch):
     snap = run(store.load_index())
     assert snap.truncated and snap.loaded_lines == 199
     assert "notes.md" not in snap.text
-    assert "日志共" not in snap.text
+    assert "日记共" not in snap.text
 
 
 # ---------------------------------------------------------------- 召回
@@ -352,9 +352,6 @@ def test_select_by_keywords_excludes_journals_even_when_forced():
         cands, "开黑", ["journal-2026-11-03.md", "notes.md"], 5
     )
     assert [item.header.file for item in chosen] == ["project-game.md"]
-
-
-# ---------------------------------------------------------------- 查重
 
 
 
@@ -381,7 +378,7 @@ def test_truncate_index_drops_whole_journal_block_first(monkeypatch):
     assert snap.loaded_lines == 198
     assert all(line in snap.text for line in _compact(normal))
     assert "journal-2026" not in snap.text
-    assert "日志共" not in snap.text
+    assert "日记共" not in snap.text
     # 汇总行说 3 篇日志，条数按篇数而不是行数算
     assert "还有 3 条未加载" in snap.text
 
@@ -395,7 +392,7 @@ def test_truncate_index_drops_type_only_journal_block(monkeypatch):
     snap = _truncate_index(raw, {"notes.md"})
     assert snap.loaded_lines == 199
     assert "notes.md" not in snap.text
-    assert "日志共" not in snap.text
+    assert "日记共" not in snap.text
     assert "还有 1 条未加载" in snap.text
 
 
@@ -414,7 +411,7 @@ def test_truncate_index_ignores_trailing_blank_lines(monkeypatch):
     assert snap.loaded_lines == 5
     assert all(line in snap.text for line in _compact(normal))
     assert "journal-2026" not in snap.text
-    assert "日志共" not in snap.text
+    assert "日记共" not in snap.text
 
 
 def test_truncate_index_drops_journal_block_under_byte_limit(monkeypatch):
@@ -437,7 +434,7 @@ def test_truncate_index_drops_journal_block_under_byte_limit(monkeypatch):
     # 字节上限只允许装下第一条日志行：整块让位，不显示半截
     assert snap.loaded_lines == len(normal)
     assert all(line in snap.text for line in _compact(normal))
-    assert "日志共" not in snap.text
+    assert "日记共" not in snap.text
 
 
 def test_truncate_index_keeps_journal_block_when_it_fits():
@@ -458,7 +455,6 @@ def test_chat_guidance_leaves_journal_rules_to_write_layer():
     """聊天规范不写日记文件名；写到哪一篇由 ScopeStore 决定。"""
     text = prompts.memory_guidance()
     assert "journal-<日期>.md" not in text
-    assert "写入查重" not in text
 
 
 def test_consolidate_prompt_and_store_know_journal():
@@ -466,7 +462,7 @@ def test_consolidate_prompt_and_store_know_journal():
 
     assert memstore.JOURNAL_MAX_CHARS == 3000
     assert "journal" in consolidate.CONSOLIDATE_PROMPT
-    assert "不要删除日志文件" in consolidate.CONSOLIDATE_PROMPT
+    assert "不要删除日记文件" in consolidate.CONSOLIDATE_PROMPT
     assert "journal-<日期>.md" in consolidate.CONSOLIDATE_PROMPT
 
 
@@ -510,13 +506,13 @@ def test_load_index_folds_journal_lines_in_injection_view(tmp_path):
         index_view.compact_index_line(legacy[0]),
         index_view.compact_index_line(legacy[2]),
     ]
-    assert "日志共 2 篇" in snap.text
+    assert "日记共 2 篇" in snap.text
     assert snap.text.count("journal-2026-11-01.md") == 1
     assert snap.text.count("journal-2026-11-02.md") == 1
     # load_index 只读：磁盘上仍是旧格式
     disk = (tmp_path / INDEX_FILENAME).read_text("utf-8")
     assert "- [journal-2026-11-01](journal-2026-11-01.md)" in disk
-    assert "日志共" not in disk
+    assert "日记共" not in disk
 
 
 def test_block_span_allows_manual_line_after_summary():

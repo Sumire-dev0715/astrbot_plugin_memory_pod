@@ -61,7 +61,7 @@ def test_compact_keeps_headings_and_non_entry_lines():
 def test_entry_target_accepts_both_formats():
     assert index_view.entry_target("- [a](a.md) — 描述") == "a.md"
     assert index_view.entry_target("- a.md — 描述") == "a.md"
-    assert index_view.entry_target("- 日志共 3 篇（2026-11-01）") == ""
+    assert index_view.entry_target("- 日记共 3 篇（2026-11-01）") == ""
 
 
 # ---------------------------------------------------------------- 丢行顺序
@@ -79,7 +79,7 @@ def test_journal_block_is_dropped_before_any_normal_entry():
     )
     compact = [index_view.compact_index_line(line) for line in normal]
     assert view.truncated
-    assert "日志共" not in view.text
+    assert "日记共" not in view.text
     assert all(line in view.text for line in compact)
     # 日志块汇总了 5 篇：整块未加载按 5 条计
     assert view.dropped_entries == 5
@@ -146,7 +146,7 @@ def test_byte_limit_drops_journal_block_first():
         "\n".join(normal + block), max_bytes=max_bytes
     )
     assert view.truncated
-    assert "日志共" not in view.text
+    assert "日记共" not in view.text
     compact = [index_view.compact_index_line(line) for line in normal]
     assert view.text.startswith("\n".join(compact))
     assert len(view.text.encode("utf-8")) <= max_bytes
@@ -183,7 +183,7 @@ def test_mixed_journal_and_normal_counts():
         max_lines=10,
     )
     # 3 篇日志整块 + 最旧的 m0：共 4 条；上限里的 1 行留给说明
-    assert "日志共" not in view.text
+    assert "日记共" not in view.text
     assert "m0.md" not in view.text
     assert view.dropped_entries == 4
     assert "还有 4 条未加载" in view.text
@@ -205,7 +205,7 @@ def test_journal_block_before_manual_line_is_dropped_whole():
     )
     # 汇总行后面有手工行，也按一个完整的日志块丢掉，不留半截；
     # 上限里的 1 行留给"还有 N 条"说明。
-    assert "journal-2026" not in view.text and "日志共" not in view.text
+    assert "journal-2026" not in view.text and "日记共" not in view.text
     assert "# 手工补充" in view.text
     assert all(
         index_view.compact_index_line(line) in view.text for line in normal

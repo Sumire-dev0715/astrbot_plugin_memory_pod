@@ -9,7 +9,7 @@
     whisper/<会话>/     —— 悄悄话：只有这段对话（私聊的这个人 / 这个群）
 
 索引自动注入通道有 200 行 / 25KB 上限。超过时不再从底部截断：先整块丢
-日志，再按最近一次用到的时间从旧到新丢非日志条目（没有使用统计的按
+日记，再按最近一次用到的时间从旧到新丢非日记条目（没有使用统计的按
 updated 算），feedback 类最后丢；剩下的行保持原顺序，末尾注明还有多少条
 未加载、可用搜索工具找到——否则模型根本不知道自己有记忆没看到。注入时
 行格式渲染成 ``- 文件.md — 描述``，MEMORY.md 本身仍是
@@ -21,8 +21,8 @@ updated 算），feedback 类最后丢；剩下的行保持原顺序，末尾注
 漏登记、格式跑偏这一整类错误。索引接近注入上限时在写入回执里提醒合并
 记忆文件。工具读文件读到的始终是完整文件（截断只发生在注入通道）。
 
-日志（journal）是流水账而不是稳定事实，不占单独的索引行：非日志行保持
-原顺序，日志在索引末尾折叠成"最近两篇 + 一行汇总"的块，判定与折叠规则
+日记（journal）是流水账而不是稳定事实，不占单独的索引行：非日记行保持
+原顺序，日记在索引末尾折叠成"最近两篇 + 一行汇总"的块，判定与折叠规则
 见 core/journal.py。
 
 留言板每条告示带署名（写在 frontmatter 的 metadata.signature），开头块
@@ -2394,13 +2394,13 @@ class ScopeStore:
     def _journal_entries(
         self, headers: list[MemoryHeader] | None = None
     ) -> list[journal.JournalEntry]:
-        """索引折叠用的日志条目：以磁盘上的实际文件为准，不信任旧索引行。"""
+        """索引折叠用的日记条目：以磁盘上的实际文件为准，不信任旧索引行。"""
         headers = self.headers() if headers is None else headers
         entries = []
         for header in headers:
             if not journal.is_journal(header.file, header.type):
                 continue
-            # header.text 只有开头 8KB；旧日志可能很长，日期小标题在
+            # header.text 只有开头 8KB；旧日记可能很长，日期小标题在
             # 8KB 之后时也要算进索引日期范围
             content = self._read_text_lenient(header.file)
             start, end = journal.entry_span(
@@ -2423,8 +2423,8 @@ class ScopeStore:
         """增改 filename 对应的索引行（原位更新，保持行序稳定）。
 
         只动匹配行与末尾追加，其余行原样保留——用户手工整理过的索引
-        （分组标题、排序）不会被破坏。日志不占单独一行，统一折进末尾的
-        日志块。
+        （分组标题、排序）不会被破坏。日记不占单独一行，统一折进末尾的
+        日记块。
         返回注入视图的 (行数, 字节数) 供守门：注入时按紧凑行渲染，体积
         按紧凑后的文本算，避免用磁盘链接格式误报超限。
         """
@@ -2488,7 +2488,7 @@ class ScopeStore:
                 f"注意：MEMORY.md 的注入视图已 {lines} 行 / {size} 字节"
                 f"（紧凑渲染后），超出注入上限 {INDEX_MAX_LINES} 行 / "
                 f"{INDEX_MAX_BYTES} 字节，超出上限的内容不会全部注入："
-                "日志块最先让位，其余条目按最近使用丢弃，可用 memory_search 找回；"
+                "日记块最先让位，其余条目按最近使用丢弃，可用 memory_search 找回；"
                 "没有条目可丢时从底部截去非条目行。"
                 "请把相关记忆合并进同一个文件、删除多余文件，索引会随之精简"
             )
@@ -2507,8 +2507,8 @@ class ScopeStore:
     def index_report(self) -> IndexReport:
         """索引体检（同步方法）：体积、截断、缺行与悬空行。
 
-        日志不按单篇登记，但要求出现在末尾折叠块里；折叠块缺失或与磁盘上
-        的日志对不上时，把日志文件一并报成缺行，提示重建索引。
+        日记不按单篇登记，但要求出现在末尾折叠块里；折叠块缺失或与磁盘上
+        的日记对不上时，把日记文件一并报成缺行，提示重建索引。
         """
         index_path = self.root / INDEX_FILENAME
         files = set(self.list_files())
@@ -2592,7 +2592,7 @@ class ScopeStore:
         """按磁盘上的实际文件重建 MEMORY.md，返回索引行数。
 
         已有行原位刷新钩子、保留手工加的标题与分组，指向不存在文件的行
-        删掉，没登记的文件追加到末尾；日志只保留末尾折叠块。用于手工改动
+        删掉，没登记的文件追加到末尾；日记只保留末尾折叠块。用于手工改动
         文件目录之后的修复。旧索引先复制进回收站，重建结果不满意可以找回。
         """
         async with self._lock:
@@ -2618,7 +2618,7 @@ class ScopeStore:
                 continue
             listed.add(target)
             if journal.is_journal(target, header.type):
-                # 日志不占原位行，统一由末尾折叠块重建
+                # 日记不占原位行，统一由末尾折叠块重建
                 continue
             lines.append(format_index_line(target, header.description))
         for name, header in headers.items():
@@ -2641,8 +2641,8 @@ class ScopeStore:
         使用统计在这里读一次，供超限时的丢行顺序使用；快照由调用方缓存，
         之后的轮次不再重读，记忆不变时注入文本逐字不变。
 
-        渲染前先按当前在册日志折叠一次：索引里散落的日志行不逐条列给
-        模型，日志块要么完整显示、要么在超限时整块让位。本方法保持只读，
+        渲染前先按当前在册日记折叠一次：索引里散落的日记行不逐条列给
+        模型，日记块要么完整显示、要么在超限时整块让位。本方法保持只读，
         磁盘上的索引文件由写入/删除/重建操作维护。
         """
         raw = await self.read(INDEX_FILENAME)
@@ -2666,7 +2666,7 @@ class ScopeStore:
         """大小写不敏感的多词全文搜索，返回可读的结果行。
 
         默认 all 要求所有词都命中，any 命中任意一个词即可。结果按
-        insights.rank_hits 排序：非日志在前，再按命中词数、updated 倒序；
+        insights.rank_hits 排序：非日记在前，再按命中词数、updated 倒序；
         最多 MAX_SEARCH_RESULTS 条，每条带首行片段（memory_search 用
         search_hits 拿完整的类型、日期与两行片段）。这是索引截断或索引行
         写得不好时的兜底通道：不依赖"模型知道这条记忆存在"。

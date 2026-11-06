@@ -1581,8 +1581,8 @@ class MemoryPodPlugin(Star):
         for label, store in stores:
             for hit in await store.search_hits(query, mode):
                 hits.append((label, hit))
-        # 各作用域合并后统一排序，最多 8 条；日志排在非日志后面，
-        # 避免日志按文件名占满名额把真正的记忆挤掉
+        # 各作用域合并后统一排序，最多 8 条；日记排在非日记后面，
+        # 避免日记按文件名占满名额把真正的记忆挤掉
         hits.sort(key=lambda item: insights.search_key(item[1]))
         forgotten_hits: list[tuple[str, insights.SearchHit]] = []
         if self._forgetting_on():
@@ -1590,7 +1590,7 @@ class MemoryPodPlugin(Star):
                 for hit in await store.search_forgotten_hits(query, mode):
                     forgotten_hits.append((label, hit))
         # 已遗忘结果也用同一套排序；它们排在活跃结果之后，并计入
-        # 同一个 8 条上限，避免整体结果超长或日志在遗忘块里挤掉记忆
+        # 同一个 8 条上限，避免整体结果超长或日记在遗忘块里挤掉记忆
         forgotten_hits.sort(key=lambda item: insights.search_key(item[1]))
         shown_active = hits[: memstore.MAX_SEARCH_RESULTS]
         remaining = max(0, memstore.MAX_SEARCH_RESULTS - len(shown_active))

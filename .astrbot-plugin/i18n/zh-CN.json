@@ -68,7 +68,7 @@
       "typeHint_feedback": "对机器人做事方式的指导：纠正过的错误、确认过的做法",
       "typeHint_project": "进行中的事、目标与约束",
       "typeHint_reference": "外部资源、资料与告示",
-      "typeHint_journal": "每日流水账：不占单独索引行，不参与自动召回与查重",
+      "typeHint_journal": "每日流水账：不占单独索引行，不参与自动召回",
       "typeMissing": "无类型",
       "noDescription": "（没有描述）",
       "noMemoriesTitle": "还没有记忆",
