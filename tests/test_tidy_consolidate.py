@@ -209,3 +209,48 @@ def test_board_rewrite_keeps_expiry_and_new_notice_has_none(tmp_path):
     assert proposal.operations[0].expires == ""
     run(pkg_tidy.apply(store, proposal.operations))
     assert pkg_memstore.parse_memory(run(store.read("merged.md"))).expires == ""
+
+
+def test_consolidate_only_accepts_expires_when_explicitly_allowed():
+    plan = json.dumps(
+        [
+            {
+                "op": "write",
+                "file": "note.md",
+                "type": "reference",
+                "description": "笔记",
+                "content": "正文",
+                "expires": "2999-12-31",
+            }
+        ]
+    )
+    ops = consolidate.parse_operations(plan, {"note.md"})
+    assert ops[0].expires == ""
+    ops = consolidate.parse_operations(plan, {"note.md"}, allow_expires=True)
+    assert ops[0].expires == "2999-12-31"
+
+
+def test_notebook_consolidation_ignores_model_expires(tmp_path):
+    from support import pkg_memstore
+
+    store = pkg_memstore.MemoryStore(tmp_path / "memories").notebook_scope("Bot-A")
+    run(store.write("note.md", thing("note", description="笔记", body="旧正文")))
+    plan = [
+        {
+            "op": "write",
+            "file": "note.md",
+            "type": "reference",
+            "description": "笔记",
+            "content": "新正文",
+            "expires": "2999-12-31",
+            "reason": "改正文",
+        }
+    ]
+    proposal = run(
+        pkg_tidy.propose(
+            store, "小本本", replies("<operations>" + json.dumps(plan) + "</operations>")
+        )
+    )
+    assert proposal.operations[0].expires == ""
+    run(pkg_tidy.apply(store, proposal.operations))
+    assert "expires:" not in run(store.read("note.md"))

@@ -157,11 +157,15 @@ def _load_array(text: str):
             return None
 
 
-def parse_operations(text: str, existing: set[str]) -> list[Operation] | None:
+def parse_operations(
+    text: str, existing: set[str], *, allow_expires: bool = False
+) -> list[Operation] | None:
     """解析并校验整理方案；输出无法解析时返回 None（区别于"无需整理"的空列表）。
 
     丢弃的条目：文件名不合法、指向 MEMORY.md、删除不存在的文件、
     写入缺正文、正文超长或类型非法、同一文件出现多次（只认第一次）。
+    allow_expires 只在整理留言板、应用页面回传的方案时为真；其他作用域
+    的 expires 字段一律忽略（PLAN 3.9.2 第 3 条只让留言板有到期日）。
     """
     data = _load_array(text)
     if not isinstance(data, list):
@@ -203,7 +207,9 @@ def parse_operations(text: str, existing: set[str]) -> list[Operation] | None:
                 continue
             signature = " ".join(str(entry.get("signature", "")).split())
             # 页面回传的方案会带回到期日；格式不对就当没有，不因此丢掉整条
-            expires, _ = expiry.normalize(entry.get("expires"))
+            expires = ""
+            if allow_expires:
+                expires, _ = expiry.normalize(entry.get("expires"))
             ops.append(
                 Operation(
                     op="write",
@@ -223,11 +229,15 @@ def parse_operations(text: str, existing: set[str]) -> list[Operation] | None:
     return ops
 
 
-def operations_from_payload(raw, existing: set[str]) -> list[Operation]:
+def operations_from_payload(
+    raw, existing: set[str], *, allow_expires: bool = False
+) -> list[Operation]:
     """把 WebUI 回传的（可能被管理员改过的）方案重新校验一遍再应用。"""
     if not isinstance(raw, list):
         return []
-    ops = parse_operations(json.dumps(raw, ensure_ascii=False), existing)
+    ops = parse_operations(
+        json.dumps(raw, ensure_ascii=False), existing, allow_expires=allow_expires
+    )
     return ops or []
 
 

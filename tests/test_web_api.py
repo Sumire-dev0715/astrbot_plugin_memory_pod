@@ -632,3 +632,142 @@ def test_board_expiry_can_be_renewed_from_file_save(tmp_path):
     result = route(dashboard, "file_delete")
     assert result["status"] == "ok", result
     assert plugin.invalidated[-1][0] == "board"
+
+
+def test_non_board_files_never_report_expired(tmp_path):
+    plugin, dashboard = setup(tmp_path)
+    notebook = plugin._store.notebook_scope("Bot-A")
+    call(
+        notebook.write(
+            "note.md",
+            thing(
+                "note",
+                description="笔记",
+                body="正文",
+                expires="2000-01-01",
+            ),
+        )
+    )
+    query(scope="notebook", key="Bot-A")
+    data = raw(route(dashboard, "scope_detail"))
+    item = next(item for item in data["files"] if item["file"] == "note.md")
+    assert item["expired"] is False
+
+    query(scope="notebook", key="Bot-A", file="note.md")
+    detail = raw(route(dashboard, "file_detail"))
+    assert detail["expired"] is False
+
+
+def test_consolidate_ignores_expires_outside_board(tmp_path):
+    plugin, dashboard = setup(tmp_path)
+    body(
+        {
+            "scope": "notebook",
+            "key": "Bot-A",
+            "operations": [
+                {
+                    "op": "write",
+                    "file": "new.md",
+                    "type": "reference",
+                    "description": "新笔记",
+                    "content": "正文",
+                    "expires": "2999-12-31",
+                    "baseMtime": 0,
+                }
+            ],
+        }
+    )
+    result = route(dashboard, "consolidate_apply")
+    assert result["status"] == "ok", result
+    content = call(plugin._store.notebook_scope("Bot-A").read("new.md"))
+    assert "expires:" not in content
+
+
+def test_board_save_tolerates_unchanged_malformed_expiry(tmp_path):
+    plugin, dashboard = setup(tmp_path)
+    store = plugin._store.board_scope()
+    call(
+        store.write(
+            "notice.md",
+            thing(
+                "notice",
+                description="告示",
+                body="旧正文",
+                signature="管理员",
+                expires="明天",
+            ),
+        )
+    )
+    body(
+        {
+            "scope": "board",
+            "key": "",
+            "file": "notice.md",
+            "oldFile": "notice.md",
+            "mode": "fields",
+            "type": "reference",
+            "description": "告示",
+            "body": "改过的正文",
+            "signature": "管理员",
+            "expires": "明天",
+        }
+    )
+    result = route(dashboard, "file_save")
+    assert result["status"] == "ok", result
+    doc = pkg_memstore.parse_memory(call(store.read("notice.md")))
+    assert doc.body == "改过的正文"
+    # 坏掉的旧日期在这次保存时被清掉，不再让表单永远存不了
+    assert doc.expires == ""
+
+    # 管理员改成另一个非法值仍然拒绝
+    body(
+        {
+            "scope": "board",
+            "key": "",
+            "file": "notice.md",
+            "oldFile": "notice.md",
+            "mode": "fields",
+            "type": "reference",
+            "description": "告示",
+            "body": "再改",
+            "signature": "管理员",
+            "expires": "后天",
+        }
+    )
+    result = route(dashboard, "file_save")
+    assert result["status"] == "error"
+    assert "YYYY-MM-DD" in result["message"]
+
+
+def test_board_save_empty_expires_clears_date(tmp_path):
+    plugin, dashboard = setup(tmp_path)
+    store = plugin._store.board_scope()
+    call(
+        store.write(
+            "notice.md",
+            thing(
+                "notice",
+                description="告示",
+                body="正文",
+                signature="管理员",
+                expires="2999-12-31",
+            ),
+        )
+    )
+    body(
+        {
+            "scope": "board",
+            "key": "",
+            "file": "notice.md",
+            "oldFile": "notice.md",
+            "mode": "fields",
+            "type": "reference",
+            "description": "告示",
+            "body": "正文",
+            "signature": "管理员",
+            "expires": "",
+        }
+    )
+    result = route(dashboard, "file_save")
+    assert result["status"] == "ok", result
+    assert pkg_memstore.parse_memory(call(store.read("notice.md"))).expires == ""

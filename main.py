@@ -936,10 +936,17 @@ class MemoryPodPlugin(Star):
         """留言板每轮都整块发给模型（全文或标题），算作被用到。
 
         不记的话，开启遗忘后告示会按 updated 被移出开头块，整理时也会被
-        当成"从未被用到"。
+        当成"从未被用到"。已过期的告示不在开头块里，不能记成用过。
         """
         store = self._board_scope()
-        names = await asyncio.to_thread(store.list_files)
+        now = time.time()
+        tz = self.expiry_timezone()
+        headers = await asyncio.to_thread(store.headers)
+        names = [
+            header.file
+            for header in headers
+            if not expiry.is_expired(header.expires, now, tz)
+        ]
         if names:
             await asyncio.to_thread(store.note_used, names)
 
@@ -1984,6 +1991,19 @@ class MemoryPodPlugin(Star):
         problem = await self._rewrite_problem(event, store, scope, name, files)
         if problem:
             return problem
+        if scope == memstore.SCOPE_BOARD and not (expires or "").strip():
+            # 整篇重写留言板告示没给 expires 时沿用原日期：一次普通重写
+            # 不该把告示变成长期有效。要清掉到期日，在管理页把日期清空。
+            existing = self._existing_name(files, name)
+            if existing:
+                previous = await store.read(existing)
+                if previous is not None:
+                    kept, error = expiry.normalize(
+                        memstore.parse_memory(previous).expires
+                    )
+                    # 旧文件里的坏日期不原样带回去（writer 会拒绝）：
+                    # 按没有到期日处理，这次重写顺带把它修掉
+                    expires = "" if error else kept
         sender_id, sender_name = self._sender_identity(event)
         op = {
             "op": writer.OP_WRITE,

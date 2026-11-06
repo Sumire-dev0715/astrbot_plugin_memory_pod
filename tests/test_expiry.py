@@ -411,3 +411,180 @@ def test_management_page_board_change_invalidates_every_session(tmp_path):
     # 的改动限定到某一个会话
     plugin.invalidate_scope("board", "")
     assert rt_a.index_loaded is False and rt_b.index_loaded is False
+
+
+def test_rewrite_without_expires_keeps_existing_expiry(tmp_path):
+    plugin = make_plugin(tmp_path)
+    admin = admin_event()
+    run(
+        plugin._store.board_scope().write(
+            "notice.md",
+            thing(
+                "notice",
+                description="告示",
+                body="旧正文",
+                signature="管理员",
+                expires="2999-12-31",
+            ),
+        )
+    )
+    assert "已过期" not in run(plugin.memory_read(admin, "board", "notice.md"))
+    receipt = run(
+        plugin.memory_write(
+            admin,
+            "board",
+            "notice.md",
+            "reference",
+            "改过的告示",
+            "改过的正文",
+        )
+    )
+    assert "整篇重写" in receipt
+    doc = pkg_memstore.parse_memory(
+        run(plugin._store.board_scope().read("notice.md"))
+    )
+    assert doc.expires == "2999-12-31"
+
+
+def test_expired_notice_is_not_counted_as_used(tmp_path):
+    plugin = make_plugin(tmp_path)
+    board = plugin._store.board_scope()
+    run(
+        board.write(
+            "old.md",
+            thing(
+                "old",
+                description="旧告示",
+                body="过期告示正文",
+                signature="管理员",
+                expires="2000-01-01",
+            ),
+        )
+    )
+    run(
+        board.write(
+            "now.md",
+            thing(
+                "now",
+                description="有效告示",
+                body="有效告示正文",
+                signature="管理员",
+                expires="2999-12-31",
+            ),
+        )
+    )
+    event = FakeEvent("Bot-A", "123")
+    run(plugin._index_block(main.RuntimeSession(), event, record_usage=True))
+    assert board.usage_of("old.md").uses == 0
+    assert board.usage_of("now.md").uses >= 1
+
+
+def test_daily_refresh_uses_configured_timezone(tmp_path, monkeypatch):
+    plugin = make_plugin(tmp_path)
+    plugin.context.get_config = lambda umo=None: {
+        "timezone": "Pacific/Kiritimati"
+    }
+    run(
+        plugin._store.board_scope().write(
+            "notice.md",
+            thing(
+                "notice",
+                description="当天告示",
+                body="当天告示正文",
+                signature="管理员",
+                expires="2026-11-06",
+            ),
+        )
+    )
+    event = FakeEvent("Bot-A", "123")
+    rt = main.RuntimeSession()
+
+    # UTC 11-05 12:00 在 UTC+14 是 11-06 02:00：到期日当天，告示还在
+    before = datetime(2026, 11, 5, 12, 0, tzinfo=timezone.utc).timestamp()
+    monkeypatch.setattr(main.time, "time", lambda: before)
+    first = run(plugin._index_block(rt, event))
+    assert rt.index_day == date(2026, 11, 6)
+    assert "当天告示正文" in first
+
+    # UTC 11-06 12:00 在 UTC+14 已是 11-07 02:00：跨天后的第一轮刷新，
+    # 告示过期撤下。若实现按本机时区算，本机此刻还在 11-06，不会重建。
+    after = datetime(2026, 11, 6, 12, 0, tzinfo=timezone.utc).timestamp()
+    monkeypatch.setattr(main.time, "time", lambda: after)
+    second = run(plugin._index_block(rt, event))
+    assert rt.index_day == date(2026, 11, 7)
+    assert second is None
+
+
+def test_management_page_renewal_refreshes_every_session_opening(tmp_path):
+    plugin = make_plugin(tmp_path)
+    board = plugin._store.board_scope()
+    run(
+        board.write(
+            "notice.md",
+            thing(
+                "notice",
+                description="告示",
+                body="过期告示正文",
+                signature="管理员",
+                expires="2000-01-01",
+            ),
+        )
+    )
+    event_a = FakeEvent("Bot-A", "1", umo="Bot-A:GroupMessage:900")
+    event_b = FakeEvent("Bot-B", "2", umo="Bot-B:FriendMessage:2")
+    rt_a = run(plugin._runtime(event_a.unified_msg_origin))
+    rt_b = run(plugin._runtime(event_b.unified_msg_origin))
+    run(plugin._index_block(rt_a, event_a))
+    run(plugin._index_block(rt_b, event_b))
+
+    # 模拟管理页续期：写回告示并走 _changed(SCOPE_BOARD, "") 的失效入口
+    run(
+        board.write(
+            "notice.md",
+            thing(
+                "notice",
+                description="告示",
+                body="续期后的正文",
+                signature="管理员",
+                expires="2999-12-31",
+            ),
+        )
+    )
+    plugin.invalidate_scope("board", "")
+    assert rt_a.index_loaded is False and rt_b.index_loaded is False
+    assert "续期后的正文" in run(plugin._index_block(rt_a, event_a))
+    assert "续期后的正文" in run(plugin._index_block(rt_b, event_b))
+
+
+def test_rewrite_repairs_malformed_expiry_instead_of_failing(tmp_path):
+    plugin = make_plugin(tmp_path)
+    admin = admin_event()
+    run(
+        plugin._store.board_scope().write(
+            "notice.md",
+            thing(
+                "notice",
+                description="告示",
+                body="旧正文",
+                signature="管理员",
+                expires="明天",
+            ),
+        )
+    )
+    run(plugin.memory_read(admin, "board", "notice.md"))
+    receipt = run(
+        plugin.memory_write(
+            admin,
+            "board",
+            "notice.md",
+            "reference",
+            "告示",
+            "新正文",
+        )
+    )
+    assert "整篇重写" in receipt
+    doc = pkg_memstore.parse_memory(
+        run(plugin._store.board_scope().read("notice.md"))
+    )
+    assert doc.expires == ""
+    assert doc.body == "新正文"

@@ -517,7 +517,10 @@ class MemoryDashboard:
 
             def row(header: memstore.MemoryHeader) -> dict:
                 item = _header_dict(header)
-                item["expired"] = self.plugin.notice_expired(header.expires, now)
+                # 到期日只属于留言板；别的文件即使 frontmatter 有 expires 也不标
+                item["expired"] = scope == SCOPE_BOARD and self.plugin.notice_expired(
+                    header.expires, now
+                )
                 return item
 
             files = []
@@ -559,7 +562,7 @@ class MemoryDashboard:
         return _ok(data)
 
     async def file_detail(self) -> dict:
-        _, _, store = self._scope_from_query()
+        scope, _, store = self._scope_from_query()
         name = self._file_name(_query("file"))
         content = await store.read(name)
         if content is None:
@@ -583,7 +586,8 @@ class MemoryDashboard:
                 "source": doc.source,
                 "signature": doc.signature,
                 "expires": doc.expires,
-                "expired": self.plugin.notice_expired(doc.expires),
+                "expired": scope == SCOPE_BOARD
+                and self.plugin.notice_expired(doc.expires),
                 "origin": origins,
                 "hasFrontmatter": doc.has_frontmatter,
                 "links": memstore.extract_links(content),
@@ -661,9 +665,15 @@ class MemoryDashboard:
         expires = ""
         if scope == SCOPE_BOARD:
             if "expires" in body:
-                expires, error = expiry.normalize(body.get("expires"))
+                raw_expires = _text(body.get("expires")).strip()
+                expires, error = expiry.normalize(raw_expires)
                 if error:
-                    raise ApiError(error)
+                    # 旧文件里已有写坏的日期时，页面日期框只能把原值带回来；
+                    # 管理员只改正文也会被它卡住。原值没变就按没有到期日
+                    # 保存（这次保存顺带修掉坏值），改了别的坏值仍然拒绝。
+                    if current_doc is None or raw_expires != current_doc.expires:
+                        raise ApiError(error)
+                    expires = ""
             elif current_doc is not None:
                 expires = current_doc.expires
 
@@ -1082,7 +1092,10 @@ class MemoryDashboard:
         scope, key, store = self._scope_from_body(body)
         raw_ops = body.get("operations")
         existing = set(await asyncio.to_thread(store.list_files))
-        ops = consolidate.operations_from_payload(raw_ops, existing)
+        # 到期日只属于留言板；整理其他作用域时忽略方案里的 expires
+        ops = consolidate.operations_from_payload(
+            raw_ops, existing, allow_expires=scope == SCOPE_BOARD
+        )
         requested = consolidate.requested_files(raw_ops)
         if not ops and not requested:
             raise ApiError("没有可应用的操作")
