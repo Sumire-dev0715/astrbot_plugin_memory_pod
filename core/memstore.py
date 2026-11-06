@@ -3022,14 +3022,29 @@ def effective_type(name: str, mem_type: str = "") -> str:
     return NOTE_TYPE
 
 
-def person_type_problem(name: str, mem_type: str) -> str:
+def person_type_problem(
+    name: str, mem_type: str, *, previous_type: str | None = None
+) -> str:
     """人物档案的"类型与文件名必须对上"校验；对不上时返回回执说明。
 
     type=person 只允许主档案与主题档案；人物档案的文件名也只允许
     type=person。两边对不上的写入一律拒绝（PLAN 3.10.2）。
+
+    previous_type 是这个文件在磁盘上已有的类型（没有这个文件时为 None）。
+    管理页的原文保存如果原样保留了旧版本写的、现在已经不认识的类型
+    （比如 user），就不算一次新的不匹配写入：否则旧人物档案在原文
+    编辑器里永远保存不了。类型改了或者旧类型本身是认识的，照样拒绝。
     """
     type_is_person = (mem_type or "").strip().lower() == PERSON_TYPE
     if type_is_person == is_person_file(name):
+        return ""
+    incoming = (mem_type or "").strip().lower()
+    if (
+        previous_type is not None
+        and incoming == previous_type.strip().lower()
+        and incoming not in MEMORY_TYPES
+        and is_person_file(name)
+    ):
         return ""
     return (
         "人物档案的类型和文件名必须对上：type=person 只能用于 "

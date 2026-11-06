@@ -710,8 +710,12 @@ class MemoryDashboard:
                 expires=expires,
             )
         if scope != SCOPE_BOARD:
+            # 原文保存旧人物档案时，frontmatter 里的旧类型（如 user）原样
+            # 保留才算没改类型；否则旧档案在原文编辑器里完全保存不了。
             problem = memstore.person_type_problem(
-                name, memstore.parse_memory(content).type
+                name,
+                memstore.parse_memory(content).type,
+                previous_type=current_doc.type if current_doc is not None else None,
             )
             if problem:
                 raise ApiError(problem)

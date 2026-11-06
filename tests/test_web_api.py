@@ -283,6 +283,76 @@ def test_person_profile_can_be_edited_on_management_page(tmp_path):
     assert "新身份" in call(notebook.read("user-456.md"))
 
 
+def test_legacy_person_profile_raw_save_keeps_old_type_and_extra_fields(tmp_path):
+    """旧人物档案（type: user）在原文模式里能保存，自定义字段不丢。"""
+    plugin, dashboard = setup(tmp_path)
+    notebook = plugin._store.notebook_scope("Bot-A")
+    legacy = (
+        "---\n"
+        "name: user-456\n"
+        "description: 阿杰\n"
+        "metadata:\n"
+        "  type: user\n"
+        "  created: 2025-01-01 08:00\n"
+        "  source: 456\n"
+        "  nickname: 阿杰\n"
+        "---\n\n"
+        "身份：设计师\n"
+    )
+    call(notebook.write("user-456.md", legacy))
+    body(
+        {
+            "scope": "notebook",
+            "key": "Bot-A",
+            "file": "user-456.md",
+            "oldFile": "user-456.md",
+            "mode": "raw",
+            "content": legacy.replace("身份：设计师", "身份：高级设计师"),
+        }
+    )
+    result = route(dashboard, "file_save")
+    assert result["status"] == "ok", result
+    content = call(notebook.read("user-456.md"))
+    doc = pkg_memstore.parse_memory(content)
+    assert doc.type == "user"  # 旧类型原样保留，按文件名仍然是人物档案
+    assert "高级设计师" in doc.body
+    assert "nickname: 阿杰" in content
+    query(scope="notebook", key="Bot-A", file="user-456.md")
+    detail = raw(route(dashboard, "file_detail"))
+    assert detail["type"] == "person"
+
+    # 把旧档案的类型改成认识的类型（仍然对不上）照样拒绝
+    body(
+        {
+            "scope": "notebook",
+            "key": "Bot-A",
+            "file": "user-456.md",
+            "oldFile": "user-456.md",
+            "mode": "raw",
+            "content": legacy.replace("  type: user", "  type: note"),
+        }
+    )
+    result = route(dashboard, "file_save")
+    assert result["status"] == "error"
+    assert "类型和文件名必须对上" in result["message"]
+
+    # 新建人物档案时写旧类型不行：没有"原样保留"可言
+    body(
+        {
+            "scope": "notebook",
+            "key": "Bot-A",
+            "file": "user-789.md",
+            "mode": "raw",
+            "content": legacy.replace("user-456", "user-789").replace(
+                "  source: 456", "  source: 789"
+            ),
+        }
+    )
+    result = route(dashboard, "file_save")
+    assert result["status"] == "error"
+    assert "类型和文件名必须对上" in result["message"]
+
+
 def test_board_file_save_ignores_type_and_writes_no_type(tmp_path):
     """管理页编辑留言板时没有类型：表单里的值忽略，文件里不写 type。"""
     plugin, dashboard = setup(tmp_path)
