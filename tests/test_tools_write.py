@@ -1562,6 +1562,38 @@ def test_agreement_edit_and_delete_refresh_every_session_opening(tmp_path):
     assert block is None or "rule.md" not in block
 
 
+def test_whisper_agreement_refreshes_current_session_opening(tmp_path):
+    """悄悄话里的 agreement 只在这段对话生效，但也要马上出现在开头块里。"""
+    plugin = make_plugin(tmp_path)
+    event_a = FakeEvent("Bot-A", "1", umo="Bot-A:GroupMessage:900", admin=True)
+    event_b = FakeEvent("Bot-A", "2", umo="Bot-A:GroupMessage:901")
+    rt_a = run(plugin._runtime(event_a.unified_msg_origin))
+    rt_b = run(plugin._runtime(event_b.unified_msg_origin))
+    run(plugin._index_block(rt_a, event_a))
+    run(plugin._index_block(rt_b, event_b))
+
+    assert "已写入 whisper/rule.md" in run(
+        plugin.memory_write(
+            event_a, "whisper", "rule.md", "agreement", "本群规则", "在这个群里叫老大"
+        )
+    )
+    # 只作废本会话；别的会话看不到这条悄悄话，不需要重建
+    assert rt_a.index_loaded is False
+    assert rt_b.index_loaded is True
+    assert "rule.md" in run(plugin._index_block(rt_a, event_a))
+    block_b = run(plugin._index_block(rt_b, event_b))
+    assert block_b is None or "rule.md" not in block_b
+
+    # 删除也马上从本会话的开头块消失
+    run(plugin._index_block(rt_a, event_a))
+    assert "已删除 whisper/rule.md" in run(
+        plugin.memory_delete(event_a, "whisper", "rule.md", "不用了")
+    )
+    assert rt_a.index_loaded is False
+    block = run(plugin._index_block(rt_a, event_a))
+    assert block is None or "rule.md" not in block
+
+
 def test_unknown_type_file_is_read_and_searched_as_note(tmp_path):
     """文件里的不认识的类型按笔记处理：读取、搜索、展示都不报错。"""
     plugin = make_plugin(tmp_path)

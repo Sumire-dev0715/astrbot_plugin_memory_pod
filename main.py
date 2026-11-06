@@ -1869,6 +1869,7 @@ class MemoryPodPlugin(Star):
 
     def _refresh_after_tool_write(
         self,
+        event: AstrMessageEvent,
         scope: str,
         files: list[str] | None = None,
         *,
@@ -1879,17 +1880,25 @@ class MemoryPodPlugin(Star):
         留言板的改动要立刻送到所有会话（PLAN 3.9.2 第 5 条）。小本本和
         悄悄话在对话中途由模型写入时不刷新快照：开头块要逐轮逐字不变才
         能命中前缀缓存，新内容由召回带上（PLAN 3.8.1）。两个例外：
-        - agreement 是对机器人自己的要求，管理员在别的对话里写下的必须
-          马上对所有会话生效（PLAN 3.10.1 继承 3.9.1 第 5 条），所以小本本
-          的 agreement 改动作废全部快照；
+        - agreement 是对机器人自己的要求，写入后要马上出现在开头块里
+          （PLAN 3.10.1 继承 3.9.1 第 5 条）：小本本的 agreement 所有会话
+          可见，作废全部快照；悄悄话的 agreement 只在这段对话里生效，
+          作废本会话的快照，否则要等到自然刷新（最多到第二天）；
         - 删除或遗忘钉在开头块里的档案没有最新全文可附，继续注入旧内容
           等于让用户删不掉。
         """
-        if scope == memstore.SCOPE_BOARD or (
-            refresh_all and scope == memstore.SCOPE_NOTEBOOK
-        ):
+        if scope == memstore.SCOPE_BOARD:
             self.invalidate_scope(scope)
             return
+        if refresh_all:
+            if scope == memstore.SCOPE_NOTEBOOK:
+                self.invalidate_scope(scope)
+                return
+            if scope == memstore.SCOPE_WHISPER:
+                umo = str(getattr(event, "unified_msg_origin", "") or "")
+                if umo:
+                    self._invalidate_index_cache(umo)
+                return
         self._invalidate_pinned(scope, list(files or []))
 
     @staticmethod
@@ -2106,6 +2115,7 @@ class MemoryPodPlugin(Star):
             actual, memstore.parse_memory(written).type
         )
         self._refresh_after_tool_write(
+            event,
             scope,
             refresh_all=(
                 new_type == memstore.AGREEMENT_TYPE
@@ -2201,6 +2211,7 @@ class MemoryPodPlugin(Star):
             actual, memstore.parse_memory(written).type
         )
         self._refresh_after_tool_write(
+            event,
             scope,
             refresh_all=(
                 new_type == memstore.AGREEMENT_TYPE
@@ -2272,6 +2283,7 @@ class MemoryPodPlugin(Star):
         # 删掉一条 agreement 同样要让所有会话马上不再看到它
         existing = self._existing_name(files, actual)
         self._refresh_after_tool_write(
+            event,
             scope,
             [actual],
             refresh_all=file_types.get(existing, "").lower()
