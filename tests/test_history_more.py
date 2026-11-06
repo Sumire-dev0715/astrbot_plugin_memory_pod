@@ -81,6 +81,33 @@ def test_write_index_rebuild_and_report(tmp_path):
     assert "手工钩子" not in run(scope.read("MEMORY.md"))
 
 
+def test_index_save_and_rebuild_keep_old_index_recoverable(tmp_path):
+    scope = store(tmp_path)
+    run(scope.write("note.md", thing("note", description="甲", body="内容")))
+    auto_index = run(scope.read("MEMORY.md"))
+
+    run(scope.write_index("- [note](note.md) — 手工钩子\n"))
+    entries = [e for e in scope.trash_entries() if e.file == "MEMORY.md"]
+    assert len(entries) == 1
+    assert scope.read_trash(entries[0].entry) == auto_index
+
+    manual_index = run(scope.read("MEMORY.md"))
+    run(scope.rebuild_index())
+    entries = [e for e in scope.trash_entries() if e.file == "MEMORY.md"]
+    manual = next(
+        e for e in entries if scope.read_trash(e.entry) == manual_index
+    )
+    # 旧索引在回收站里能恢复；恢复前当前的索引也会留档
+    report = run(scope.restore_trash(manual.entry))
+    assert report.ok
+    assert run(scope.read("MEMORY.md")) == manual_index
+    assert any(
+        scope.read_trash(e.entry) != manual_index
+        for e in scope.trash_entries()
+        if e.file == "MEMORY.md"
+    )
+
+
 def test_import_conflict_policies(tmp_path):
     scope = store(tmp_path)
     run(scope.write("note.md", thing("note", body="现有内容")))

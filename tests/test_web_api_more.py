@@ -83,6 +83,22 @@ def test_index_save_and_rebuild(tmp_path):
     assert "手工" not in call(notebook.read("MEMORY.md"))
 
 
+def test_index_save_keeps_old_index_restorable_from_trash(tmp_path):
+    plugin, dashboard = setup(tmp_path)
+    notebook = plugin._store.notebook_scope("Bot-A")
+    call(notebook.write("note.md", thing("note", description="甲", body="内容")))
+    old = call(notebook.read("MEMORY.md"))
+    body({"scope": "notebook", "key": "Bot-A", "content": "- [note](note.md) — 手工\n"})
+    assert route(dashboard, "index_save")["status"] == "ok"
+
+    query(scope="notebook", key="Bot-A")
+    entries = raw(route(dashboard, "trash_entries"))["entries"]
+    entry = next(item for item in entries if item["file"] == "MEMORY.md")
+    body({"scope": "notebook", "key": "Bot-A", "entry": entry["entry"]})
+    assert route(dashboard, "trash_restore")["status"] == "ok"
+    assert call(notebook.read("MEMORY.md")) == old
+
+
 def test_whisper_context_remark_and_purge(tmp_path):
     plugin, dashboard = setup(tmp_path)
     umo = "Bot-A:FriendMessage:1"

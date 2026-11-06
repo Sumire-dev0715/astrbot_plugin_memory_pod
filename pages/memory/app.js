@@ -2031,7 +2031,8 @@
         h("button", { class: "btn", onclick: function () { restoreTrashEntry(item); } }, t("restoreTrash")),
         h("button", { class: "btn danger", onclick: function () { deleteTrashEntry(item); } }, t("deleteTrash"))
       );
-      if (!active.has(item.file)) {
+      // 索引副本没有"在册文件"可彻底删除，恢复用上面的按钮即可
+      if (!active.has(item.file) && item.file.toLowerCase() !== "memory.md") {
         row.append(h("button", { class: "btn danger", onclick: function () { purgeTrashFile(item); } }, t("purgeFile")));
       }
       box.append(row);

@@ -679,6 +679,45 @@ class HistoryLog:
             source=source,
         )
 
+    def copy_to_trash(
+        self,
+        path: Path,
+        file: str,
+        action: str,
+        actor: str = "",
+        source: str = "",
+        reason: str = "",
+    ) -> TrashEntry:
+        """把文件复制一份进回收站并记审计（原文件保持不动）。
+
+        用于索引这类先留档、再原地重写的路径：写入失败时原文件还在。
+        """
+        before_sha1 = _file_sha1(path)
+        ts = round(_now() * 1000) / 1000
+        with self._lock:
+            while True:
+                entry = f"{_stamp(ts)}__{file}"
+                dest = self.trash_root / entry
+                if not dest.exists():
+                    break
+                ts = round(ts + 0.001, 3)
+            self.trash_root.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(path, dest)
+            st = dest.stat()
+            self.record(
+                action, file, actor, source, before_sha1, "", ts=ts, reason=reason
+            )
+        return TrashEntry(
+            entry=entry,
+            file=file,
+            ts=ts,
+            mtime=st.st_mtime,
+            size=st.st_size,
+            action=action,
+            actor=actor,
+            source=source,
+        )
+
     def remove_entry(self, entry: str) -> bool:
         """从回收站删掉一条（恢复成功后或彻底删除时用）；不记审计。"""
         entry = self._trash_name(entry)

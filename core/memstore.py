@@ -1937,11 +1937,35 @@ class ScopeStore:
                         "可以彻底删除这条回收站记录，或从回收站目录手工取回原始字节",
                     )
                 return WriteReport(False, "回收站里没有这个条目")
-            # 其他写入路径都拒绝 MEMORY.md；回收站文件名正则本身允许它
+            # 索引也会在保存/重建前留一份回收站副本：恢复是把旧索引写回
+            # MEMORY.md，当前索引同样先留档，不直接丢掉
             if info.file.lower() == INDEX_FILENAME.lower():
-                return WriteReport(
-                    False, "MEMORY.md 不能从回收站恢复，请在「索引」页处理"
+                index_path = self.root / INDEX_FILENAME
+                try:
+                    self._backup_index_to_trash(actor)
+                except OSError as exc:
+                    return WriteReport(
+                        False, f"当前索引保存到回收站失败，未恢复：{exc}"
+                    )
+                before_sha1 = ""
+                try:
+                    if index_path.is_file():
+                        before_sha1 = hashlib.sha1(
+                            index_path.read_bytes()
+                        ).hexdigest()
+                    self._write_atomic(index_path, content)
+                except OSError as exc:
+                    return WriteReport(False, f"恢复索引失败：{exc}")
+                self._history.record(
+                    history.ACTION_RESTORE,
+                    INDEX_FILENAME,
+                    actor,
+                    "",
+                    before_sha1,
+                    history.content_sha1(content),
                 )
+                await asyncio.to_thread(self._history.remove_entry, entry)
+                return WriteReport(True, "已从回收站恢复旧索引")
             path = self.root / info.file
             current: str | None = None
             current_bytes: bytes | None = None
@@ -2280,7 +2304,8 @@ class ScopeStore:
         if written:
             if adopt_index:
                 self._write_atomic(index_path, index.strip("\n") + "\n")
-                self._rebuild_index_sync()
+                # 刚写进去的就是这份导入的索引，不用再留一份回收站副本
+                self._rebuild_index_sync(actor, backup=False)
             else:
                 for name, content in written:
                     self._sync_index_line(name, parse_description(content)[0])
@@ -2517,10 +2542,27 @@ class ScopeStore:
             dangling=[name for name in listed if name not in files],
         )
 
-    async def write_index(self, content: str) -> WriteReport:
+    def _backup_index_to_trash(self, actor: str) -> None:
+        """覆盖索引前把旧 MEMORY.md 复制进回收站，保留手工分组、排序与钩子。"""
+        index_path = self.root / INDEX_FILENAME
+        if not index_path.is_file():
+            return
+        try:
+            if index_path.stat().st_size == 0:
+                return
+        except OSError:
+            pass
+        self._history.copy_to_trash(
+            index_path, INDEX_FILENAME, history.ACTION_WRITE, actor
+        )
+
+    async def write_index(
+        self, content: str, actor: str = history.ACTOR_WEBUI
+    ) -> WriteReport:
         """管理员手工改写 MEMORY.md（调整分组、顺序、措辞）。
 
-        模型不能直接写索引；这个入口只给 WebUI 用。
+        模型不能直接写索引；这个入口只给 WebUI 用。旧索引先复制进回收站，
+        保存错了可以在管理页的回收站里找回。
         """
         if len(content.encode("utf-8")) > MAX_FILE_BYTES:
             return WriteReport(
@@ -2528,6 +2570,10 @@ class ScopeStore:
             )
         text = content.strip("\n")
         async with self._lock:
+            try:
+                await asyncio.to_thread(self._backup_index_to_trash, actor)
+            except OSError as exc:
+                return WriteReport(False, f"旧索引保存到回收站失败，未保存：{exc}")
             await asyncio.to_thread(
                 self._write_atomic,
                 self.root / INDEX_FILENAME,
@@ -2539,20 +2585,22 @@ class ScopeStore:
             message += "。" + health
         return WriteReport(True, message)
 
-    async def rebuild_index(self) -> int:
+    async def rebuild_index(self, actor: str = history.ACTOR_WEBUI) -> int:
         """按磁盘上的实际文件重建 MEMORY.md，返回索引行数。
 
         已有行原位刷新钩子、保留手工加的标题与分组，指向不存在文件的行
         删掉，没登记的文件追加到末尾；日志只保留末尾折叠块。用于手工改动
-        文件目录之后的修复。
+        文件目录之后的修复。旧索引先复制进回收站，重建结果不满意可以找回。
         """
         async with self._lock:
-            return await asyncio.to_thread(self._rebuild_index_sync)
+            return await asyncio.to_thread(self._rebuild_index_sync, actor)
 
-    def _rebuild_index_sync(self) -> int:
+    def _rebuild_index_sync(self, actor: str = "", backup: bool = True) -> int:
         headers = {h.file: h for h in self.headers()}
         entries = self._journal_entries(list(headers.values()))
         index_path = self.root / INDEX_FILENAME
+        if backup:
+            self._backup_index_to_trash(actor)
         existing = index_path.read_text("utf-8") if index_path.is_file() else ""
         lines: list[str] = []
         listed: set[str] = set()
