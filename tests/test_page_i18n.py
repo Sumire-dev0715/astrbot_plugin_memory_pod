@@ -197,3 +197,81 @@ def test_key_labels_the_page_relies_on_are_short_enough_for_buttons_and_tabs():
         "newMemory",
     ):
         assert len(en[key]) <= 24, (key, en[key])
+
+
+# ------------------------------------------------------------ 语言回退（用 node 跑 i18n.js）
+
+I18N_RUNNER = r"""
+const fs = require("fs");
+const vm = require("vm");
+const win = {};
+vm.runInNewContext(fs.readFileSync(process.argv[1], "utf-8"), { window: win });
+const MP = win.MemoryPod;
+const messages = JSON.parse(fs.readFileSync(0, "utf-8"));
+
+// 和 AstrBot 的 plugin_page_bridge.js 一样：当前语言 → zh-CN → en-US → 缺省值
+function makeBridge(locale) {
+  return {
+    getLocale: () => locale,
+    getI18n: () => messages,
+    t(key, fallback) {
+      for (const loc of [locale, "zh-CN", "en-US"]) {
+        const value = key.split(".").reduce((cur, part) => (cur && typeof cur === "object" ? cur[part] : undefined), messages[loc]);
+        if (value !== undefined && value !== null) return String(value);
+      }
+      return fallback || "";
+    },
+  };
+}
+const out = {};
+for (const locale of ["zh-CN", "zh-TW", "en-US", "en-GB", "ru-RU", "ja-JP"]) {
+  MP.i18n.setBridge(makeBridge(locale));
+  out[locale] = {
+    refresh: MP.t("refresh"),
+    minutes: MP.t("minutesAgo", { n: 5 }),
+    unknown: MP.t("noSuchKeyAnywhere"),
+  };
+}
+MP.i18n.setBridge(null);
+out.noBridge = { refresh: MP.t("refresh"), minutes: MP.t("minutesAgo", { n: 2 }) };
+process.stdout.write(JSON.stringify(out));
+"""
+
+
+def test_text_falls_back_to_english_for_other_languages_and_chinese_for_chinese_ones():
+    import shutil
+    import subprocess
+
+    import pytest
+
+    if shutil.which("node") is None:
+        pytest.skip("没有 node")
+    messages = {
+        "zh-CN": {"pages": {"memory": _pages("zh-CN")}},
+        "en-US": {"pages": {"memory": _pages("en-US")}},
+    }
+    result = subprocess.run(
+        ["node", "-e", I18N_RUNNER, str(PAGE / "i18n.js")],
+        input=json.dumps(messages),
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    got = json.loads(result.stdout)
+    zh, en = _pages("zh-CN"), _pages("en-US")
+    # 插件带了的语言：直接用
+    assert got["zh-CN"]["refresh"] == zh["refresh"]
+    assert got["en-US"]["refresh"] == en["refresh"]
+    assert got["zh-CN"]["minutes"] == "5 分钟前"
+    assert got["en-US"]["minutes"] == "5 min ago"
+    # 繁体中文等插件没带的中文：退到简体中文
+    assert got["zh-TW"]["refresh"] == zh["refresh"]
+    # 俄语、日语、英式英语等没带的非中文语言：退到英文，而不是桥接默认的简体中文
+    for locale in ("en-GB", "ru-RU", "ja-JP"):
+        assert got[locale]["refresh"] == en["refresh"], locale
+        assert got[locale]["minutes"] == "5 min ago", locale
+    # 任何地方都没有的键：显示键名本身，不空着
+    assert got["en-US"]["unknown"] == "noSuchKeyAnywhere"
+    # 没有桥接（页面没在 AstrBot 里打开）：用页面里的简体中文缺省值
+    assert got["noBridge"] == {"refresh": zh["refresh"], "minutes": "2 分钟前"}

@@ -566,13 +566,34 @@
     bridge = value;
   }
 
-  /** 取文案：先问桥接（当前语言 → zh-CN → en-US），都没有就用这里的简体中文 */
+  function isChinese(loc) {
+    return /^zh/i.test(String(loc || ""));
+  }
+
+  /** 某个语言在 pages.memory 下的文案表；插件没带这个语言就返回 null */
+  function pageMessages(loc) {
+    try {
+      const all = bridge && typeof bridge.getI18n === "function" ? bridge.getI18n() : null;
+      const node = all && all[loc] && all[loc].pages && all[loc].pages.memory;
+      return node && typeof node === "object" ? node : null;
+    } catch (err) {
+      return null;
+    }
+  }
+
+  /**
+   * 取文案：先问桥接（当前语言 → zh-CN → en-US），都没有就用这里的简体中文。
+   * 当前语言插件没带文案、又不是中文（比如俄语界面）时，桥接会退到简体中文，
+   * 这里改成退到英文。
+   */
   function t(key, vars) {
     const fallback = hasOwn(ZH, key) ? ZH[key] : key;
     let text = fallback;
     if (bridge && typeof bridge.t === "function") {
       try {
-        text = bridge.t(PREFIX + key, fallback);
+        const loc = locale();
+        const english = !isChinese(loc) && !pageMessages(loc) ? pageMessages("en-US") : null;
+        text = english && hasOwn(english, key) ? english[key] : bridge.t(PREFIX + key, fallback);
       } catch (err) {
         text = fallback;
       }
