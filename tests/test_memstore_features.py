@@ -225,3 +225,35 @@ def test_unknown_type_is_treated_as_note(tmp_path):
     )
     header = next(h for h in scope.headers() if h.file == "user-123.md")
     assert header.type == "person"
+
+
+def test_strip_frontmatter_type_keeps_block_scalar_content():
+    """只删 type 键行：description 块标量里以 type: 开头的正文不能动。"""
+    content = (
+        "---\n"
+        "name: notice\n"
+        "description: |\n"
+        "  type: 这是描述正文的一部分\n"
+        "  第二行\n"
+        "metadata:\n"
+        "  type: note\n"
+        "  signature: 管理员\n"
+        "---\n\n"
+        "正文\n"
+    )
+    cleaned = pkg_memstore.strip_frontmatter_type(content)
+    assert "  type: note\n" not in cleaned
+    assert "type: 这是描述正文的一部分" in cleaned
+    doc = pkg_memstore.parse_memory(cleaned)
+    assert doc.type == ""
+    assert doc.description == "type: 这是描述正文的一部分 第二行"
+    assert doc.signature == "管理员"
+
+    # 顶层 type 也去掉；CRLF 原样保留
+    crlf = "---\r\nname: x\r\ntype: note\r\nmetadata:\r\n  type: reference\r\n---\r\n\r\n正文\r\n"
+    cleaned = pkg_memstore.strip_frontmatter_type(crlf)
+    assert "type:" not in cleaned
+    assert "\r\n" in cleaned and "\n" not in cleaned.replace("\r\n", "")
+    # 没有 frontmatter / 没有 type 行时原样返回
+    plain = "没有 frontmatter 的正文"
+    assert pkg_memstore.strip_frontmatter_type(plain) == plain

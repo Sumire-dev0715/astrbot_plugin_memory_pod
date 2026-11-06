@@ -262,6 +262,40 @@ def test_board_raw_save_cannot_bypass_signature(tmp_path):
     assert "signature" in result["message"]
 
 
+def test_board_raw_save_keeps_type_lines_inside_block_scalar(tmp_path):
+    """留言板原文里的 description 块标量不能因为里面有 type: 行被截掉。"""
+    plugin, dashboard = setup(tmp_path)
+    content = (
+        "---\n"
+        "name: notice\n"
+        "description: |\n"
+        "  type: 描述正文的一部分\n"
+        "  第二行\n"
+        "metadata:\n"
+        "  type: note\n"
+        "  signature: 管理员\n"
+        "---\n\n"
+        "11 月 11 日 teto 入职\n"
+    )
+    body(
+        {
+            "scope": "board",
+            "key": "",
+            "file": "notice.md",
+            "mode": "raw",
+            "signature": "管理员",
+            "content": content,
+        }
+    )
+    result = route(dashboard, "file_save")
+    assert result["status"] == "ok", result
+    saved = call(plugin._store.board_scope().read("notice.md"))
+    doc = pkg_memstore.parse_memory(saved)
+    assert doc.type == ""
+    assert doc.description == "type: 描述正文的一部分 第二行"
+    assert "  type: note\n" not in saved
+
+
 def test_person_profile_can_be_edited_on_management_page(tmp_path):
     plugin, dashboard = setup(tmp_path)
     notebook = plugin._store.notebook_scope("Bot-A")

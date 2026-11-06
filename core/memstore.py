@@ -3053,21 +3053,41 @@ def person_type_problem(
     )
 
 
-# 留言板没有类型：raw 保存时把 frontmatter 里残留的 type 行去掉
-_FRONTMATTER_TYPE_LINE_RE = re.compile(
-    r"^[ \t]*type[ \t]*:[^\n]*(?:\n|$)", re.M
-)
-
-
 def strip_frontmatter_type(content: str) -> str:
-    """去掉 frontmatter 里的 type 行；没有 frontmatter 或没有 type 行时原样返回。"""
+    """去掉 frontmatter 里的 type 键（顶层或 metadata 下一级）；没有时原样返回。
+
+    只删真正的键行：description 这类块标量（`description: |`）里缩进更深
+    的正文即使以 `type:` 开头也原样保留，否则保存留言板原文时会静默
+    丢掉描述的一部分。
+    """
     match = _FRONTMATTER_RE.match(content or "")
     if match is None:
         return content
     inner = match.group(1)
-    cleaned = _FRONTMATTER_TYPE_LINE_RE.sub("", inner)
+    kept: list[str] = []
+    block_indent: int | None = None
+    for line in inner.splitlines(keepends=True):
+        stripped = line.strip()
+        indent = _indent(line)
+        if block_indent is not None:
+            # 块标量的续行：空行或缩进更深，全部原样保留
+            if not stripped or indent > block_indent:
+                kept.append(line)
+                continue
+            block_indent = None
+        key, sep, value = line.partition(":")
+        if sep and key.strip().lower() == "type":
+            continue
+        if sep and _BLOCK_SCALAR_RE.match(value.strip()):
+            block_indent = indent
+        kept.append(line)
+    cleaned = "".join(kept)
     if cleaned == inner:
         return content
+    # inner 不含闭合 --- 前的那个 \n；最后一行被删掉时，上一行的换行会
+    # 与闭合行的 \n 叠成空行，这里去掉多出来的那一个 \n（CRLF 保留 \r）。
+    if cleaned.endswith("\n"):
+        cleaned = cleaned[:-1]
     return content[: match.start(1)] + cleaned + content[match.end(1):]
 
 
