@@ -1,6 +1,7 @@
 """3.8 配置项：只保留仍在用的键，旧作用域与后台整理配置不再出现。"""
 
 import json
+import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -62,7 +63,8 @@ def test_reminder_turns_config_defaults_to_10_and_can_be_disabled():
 
 def test_metadata_version_and_no_removed_features():
     text = (ROOT / "metadata.yaml").read_text("utf-8")
-    assert "version: v2.0.0-dev.3" in text
+    # 只锁大版本：每次部署都会改 dev 号，写死具体版本会让部署后的测试变红
+    assert re.search(r"^version: v2\.\d+\.\d+", text, re.M)
     assert "共享人物空间" not in text
     assert "memory_note" not in text
     assert "后台整理写入" not in text
