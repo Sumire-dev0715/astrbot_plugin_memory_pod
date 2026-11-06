@@ -1012,7 +1012,11 @@
     return confirmAndPost({
       confirm: {
         title: t("forgetTitle", { file: name }),
-        points: [t("forgetPoint"), data.forgettingEnabled ? t("forgetAutoRestore") : t("forgetManualRestore")],
+        points: [
+          t("forgetPoint"),
+          // 自动恢复说的是"这个人再出现 / 机器人去读"，留言板的告示不是这样：只能手动恢复
+          data.forgettingEnabled && r.scope !== "board" ? t("forgetAutoRestore") : t("forgetManualRestore"),
+        ],
         confirmLabel: t("forget"),
       },
       endpoint: "file/forget",
@@ -1255,7 +1259,9 @@
         h("button", { type: "button", class: "btn btn-primary btn-sm", "data-fk": "edit", onclick: function () { openPane(view, { kind: "edit", file: name }, { fresh: true }); } }, icon("edit"), t("edit")),
         board
           ? h("button", { type: "button", class: "btn btn-sm", onclick: action(function () { return renewNotice(r, name, d).then(function (ok) { if (ok) { load(); } }); }) }, icon("calendar"), t("renew"))
-          : h("button", { type: "button", class: "btn btn-sm", onclick: action(function () { return forgetFile(view, r, name); }) }, icon("archive"), t("forget")),
+          : null,
+        // 留言板的告示也能手动遗忘（旧页面就可以）：撤下但保留文件，在「已遗忘」里恢复
+        h("button", { type: "button", class: "btn btn-sm", onclick: action(function () { return forgetFile(view, r, name); }) }, icon("archive"), t("forget")),
         h("button", { type: "button", class: "btn btn-sm btn-danger-ghost", onclick: action(function () { return deleteFile(view, r, name); }) }, icon("trash"), t("delete")),
       ];
     }

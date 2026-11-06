@@ -494,3 +494,15 @@ def test_narrow_layout_rules_exist():
     assert '.split[data-show="list"] .pane-detail' in css and ".only-narrow" in css
     assert ".meta-item {\n  display: grid;\n  align-content: start;" in css
     assert "justify-self: start" in css.split(".back-link {", 1)[1].split("}", 1)[0]
+
+
+def test_every_file_detail_offers_edit_forget_and_delete_including_board_notices():
+    """旧页面里留言板的告示也能遗忘；新页面的文件详情对三层都保留「遗忘」。"""
+    memory = _page("memory.js")
+    actions = _between(memory, "function headActions(d) {", "function paint() {")
+    assert 'openPane(view, { kind: "edit", file: name }' in actions
+    assert "forgetFile(view, r, name)" in actions
+    assert "deleteFile(view, r, name)" in actions
+    # 续期只属于留言板；遗忘不再按作用域区分
+    assert actions.index("renewNotice(r, name, d)") < actions.index("forgetFile(view, r, name)")
+    assert "board\n          ? h(" in actions and ": null," in actions
