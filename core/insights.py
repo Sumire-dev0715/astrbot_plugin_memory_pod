@@ -174,12 +174,20 @@ def _scan_headings(content: str) -> tuple[list[_Line], list[_Heading]]:
     return lines, headings
 
 
+def _heading_listing(headings: list[_Heading]) -> str:
+    """报错里列出的全部小节标题（PLAN 3.4）。"""
+    if not headings:
+        return "（文件里没有小节标题）"
+    return "\n".join(item.text for item in headings)
+
+
 def _locate_section(
     content: str, heading: str
 ) -> tuple[list[_Line], int, int, str]:
     """定位标题行与本节结束行；出错时返回 (行表, -1, -1, 错误)。
 
-    错误信息会进管理页的整理结果，不能把文件里的其他小节标题带出去。
+    标题不存在或重复时报错，并列出文件里的所有标题，方便模型或管理员
+    改成准确的标题行（PLAN 3.4）。
     """
     lines, headings = _scan_headings(content)
     target = (heading or "").replace("\r\n", "\n").strip()
@@ -189,11 +197,15 @@ def _locate_section(
         )
     matches = [item for item in headings if item.text == target]
     if not matches:
-        return lines, -1, -1, "没有找到这个标题的小节。"
+        return lines, -1, -1, (
+            "没有找到这个标题的小节。文件里的标题：\n"
+            + _heading_listing(headings)
+        )
     if len(matches) > 1:
         return lines, -1, -1, (
             f"这个标题在文件里出现了 {len(matches)} 处，"
-            "无法确定操作哪一节；请先整理重复的标题。"
+            "无法确定操作哪一节；请先整理重复的标题。文件里的标题：\n"
+            + _heading_listing(headings)
         )
     start = matches[0]
     end = len(lines)

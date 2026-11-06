@@ -85,20 +85,21 @@ def test_replace_section_can_clear_body():
     assert updated == "## 甲\n\n## 乙\n乙正文\n"
 
 
-def test_replace_section_errors_do_not_echo_other_headings():
-    """报错会进管理页，不能把文件里的其他小节标题带出去。"""
+def test_replace_section_errors_list_all_headings():
+    """标题不存在或重复时报错，并列出文件里的全部标题（PLAN 3.4）。"""
     content = "## 甲\n一\n\n### 甲子\n二\n\n## 乙\n三\n"
     missing, error = insights.replace_section(content, "## 丙", "新")
     assert missing == ""
     assert "没有找到" in error
-    assert "## 甲" not in error and "### 甲子" not in error and "## 乙" not in error
+    for heading in ("## 甲", "### 甲子", "## 乙"):
+        assert heading in error
     assert "## 丙" not in error
 
     duplicate = "## 甲\n一\n\n## 甲\n二\n"
     missing, error = insights.replace_section(duplicate, "## 甲", "新")
     assert missing == ""
     assert "出现了 2 处" in error
-    assert "## 甲" not in error
+    assert error.count("## 甲") == 2  # 标题清单里两个同名标题各一行
 
 
 def test_replace_section_rejects_non_heading_old_text():
@@ -166,7 +167,9 @@ def test_section_scan_skips_frontmatter_and_fenced_code():
     # frontmatter 里的 # 行不能当标题：既不能删掉 frontmatter，也不能误判重复
     missing, error = insights.replace_section(content, "# 这不是标题", "新")
     assert missing == ""
-    assert "没有找到" in error and "# 用户档案" not in error
+    assert "没有找到" in error
+    # frontmatter 里的 # 行不是标题；报错列出的只有正文里的真标题
+    assert "# 这不是标题" not in error and "# 用户档案" in error
 
     updated, error = insights.replace_section(content, "## 代码", "新代码")
     assert error == ""
