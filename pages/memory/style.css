@@ -688,10 +688,14 @@ select.input {
   color: var(--accent);
 }
 
+/* 数量比标签淡一点，但用明确的颜色而不是透明度：透明度会把对比度拉到 4.5:1 以下 */
 .chip-count {
-  color: inherit;
-  opacity: 0.8;
+  color: var(--text-3);
   font-variant-numeric: tabular-nums;
+}
+
+.chip[aria-pressed="true"] .chip-count {
+  color: inherit;
 }
 
 .chips-quick {
@@ -2483,8 +2487,16 @@ select.input {
   gap: var(--sp-2);
 }
 
-.run.is-undone {
-  opacity: 0.7;
+/* 已撤销的整理记录：用次要文字色和中性的标签表示"已失效"。
+ * 不用透明度淡化整块：文字和标签会被拉到 4.5:1 以下 */
+.run.is-undone .run-head strong,
+.run.is-undone .run-ops .mono {
+  color: var(--text-2);
+}
+
+.run.is-undone .run-ops .tag {
+  background: var(--surface-2);
+  color: var(--text-3);
 }
 
 .run-head {
