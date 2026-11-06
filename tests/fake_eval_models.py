@@ -217,6 +217,9 @@ class GoodEvalModel:
         notes = self._notes_action(state, body)
         if notes is not None:
             return notes
+        admin_rule = self._admin_rule_action(state, body)
+        if admin_rule is not None:
+            return admin_rule
         read = self._read_action(state, body)
         if read is not None:
             return read
@@ -263,6 +266,10 @@ class GoodEvalModel:
             return state.recall_text
         if "拿不准" in body or "该记在哪" in body or "放哪" in body:
             parts.append("这件事要放在这段对话的悄悄话里，还是记进小本本？")
+        if "早上好" in body and state.sender_id == "10000003":
+            rule = state.last_result("memory_read")
+            if "老大" in rule:
+                return "老大，早上好！今天也先夸您一句。"
         if state.called("memory_write") or state.called("memory_edit"):
             if not parts:
                 parts.append("记下了。")
@@ -490,8 +497,13 @@ class GoodEvalModel:
         if not self._explicit_remember(body):
             return None
         if "以后你要" in body:
-            # 已经由 _directive_action 按 feedback 规则处理
-            return None
+            # 整句要求交给 _directive_action 按 feedback 规则处理；同一轮里
+            # “另外记住”的普通事实仍要写进小本本。
+            _before, _sep, rest = body.partition("另外记住")
+            rest = rest.lstrip("：: ").strip()
+            if not rest:
+                return None
+            body = rest
         if self._sensitive_scope(body):
             # 隐私内容已经由 _sensitive_action 写进悄悄话，不再写小本本
             return None
@@ -572,6 +584,17 @@ class GoodEvalModel:
             mode="append",
             new_text=body,
         )
+
+    def _admin_rule_action(self, state: _TurnState, body: str) -> ModelReply | None:
+        """管理员换会话后，先读小本本里的要求，再按它称呼“老大”。"""
+        if "早上好" not in body or state.sender_id != "10000003":
+            return None
+        if state.called("memory_read"):
+            return None
+        for file, description in state.index_entries():
+            if file == "rule.md" or "对我的要求" in description:
+                return _call(state, "memory_read", scope="notebook", file=file)
+        return None
 
     def _read_action(self, state: _TurnState, body: str) -> ModelReply | None:
         if not self._is_question(body):
