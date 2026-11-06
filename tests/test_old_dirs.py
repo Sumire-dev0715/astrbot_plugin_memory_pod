@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from support import FakeEvent, make_plugin, pkg_memstore, run, thing
 
+from test_web_api import query, raw, route, setup
+
 
 def _make_old_dirs(tmp_path):
     marker_dirs = [
@@ -42,3 +44,29 @@ def test_plugin_scopes_and_opening_ignore_old_dirs(tmp_path):
     assert opening is None or "旧目录里的内容" not in opening
     board = plugin._store.board_scope()
     assert board.list_files() == []
+
+
+def test_management_routes_ignore_old_dirs(tmp_path):
+    markers = _make_old_dirs(tmp_path)
+    _, dashboard = setup(tmp_path)
+
+    overview = raw(route(dashboard, "overview"))
+    assert overview["board"]["fileCount"] == 0
+    assert overview["notebooks"] == [] and overview["whispers"] == []
+
+    query(scope="board")
+    detail = raw(route(dashboard, "scope_detail"))
+    assert detail["files"] == [] and detail["forgotten"] == []
+    assert detail["trashCount"] == 0
+
+    query(scope="notebook", key="Bot-A")
+    detail = raw(route(dashboard, "scope_detail"))
+    assert detail["files"] == [] and detail["forgotten"] == []
+
+    migrate = raw(route(dashboard, "migrate_info"))
+    assert migrate["platforms"] == []
+    assert migrate["adapters"] == ["Bot-A"]
+
+    # 管理页只看三层记忆目录，旧目录原样不动
+    for directory in markers:
+        assert (directory / "old.md").read_text("utf-8") == "旧目录里的内容"
