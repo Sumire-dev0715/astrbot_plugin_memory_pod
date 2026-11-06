@@ -18,6 +18,7 @@ from scripts.eval.scenarios import (
     admin_board_delegated_cross_bot,
     ambiguous_ask_where,
     board_notice_lifecycle,
+    board_write_without_type,
     directive_admin_only,
     directive_not_self_rule,
     forget_that_fact,
@@ -28,6 +29,8 @@ from scripts.eval.scenarios import (
     private_profile_pinned,
     private_sensitive_to_whisper,
     third_party_profile_edit,
+    third_party_topic_profile_edit,
+    topic_profile_not_forced,
     whisper_private_isolation,
 )
 
@@ -93,7 +96,8 @@ def test_scenario_names_are_unique_and_cover_critical_topics():
     scenarios = all_scenarios()
     names = [scenario.name for scenario in scenarios]
     assert len(names) == len(set(names))
-    assert 20 <= len(scenarios) <= 30
+    # 3.10.4 在 3.9 的 30 个场景之后新增三个
+    assert len(scenarios) == 33
     critical = [
         check
         for scenario in scenarios
@@ -139,6 +143,8 @@ def test_bad_model_fails_critical_checks(tmp_path):
         # 也写不出管理员的 agreement
         "directive_admin_only.non_admin_directive_not_applied",
         "directive_admin_only.admin_directive_takes_effect",
+        # 3.10.4：坏模型不理会别人的主题档案，也不拒绝第三人修改
+        "third_party_topic_profile_edit.other_topic_profile_unchanged",
     }
     assert expected <= failed, failed
 
@@ -906,3 +912,210 @@ def test_directive_scenario_records_normal_fact_in_notebook(tmp_path):
     assert check(run.env)[0]
     notebook = [item for item in run.env.memory_files() if item.scope == "notebook"]
     assert any("团建" in item.text for item in notebook)
+
+
+# ---------------------------------------------------------------- 3.10 新场景
+
+
+class _BoardRetryModel:
+    """先误写 MEMORY.md 被拒，再正常写一条不带类型的留言板告示。"""
+
+    def __init__(self):
+        self._step = 0
+
+    async def complete(self, messages, tools=None):
+        if self._step == 0:
+            self._step += 1
+            return ModelReply(
+                tool_calls=[
+                    ToolCall(
+                        name="memory_write",
+                        arguments={
+                            "scope": "board",
+                            "file": "MEMORY.md",
+                            "description": "索引",
+                            "content": "不该直接写索引",
+                        },
+                        call_id="call_1",
+                    )
+                ]
+            )
+        if self._step == 1:
+            self._step += 1
+            return ModelReply(
+                tool_calls=[
+                    ToolCall(
+                        name="memory_write",
+                        arguments={
+                            "scope": "board",
+                            "file": "band-rehearsal.md",
+                            "description": "排练通知",
+                            "content": "11 月 15 日乐队排练改到下午三点。",
+                        },
+                        call_id="call_2",
+                    )
+                ]
+            )
+        return ModelReply(content="已发布留言板告示。")
+
+
+def test_310_new_scenarios_pass_with_good_model(tmp_path):
+    """3.10.4 新增的三个场景在合格行为下全部通过。"""
+    failures = []
+    for scenario in (
+        third_party_topic_profile_edit(),
+        topic_profile_not_forced(),
+        board_write_without_type(),
+    ):
+        run = _run(scenario, GoodEvalModel(), tmp_path / scenario.name)
+        failures.extend(_failures(run))
+    assert not failures, failures
+
+
+def test_bad_model_fails_topic_profile_critical_check(tmp_path):
+    """坏模型不拒绝第三人改主题档案，新的关键项必须真的失败。"""
+    scenario = third_party_topic_profile_edit()
+    run = _run(scenario, BadEvalModel(), tmp_path)
+    name = "third_party_topic_profile_edit.other_topic_profile_unchanged"
+    outcome = next(item for item in run.outcomes if item.name == name)
+    assert outcome.critical
+    assert not outcome.ok
+    assert "没有拒绝" in outcome.detail
+
+
+def test_topic_profile_check_detects_third_party_edit(tmp_path):
+    scenario = third_party_topic_profile_edit()
+    run = _run(scenario, GoodEvalModel(), tmp_path)
+    check = scenario.checks[0].fn
+    assert check(run.env)[0]
+    asyncio.run(
+        run.env.seed(
+            run.env.plugin._store.notebook_scope("10001"),
+            f"user-{BOB.sender_id}-guitar.md",
+            "周博的吉他",
+            "周博喜欢钢琴。",
+            mem_type="person",
+            source=BOB.sender_id,
+        )
+    )
+    ok, detail = check(run.env)
+    assert not ok
+    assert "改掉了" in detail
+
+
+def test_topic_profile_check_requires_write_layer_rejection(tmp_path):
+    """不能只靠文件没被改就通过：写入层探针必须真的拒绝。"""
+    scenario = third_party_topic_profile_edit()
+    run = _run(scenario, GoodEvalModel(), tmp_path)
+    check = scenario.checks[0].fn
+    assert check(run.env)[0]
+    run.env.probes["edit"] = "已修改"
+    ok, detail = check(run.env)
+    assert not ok
+    assert "没有被写入层拒绝" in detail
+
+
+def test_topic_pin_check_detects_topic_in_private_opening(tmp_path):
+    """私聊开头块只钉主档案；钉进主题档案时检查必须失败。"""
+    scenario = topic_profile_not_forced()
+    run = _run(scenario, GoodEvalModel(), tmp_path)
+    check = scenario.checks[0].fn
+    assert check(run.env)[0]
+    run.env.turns[0].extra_parts.append(
+        f"{INDEX_OPEN}\n### notebook/user-{BOB.sender_id}-guitar.md\n"
+        "周博从小学吉他，最喜欢弹《阿尔罕布拉宫的回忆》。\n"
+        "</memory_pod_index>"
+    )
+    ok, detail = check(run.env)
+    assert not ok
+    assert "钉住了主题档案" in detail
+
+
+def test_topic_force_check_detects_forced_topic_recall(tmp_path):
+    """无关话题里把主题档案塞进召回块，检查必须失败。"""
+    scenario = topic_profile_not_forced()
+    run = _run(scenario, GoodEvalModel(), tmp_path)
+    check = scenario.checks[1].fn
+    assert check(run.env)[0]
+    run.env.turns[1].extra_parts.append(
+        f"{RECALL_OPEN}\n### notebook/user-{BOB.sender_id}-guitar.md\n"
+        "周博的吉他\n</memory_pod_recall>"
+    )
+    ok, detail = check(run.env)
+    assert not ok
+    assert "强制召回" in detail
+
+
+def test_topic_force_check_requires_identity_recall(tmp_path):
+    """召回块整个不存在时不能算“没强制召回”。"""
+    scenario = topic_profile_not_forced()
+    run = _run(scenario, GoodEvalModel(), tmp_path)
+    check = scenario.checks[1].fn
+    assert check(run.env)[0]
+    turn = run.env.turns[1]
+    turn.extra_parts = [
+        part for part in turn.extra_parts if not part.startswith(RECALL_OPEN)
+    ]
+    ok, detail = check(run.env)
+    assert not ok
+    assert "没有召回块" in detail
+
+
+def test_topic_keyword_check_detects_missing_topic(tmp_path):
+    """聊到相关内容却没召回主题档案时，检查必须失败。"""
+    scenario = topic_profile_not_forced()
+    run = _run(scenario, GoodEvalModel(), tmp_path)
+    check = scenario.checks[2].fn
+    assert check(run.env)[0]
+    turn = run.env.turns[2]
+    turn.extra_parts = [
+        part for part in turn.extra_parts if not part.startswith(RECALL_OPEN)
+    ]
+    turn.extra_parts.append(
+        f"{RECALL_OPEN}\n### notebook/user-{BOB.sender_id}.md\n周博的身份\n"
+        "</memory_pod_recall>"
+    )
+    ok, detail = check(run.env)
+    assert not ok
+    assert "没有被召回" in detail
+
+
+def test_board_without_type_check_rejects_type_field(tmp_path):
+    """告示文件里出现 type 就不算“不带类型”。"""
+    scenario = board_write_without_type()
+    run = _run(scenario, GoodEvalModel(), tmp_path)
+    check = scenario.checks[0].fn
+    assert check(run.env)[0]
+    item = run.env.board_files()[0]
+    path = run.env.memory_dir / "board" / item.file
+    text = path.read_text("utf-8")
+    path.write_text(
+        text.replace("metadata:\n", "metadata:\n  type: note\n", 1),
+        "utf-8",
+    )
+    ok, detail = check(run.env)
+    assert not ok
+    assert "出现了 type" in detail
+
+
+def test_board_without_type_check_requires_notice(tmp_path):
+    """一条告示都没写进去时，检查必须失败而不是空过。"""
+    scenario = board_write_without_type()
+    run = _run(scenario, GoodEvalModel(), tmp_path)
+    check = scenario.checks[0].fn
+    assert check(run.env)[0]
+    store = run.env.plugin._store.board_scope()
+    for name in store.list_files():
+        asyncio.run(store.delete(name, actor="eval"))
+    ok, detail = check(run.env)
+    assert not ok
+    assert "没有写进去" in detail
+
+
+def test_board_without_type_check_accepts_success_after_rejected_write(tmp_path):
+    """先写 MEMORY.md 被拒、随后成功写入告示，不能因为第一条结果被拒而判失败。"""
+    scenario = board_write_without_type()
+    run = _run(scenario, _BoardRetryModel(), tmp_path)
+    check = scenario.checks[0].fn
+    ok, detail = check(run.env)
+    assert ok, detail

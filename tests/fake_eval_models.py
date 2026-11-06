@@ -25,6 +25,7 @@ REMINDER_OPEN = "<memory_pod_reminder>"
 SENDER_PREFIX = "[发送者："
 DATE_RE = re.compile(r"(\d{1,2}\s*月\s*\d{1,2}\s*日)")
 ID_RE = re.compile(r"(?<!\d)(\d{8})(?!\d)")
+PROFILE_FILE_RE = re.compile(r"user-\d+(?:-[a-z0-9]+)*\.md")
 INDEX_LINK_RE = re.compile(r"\]\(([^)]+\.md)\)\s*—\s*(.*)")
 INDEX_PLAIN_RE = re.compile(r"^\s*-\s+([^\s—]+\.md)\s+—\s*(.*)")
 
@@ -376,7 +377,10 @@ class GoodEvalModel:
         if match is None or match.group(1) == state.sender_id:
             return None
         target = match.group(1)
-        file = f"user-{target}.md"
+        # 用户点名主题档案（user-<ID>-<主题>.md）时按点名的文件操作；
+        # 只说“档案”时仍按主档案处理。
+        explicit = PROFILE_FILE_RE.search(body)
+        file = explicit.group(0) if explicit else f"user-{target}.md"
         if any(word in body for word in ("删掉", "删除", "忘掉")) and not state.called_for(
             "memory_delete", scope="notebook", file=file
         ):
