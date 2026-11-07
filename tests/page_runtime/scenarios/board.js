@@ -66,6 +66,7 @@ const { boot, assert, until, sleep, section, summary } = require("../harness.js"
   section("A4 续期");
   click(find(".notice-card", "国庆活动"));
   await until(() => /国庆活动/.test(text($("[data-detail-heading]"))), "打开过期告示");
+  await until(() => $(".pane-detail .md"), "详情读完");
   assert(/已过期/.test(text($(".pane-detail"))), "详情里有已过期提示: " + text($(".pane-detail")).slice(0, 200) + " | calls=" + p2.calls.slice(-4).map((c) => c.endpoint));
   click(find(".detail-actions button", "续期"));
   await until(() => $(".overlay input[type=date]"), "续期对话框");

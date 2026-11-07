@@ -35,6 +35,14 @@ const { boot, assert, until, sleep, section, summary } = require("../harness.js"
     });
   }
   scan("board", $(".shell"));
+  // 发布表单：文件名这一项是这次补回来的；提示里不能有全角标点
+  click(find(".list-head button", "Post notice"));
+  await until(() => $(".editor input.mono"), "发布表单的文件名输入框");
+  const fileField = $$(".editor .field").find((f) => /File name/.test(text(f)));
+  assert(fileField, "发布表单里有「File name」一项");
+  assert(!/[\u3000-\u303f\uff01-\uff5e]/.test(text(fileField)), "文件名一项没有全角标点: " + text(fileField).slice(0, 120));
+  click(find(".detail-head button", "Cancel"));
+  await until(() => !$(".editor"), "离开发布表单");
   click(find(".notice-card", "欢迎新同学"));
   await until(() => $(".pane-detail .md"), "detail");
   scan("board-detail", $(".pane-detail"));
@@ -43,7 +51,21 @@ const { boot, assert, until, sleep, section, summary } = require("../harness.js"
   await until(() => $(".editor textarea"), "editor");
   scan("editor", $(".pane-detail"));
   console.log("  编辑器:", text($(".pane-detail")).slice(0, 260));
+  // 保存前的对比：字段行（「File name: …」「Description: …」）按界面语言拼，用半角冒号
+  const descField = $$(".editor .field").find((f) => /Description/.test(text(f)));
+  input(descField.querySelector("input"), "Edited in English");
+  click(find(".detail-head button", "Save"));
+  await until(() => $(".overlay .diff"), "保存前的改动对比");
+  const diffText = text($(".overlay"));
+  assert(/Description: Edited in English/.test(diffText), "对比里的字段行用英文冒号: " + diffText.slice(0, 240));
+  assert(!/[\u3000-\u303f\uff01-\uff5e]/.test(diffText), "对比里没有全角标点: " + diffText.slice(0, 240));
+  click(find(".overlay button", "Cancel"));
+  await until(() => !$(".overlay"), "取消对比");
   click(find(".detail-head button", "Cancel"));
+  // 改过描述：离开编辑器要确认放弃
+  await until(() => find(".overlay button", "Discard"), "放弃未保存修改的确认框");
+  click(find(".overlay button", "Discard"));
+  await until(() => !$(".overlay"), "放弃后离开编辑器");
   click(find(".nav-item", "Notebook"));
   await sleep(100);
   scan("notebook", $(".shell"));
@@ -75,6 +97,10 @@ const { boot, assert, until, sleep, section, summary } = require("../harness.js"
     await sleep(80);
     scan("transfer-" + tab, $(".pane-detail"));
   }
+  // 平台列表：「aiocqhttp (1 conversations · Notebook), …」用半角括号和逗号
+  await sleep(300);
+  const known = $$(".pane-detail .hint").map((el) => text(el)).find((x) => /Platforms that have memories/.test(x)) || "";
+  assert(known && !/[\u3000-\u303f\uff01-\uff5e]/.test(known), "平台列表用半角括号和逗号: " + known.slice(0, 160));
   console.log("  漏掉翻译的外壳文字:", leaks);
   assert(leaks.length === 0, "英文界面里没有漏译的中文外壳文字");
   console.log("  fallbackHits (JSON 里缺的键):", [...p.fallbackHits]);

@@ -392,12 +392,15 @@ def test_board_editor_and_publish_form_have_no_type_option():
     assert 't("fieldType")' in _between(editor, "function typeField() {", "function formFields() {")
     # 保存时留言板的类型一律给空
     assert 'type: board ? "" : cur.type' in editor
-    # 发布告示表单只有署名、标题、到期日与正文
+    # 发布告示表单没有类型；字段是署名、到期日、标题、可选的自己起的文件名和正文
     publish = _between(memory, "function PublishForm() {", "/** 续期")
     assert "fieldType" not in publish
     assert "cur.type" not in publish
     payload = publish.split('apiPost("board/publish"', 1)[1].split("});", 1)[0]
     assert "type:" not in payload
+    # 旧页面在留言板也能自己起文件名；留空时由服务端按时间生成
+    assert 't("publishFile")' in publish and "cur.file.trim()" in publish
+    assert "file: cur.file.trim()" in payload
     # 告示卡片与详情标题不显示类型标签
     card = _between(memory, "function noticeCard(row) {", "function boardRows(")
     assert "typeTag" not in card
@@ -535,6 +538,32 @@ def test_narrow_layout_rules_exist():
     assert '.split[data-show="list"] .pane-detail' in css and ".only-narrow" in css
     assert ".meta-item {\n  display: grid;\n  align-content: start;" in css
     assert "justify-self: start" in css.split(".back-link {", 1)[1].split("}", 1)[0]
+
+
+def test_ui_strings_do_not_hard_code_full_width_punctuation():
+    """英文界面里的冒号、括号、分隔符要跟着语言走：写死的全角标点会在英文里露出来。
+
+    后端数据里的固定字符串（比如搜索只命中文件头时的片段占位）不属于界面文字，单独放行。
+    """
+    fullwidth = re.compile(r"[\u3001\u3002\uff01\uff0c\uff1a\uff1b\uff08\uff09\u201c\u201d]")
+    allowed = "（正文匹配）"  # web_api.py 里搜索结果的占位，只用于比较
+    offenders = []
+    for name, source in _all_js().items():
+        if name == "i18n.js":
+            continue
+        for number, line in enumerate(_strip_comments(source).splitlines(), 1):
+            if allowed in line:
+                continue
+            if fullwidth.search(line):
+                offenders.append((name, number, line.strip()[:80]))
+    assert not offenders, offenders
+
+
+def test_i18n_carries_the_punctuation_separators():
+    """冒号、括号、顿号、分号都从文案里取：中文全角，英文半角。"""
+    i18n = _page("i18n.js")
+    for key in ("fieldLine", "paren", "listSep", "semiSep"):
+        assert f'"{key}"' in i18n, key
 
 
 def test_every_file_detail_offers_edit_forget_and_delete_including_board_notices():

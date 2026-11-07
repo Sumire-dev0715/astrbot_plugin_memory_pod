@@ -23,11 +23,13 @@ const { boot, assert, until, sleep, section, summary } = require("../harness.js"
   assert(p.$("[data-detail-heading]"), "读的时候已经有标题");
   assert(p.$(".pane-detail .only-narrow"), "读的时候窄屏就有返回按钮");
   assert(p.document.activeElement === p.$("[data-detail-heading]"), "读的时候焦点已经在标题上");
+  assert(p.$(".pane-detail .detail").getAttribute("aria-busy") === "true", "读的时候详情标着正在加载（aria-busy）");
   const loadingHeading = p.$("[data-detail-heading]");
   release();
   await until(() => p.$(".pane-detail .md"), "详情读完");
   assert(p.$("[data-detail-heading]") !== loadingHeading, "读完后标题重画成了新元素（带内容的）");
   assert(p.document.activeElement === p.$("[data-detail-heading]"), "读完后焦点跟到新标题上: " + p.document.activeElement.tagName);
+  assert(!p.$(".pane-detail .detail").hasAttribute("aria-busy"), "读完后不再标正在加载");
 
   section("N3 读文件失败：错误态里也有标题和返回按钮，焦点在标题上");
   p = await boot({ narrow: true });

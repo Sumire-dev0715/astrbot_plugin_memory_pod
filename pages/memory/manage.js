@@ -234,13 +234,18 @@
     return counts;
   }
 
+  /** 整理方案里的字段行（「署名：堇」/「Signature: 堇」）：冒号跟着界面语言走 */
+  function fieldLine(label, value) {
+    return t("fieldLine", { label: label, value: value });
+  }
+
   function planText(r, v) {
     const board = r.scope === "board";
-    const lines = [t("fieldDescription") + "：" + (v.description || "")];
+    const lines = [fieldLine(t("fieldDescription"), v.description || "")];
     if (!board) {
-      lines.push(t("fieldType") + "：" + (v.type ? t("type_" + v.type) : "—"));
+      lines.push(fieldLine(t("fieldType"), v.type ? t("type_" + v.type) : "—"));
     } else {
-      lines.push(t("fieldSignature") + "：" + (v.signature || ""));
+      lines.push(fieldLine(t("fieldSignature"), v.signature || ""));
     }
     return lines.join("\n") + "\n\n" + (v.body || "");
   }
@@ -318,7 +323,7 @@
           ),
           op.reason ? h("p", { class: "op-reason" }, op.reason) : null,
           // 留言板的写入带署名（插件从原告示继承，新建的用默认值）：审阅时要看得到
-          op.op === "write" && op.signature ? h("p", { class: "op-reason" }, t("fieldSignature") + "：" + op.signature) : null,
+          op.op === "write" && op.signature ? h("p", { class: "op-reason" }, fieldLine(t("fieldSignature"), op.signature)) : null,
           area
         )
       );
@@ -1319,11 +1324,11 @@
       });
       names.forEach(function (name) { datalist.append(h("option", { value: name })); });
       const parts = (info.platforms || []).map(function (p) {
-        return p.platform + "（" + t("platformSessions", { n: p.sessions }) + (p.notebook ? " · " + t("notebookLabel") : "") + "）";
+        return p.platform + t("paren", { text: t("platformSessions", { n: p.sessions }) + (p.notebook ? " · " + t("notebookLabel") : "") });
       });
-      known.textContent = parts.length ? t("platformKnown", { list: parts.join("，") }) : "";
+      known.textContent = parts.length ? t("platformKnown", { list: parts.join(t("listSep")) }) : "";
       if ((info.adapters || []).length) {
-        known.textContent += (known.textContent ? " " : "") + t("platformAdapters", { list: info.adapters.join("，") });
+        known.textContent += (known.textContent ? " " : "") + t("platformAdapters", { list: info.adapters.join(t("listSep")) });
       }
     }).catch(function () {
       known.textContent = "";

@@ -24,6 +24,8 @@
   const PERSON_RE = /^user-[A-Za-z0-9_]+(?:-[a-z0-9]+(?:-[a-z0-9]+)*)?\.md$/i;
   const PERSON_OWNER_RE = /^user-[A-Za-z0-9_]+(?:-.*)?\.md$/i;
   const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+  // 后端的搜索结果只命中文件头时给的片段占位（web_api.py 的 search）；只用于比较，不显示
+  const BACKEND_HEADER_HIT = "（正文匹配）";
 
   // ------------------------------------------------------------ 小工具
 
@@ -118,7 +120,7 @@
 
   /** 详情里的完整来源：说话人、私聊或群聊「群名」、时间（群名来自审计日志） */
   function originFull(item) {
-    const who = item.name ? item.name + (item.speaker ? "（" + item.speaker + "）" : "") : item.speaker || t("originUnknown");
+    const who = item.name ? item.name + (item.speaker ? t("paren", { text: item.speaker }) : "") : item.speaker || t("originUnknown");
     let where = t("kindPrivate");
     if (item.kind === "group") {
       where = item.group ? t("originGroup", { group: item.group }) : t("kindGroup");
@@ -135,10 +137,10 @@
       tags.push(h("span", { class: "tag tag-warn" }, t("expired")));
     }
     if ((row.dangling || []).length) {
-      tags.push(h("span", { class: "tag tag-warn", title: row.dangling.join("、") }, t("flagDangling")));
+      tags.push(h("span", { class: "tag tag-warn", title: row.dangling.join(t("listSep")) }, t("flagDangling")));
     }
     if ((row.long || []).length) {
-      tags.push(h("span", { class: "tag tag-muted", title: ui.zhOnly(row.long.join("；")) || null }, t("flagLong")));
+      tags.push(h("span", { class: "tag tag-muted", title: ui.zhOnly(row.long.join(t("semiSep"))) || null }, t("flagLong")));
     }
     return tags;
   }
@@ -164,6 +166,19 @@
 
   function openFile(view, name, opts) {
     return openPane(view, { kind: "file", file: name }, opts);
+  }
+
+  /** 详情还没读到时的标题栏：用列表里那一行的类型和描述，读完后标题栏不会整块跳变 */
+  function pendingHead(view, r, name) {
+    const board = r.scope === "board";
+    const row = findRow(r, name) || {};
+    return detailHead({
+      view: view,
+      title: board ? row.description || name : name,
+      mono: !board,
+      tags: board || !row.type ? null : typeTag(row.type),
+      desc: board ? name : row.description || "",
+    });
   }
 
   /** 详情区的标题栏：窄屏返回按钮、标题、标签、描述与操作按钮 */
@@ -473,8 +488,9 @@
         byFile[row.file] = row;
       });
       st.results = (data.results || []).map(function (item) {
-        // 命中的片段是后端截出来的正文；只命中了文件头、没有片段时后端给的是一句中文占位
-        const hit = item.excerpt === "（正文匹配）" ? t("searchBodyMatch") : item.excerpt;
+        // 命中的片段是后端截出来的正文；只命中了文件头、没有片段时后端给的是一句中文占位。
+        // 这是后端数据里的固定字符串（web_api.py 的 search），不是界面文字，所以原样比较
+        const hit = item.excerpt === BACKEND_HEADER_HIT ? t("searchBodyMatch") : item.excerpt;
         return Object.assign({}, byFile[item.file] || { file: item.file, type: "", description: "" }, { hit: hit });
       });
     } catch (err) {
@@ -1166,11 +1182,11 @@
     if ((row.long || []).length) {
       // 过长的原因是后端写的中文句子：中文界面带上，其他语言只说"偏长"
       notices.push(
-        ui.notice("warn", ui.zhOnly(row.long.join("；")) ? t("longNotice", { reasons: row.long.join("；") }) : t("longNoticePlain"))
+        ui.notice("warn", ui.zhOnly(row.long.join(t("semiSep"))) ? t("longNotice", { reasons: row.long.join(t("semiSep")) }) : t("longNoticePlain"))
       );
     }
     if ((row.dangling || []).length) {
-      notices.push(ui.notice("warn", t("danglingNotice", { files: row.dangling.join("、") })));
+      notices.push(ui.notice("warn", t("danglingNotice", { files: row.dangling.join(t("listSep")) })));
     }
     const bodyText = d.body || "";
     return [
@@ -1331,12 +1347,16 @@
     function paint() {
       const d = st.data;
       if (!d) {
-        // 读的时候和读失败时也有标题栏：窄屏有返回按钮，打开详情后的焦点也有地方落
-        const pending = detailHead({ view: view, title: name, mono: true });
+        // 读的时候和读失败时也有标题栏：窄屏有返回按钮，打开详情后的焦点也有地方落。
+        // 标题、类型、描述先用列表里已有的那一行，读完后不会整块跳变
+        const pending = pendingHead(view, r, name);
         root.setAttribute("aria-labelledby", pending.id);
+        // 标题已经出来、正文还在读：告诉读屏软件这块还在加载
+        root.setAttribute("aria-busy", "true");
         ui.replace(root, pending.el, st.error ? ui.errorState(st.error, load) : ui.spinner());
         return;
       }
+      root.removeAttribute("aria-busy");
       const board = r.scope === "board";
       const head = detailHead({
         view: view,
@@ -1432,15 +1452,20 @@
     return { input: input, after: extra };
   }
 
+  /** 表单字段拼成的一行（「署名：堇」/「Signature: 堇」）：冒号跟着界面语言走 */
+  function fieldLine(label, value) {
+    return t("fieldLine", { label: label, value: value });
+  }
+
   function formText(board, v) {
-    const lines = [t("fieldFile") + "：" + v.file];
+    const lines = [fieldLine(t("fieldFile"), v.file)];
     if (!board) {
-      lines.push(t("fieldType") + "：" + (TYPES.indexOf(v.type) >= 0 ? t("type_" + v.type) : v.type || "—"));
+      lines.push(fieldLine(t("fieldType"), TYPES.indexOf(v.type) >= 0 ? t("type_" + v.type) : v.type || "—"));
     }
-    lines.push(t("fieldDescription") + "：" + v.description);
+    lines.push(fieldLine(t("fieldDescription"), v.description));
     if (board) {
-      lines.push(t("fieldSignature") + "：" + v.signature);
-      lines.push(t("fieldExpiresShort") + "：" + (v.expires || t("noExpiry")));
+      lines.push(fieldLine(t("fieldSignature"), v.signature));
+      lines.push(fieldLine(t("fieldExpiresShort"), v.expires || t("noExpiry")));
     }
     lines.push("");
     return lines.join("\n") + "\n" + (v.body || "");
@@ -1738,11 +1763,13 @@
 
     function paint() {
       if (!st.ready) {
-        const pending = detailHead({ view: view, title: opts.file || t("newMemory"), mono: true });
+        const pending = opts.isNew ? detailHead({ view: view, title: t("newMemory"), mono: true }) : pendingHead(view, r, opts.file);
         root.setAttribute("aria-labelledby", pending.id);
+        root.setAttribute("aria-busy", "true");
         ui.replace(root, pending.el, st.error ? ui.errorState(st.error, load) : ui.spinner());
         return;
       }
+      root.removeAttribute("aria-busy");
       dirtyBadge = h("span", { class: "dirty", hidden: !isDirty() }, h("span", { class: "dot dot-warn", "aria-hidden": "true" }), t("unsaved"));
       const title = opts.isNew ? t("newMemory") : board ? t("editNotice") : t("editFile", { file: base.file });
       const head = detailHead({
@@ -1820,7 +1847,7 @@
     const root = h("div", { class: "detail editor" });
     // 上次的署名：刚发布过就用页面里记着的（总览还在重新加载时也不会取到旧值），否则用服务端记的
     const last = S.lastSignature || (S.ov && S.ov.board && S.ov.board.lastSignature) || "";
-    const cur = { signature: last, description: "", expires: "", body: "" };
+    const cur = { file: "", signature: last, description: "", expires: "", body: "" };
     const base = Object.assign({}, cur);
     const fields = {};
     let clean = false;
@@ -1866,6 +1893,14 @@
       if (cur.expires && !DATE_RE.test(cur.expires)) {
         problems.push(["expires", t("errDate")]);
       }
+      if (cur.file.trim()) {
+        // 自己起名时先查一遍：规则与后端一致，名字已被占用也不等到发布时才让服务端拒
+        const name = normalizeName(cur.file.trim());
+        const problem = nameProblem(name) || (findRow(r, name) ? t("errFileExists", { file: name }) : "");
+        if (problem) {
+          problems.push(["file", problem]);
+        }
+      }
       problems.forEach(function (item) { fields[item[0]].setError(item[1]); });
       return problems.length ? fields[problems[0][0]].input : null;
     }
@@ -1877,6 +1912,8 @@
         return;
       }
       const res = await ui.apiPost("board/publish", {
+        // 留空就由服务端按时间生成 notice-<时间>.md
+        file: cur.file.trim() ? normalizeName(cur.file.trim()) : "",
         signature: cur.signature.trim(),
         description: cur.description.trim(),
         body: cur.body,
@@ -1901,6 +1938,7 @@
       });
       root.setAttribute("aria-labelledby", head.id);
       fields.signature = ui.field({ label: t("fieldSignature"), input: input("signature", { maxlength: "100", "data-autofocus": last ? null : "" }), hint: last ? t("fieldSignatureLastHint") : t("fieldSignatureHint"), required: true });
+      fields.file = ui.field({ label: t("publishFile"), input: input("file", { maxlength: "121", class: "input mono", autocomplete: "off", spellcheck: "false" }), hint: t("publishFileHint"), optional: true });
       fields.description = ui.field({ label: t("noticeTitle"), input: input("description", { maxlength: "120", "data-autofocus": last ? "" : null }), hint: t("noticeTitleHint"), required: true });
       const expiry = expiryInput(cur.expires, function (value) {
         cur.expires = value;
@@ -1932,6 +1970,7 @@
         h("p", { class: "hint" }, t("publishHint")),
         h("div", { class: "form-grid two" }, fields.signature.el, fields.expires.el),
         fields.description.el,
+        fields.file.el,
         h("div", { class: "editor-tools" }, toggle, h("span", { class: "kbd-hint" }, t("publishShortcut"))),
         h("div", { class: "editor-work" + (preview ? " has-preview" : "") }, h("div", { class: "editor-form" }, fields.body.el), previewBox)
       );
