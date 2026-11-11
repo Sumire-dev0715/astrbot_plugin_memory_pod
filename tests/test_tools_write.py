@@ -755,7 +755,8 @@ def test_bot_name_prefers_platform_instance_name(tmp_path):
 
 
 def test_board_overflow_title_only_does_not_count_as_read(tmp_path):
-    plugin = make_plugin(tmp_path)
+    # 这条测的是"只列标题不算看过"，文件故意写成很早的时间；关掉遗忘免得被扫走
+    plugin = make_plugin(tmp_path, enable_forgetting=False)
     board = plugin._store.board_scope()
     run(
         board.write(

@@ -1,102 +1,109 @@
 {
-  "enable_memory": {
-    "description": "启用长期记忆",
-    "type": "bool",
-    "hint": "开启后，插件把留言板、小本本、悄悄话三层的记忆索引接在系统提示词后面，每轮再按消息召回相关记忆，并向聊天模型提供 memory_read / memory_search / memory_write / memory_edit / memory_delete 五个工具。关闭后以上全部停止，已有记忆文件保留在磁盘上，随时可以再打开。",
-    "default": true
-  },
-  "recall_max_files": {
-    "condition": {
-      "enable_memory": true
-    },
-    "description": "每轮最多召回几条记忆",
-    "type": "int",
-    "hint": "每条新消息之前，按关键词挑出最相关的几条记忆附上去。单个文件最多带 3000 字、合计最多 9000 字。填 0 关闭召回，需要时仍可用 memory_search 主动查。",
-    "default": 5,
-    "slider": {
-      "min": 0,
-      "max": 20,
-      "step": 1
-    }
-  },
-  "recall_full_files": {
-    "condition": {
-      "enable_memory": true
-    },
-    "description": "其中带全文的条数",
-    "type": "int",
-    "hint": "召回的几条记忆里，相关度最高的这么多条附上全文，其余只列文件名，需要时再读。发送者和被 @ 的人的人物档案总是带全文，不占这个名额。设成不小于「每轮最多召回几条记忆」时，全部带全文。",
-    "default": 2,
-    "slider": {
-      "min": 0,
-      "max": 20,
-      "step": 1
-    }
-  },
-  "memory_reminder_turns": {
-    "condition": {
-      "enable_memory": true
-    },
-    "description": "每几轮提醒一次记笔记",
-    "type": "int",
-    "hint": "每隔这么多轮，在本轮请求里提醒模型回顾最近的对话，把值得长期记住的写进记忆。上下文快被 AstrBot 截断或压缩之前，插件还会额外提醒一次，那次不受这个数字影响。填 0 关闭按轮提醒。",
-    "default": 10,
-    "slider": {
-      "min": 0,
-      "max": 50,
-      "step": 1
-    }
-  },
-  "enable_forgetting": {
-    "condition": {
-      "enable_memory": true
-    },
-    "description": "启用记忆遗忘",
-    "type": "bool",
-    "hint": "开启后，长期没被召回、也没被读过的记忆会退出索引与召回，机器人不再带着它们，但文件不删：这个人再出现、或机器人主动去读，它就自动恢复；管理页的「已遗忘」里也能恢复或彻底删除。约定（agreement）类不会被遗忘，日记不参与。",
-    "default": false
-  },
-  "forget_after_days": {
-    "condition": {
-      "enable_memory": true,
-      "enable_forgetting": true
-    },
-    "description": "多久没用到就遗忘（天）",
-    "type": "int",
-    "hint": "一条记忆连续这么多天没被召回、也没被读过（从没用过的按最近修改时间算），就移入已遗忘。只在开启「启用记忆遗忘」时生效。",
-    "default": 90,
-    "slider": {
-      "min": 1,
-      "max": 365,
-      "step": 1
-    }
-  },
-  "history_keep_days": {
-    "condition": {
-      "enable_memory": true
-    },
-    "description": "历史版本保留天数",
-    "type": "int",
-    "hint": "每次覆盖、修改之前，旧内容自动存一份历史版本，保留这么久后清理。每个文件至少保留最近 10 版，即使已经超过这个天数。填 0 永久保留。",
-    "default": 90,
-    "slider": {
-      "min": 0,
-      "max": 730,
-      "step": 1
-    }
-  },
-  "trash_keep_days": {
-    "condition": {
-      "enable_memory": true
-    },
-    "description": "回收站保留天数",
-    "type": "int",
-    "hint": "被删除的记忆先进回收站，保留这么久后清理。期间可以在管理页查看、恢复或提前彻底删除。填 0 永久保留。",
-    "default": 90,
-    "slider": {
-      "min": 0,
-      "max": 730,
-      "step": 1
+  "memory": {
+    "type": "object",
+    "description": "长期记忆",
+    "hint": "下面每一项都只在「启用长期记忆」打开时生效。",
+    "items": {
+      "enable_memory": {
+        "description": "启用长期记忆",
+        "type": "bool",
+        "hint": "开启后，插件把留言板、小本本、悄悄话三层的记忆索引接在系统提示词后面，每轮再按消息召回相关记忆，并向聊天模型提供 memory_read / memory_search / memory_write / memory_edit / memory_delete 五个工具。关闭后以上全部停止，已有记忆文件保留在磁盘上，随时可以再打开。",
+        "default": true
+      },
+      "recall_max_files": {
+        "condition": {
+          "enable_memory": true
+        },
+        "description": "每轮最多召回几条记忆",
+        "type": "int",
+        "hint": "每条新消息之前，按关键词挑出最相关的几条记忆附上去。单个文件最多带 3000 字、合计最多 9000 字。填 0 关闭召回，需要时仍可用 memory_search 主动查。",
+        "default": 5,
+        "slider": {
+          "min": 0,
+          "max": 20,
+          "step": 1
+        }
+      },
+      "recall_full_files": {
+        "condition": {
+          "enable_memory": true
+        },
+        "description": "其中带全文的条数",
+        "type": "int",
+        "hint": "召回的几条记忆里，相关度最高的这么多条附上全文，其余只列文件名，需要时再读。发送者和被 @ 的人的人物档案总是带全文，不占这个名额。设成不小于「每轮最多召回几条记忆」时，全部带全文。",
+        "default": 2,
+        "slider": {
+          "min": 0,
+          "max": 20,
+          "step": 1
+        }
+      },
+      "memory_reminder_turns": {
+        "condition": {
+          "enable_memory": true
+        },
+        "description": "每几轮提醒一次记笔记",
+        "type": "int",
+        "hint": "每隔这么多轮，在本轮请求里提醒模型回顾最近的对话，把值得长期记住的写进记忆。上下文快被 AstrBot 截断或压缩之前，插件还会额外提醒一次，那次不受这个数字影响。填 0 关闭按轮提醒。",
+        "default": 10,
+        "slider": {
+          "min": 0,
+          "max": 50,
+          "step": 1
+        }
+      },
+      "enable_forgetting": {
+        "condition": {
+          "enable_memory": true
+        },
+        "description": "启用记忆遗忘",
+        "type": "bool",
+        "hint": "开启后，长期没被召回、也没被读过的记忆会退出索引与召回，机器人不再带着它们，但文件不删：这个人再出现、或机器人主动去读，它就自动恢复；管理页的「已遗忘」里也能恢复或彻底删除。约定（agreement）类不会被遗忘，日记不参与。",
+        "default": true
+      },
+      "forget_after_days": {
+        "condition": {
+          "enable_memory": true,
+          "enable_forgetting": true
+        },
+        "description": "多久没用到就遗忘（天）",
+        "type": "int",
+        "hint": "一条记忆连续这么多天没被召回、也没被读过（从没用过的按最近修改时间算），就移入已遗忘。只在开启「启用记忆遗忘」时生效。",
+        "default": 90,
+        "slider": {
+          "min": 1,
+          "max": 365,
+          "step": 1
+        }
+      },
+      "history_keep_days": {
+        "condition": {
+          "enable_memory": true
+        },
+        "description": "历史版本保留天数",
+        "type": "int",
+        "hint": "每次覆盖、修改之前，旧内容自动存一份历史版本，保留这么久后清理。每个文件至少保留最近 10 版，即使已经超过这个天数。填 0 永久保留。",
+        "default": 90,
+        "slider": {
+          "min": 0,
+          "max": 730,
+          "step": 1
+        }
+      },
+      "trash_keep_days": {
+        "condition": {
+          "enable_memory": true
+        },
+        "description": "回收站保留天数",
+        "type": "int",
+        "hint": "被删除的记忆先进回收站，保留这么久后清理。期间可以在管理页查看、恢复或提前彻底删除。填 0 永久保留。",
+        "default": 90,
+        "slider": {
+          "min": 0,
+          "max": 730,
+          "step": 1
+        }
+      }
     }
   }
 }

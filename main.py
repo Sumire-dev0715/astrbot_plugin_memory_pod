@@ -104,6 +104,8 @@ TOOL_SCHEMA_ALLOWANCE = 800
 SCOPE_ARG_ERROR = "scope 参数必须是 board、notebook 或 whisper。"
 # 会话运行时缓存上限（LRU 淘汰，仅内存快照，磁盘状态不受影响）。
 MAX_RUNTIME_SESSIONS = 256
+# 配置页把这几个开关收在「长期记忆」分组下（为了缩进），读配置时兼容两种写法
+CONFIG_GROUP = "memory"
 # 遗忘扫描：每个作用域目录至多每隔这么久扫一次（秒）；默认多久没用到算遗忘（天）
 FORGET_SWEEP_INTERVAL = 6 * 3600
 FORGET_DEFAULT_DAYS = 90
@@ -248,12 +250,27 @@ class MemoryPodPlugin(Star):
 
     # ================================================================ 配置
 
+    def _cfg(self, key: str, default):
+        """读配置：先看「长期记忆」分组，再看顶层同名项。
+
+        配置页把各项收进了 object 分组（为了缩进层级），保存进配置文件的是
+        memory.<key>，以它为准；顶层同名键是旧配置留下的写法，作为兜底，
+        免得升级后新界面改了却读到旧值。
+        """
+        cfg = self.config or {}
+        group = cfg.get(CONFIG_GROUP)
+        if isinstance(group, dict) and key in group:
+            return group[key]
+        if key in cfg:
+            return cfg[key]
+        return default
+
     def _bool(self, key: str, default: bool) -> bool:
-        return bool(self.config.get(key, default))
+        return bool(self._cfg(key, default))
 
     def _int(self, key: str, default: int) -> int:
         try:
-            return int(self.config.get(key, default))
+            return int(self._cfg(key, default))
         except (TypeError, ValueError):
             return default
 
@@ -562,10 +579,10 @@ class MemoryPodPlugin(Star):
         return ids
 
     def _forgetting_on(self) -> bool:
-        """记忆遗忘开关，默认关闭。开启后长期没被召回或读取的记忆移出索引与
+        """记忆遗忘开关，默认开启。开启后长期没被召回或读取的记忆移出索引与
         召回（文件保留在 forgotten/ 下），再被用到时自动恢复；关闭时什么都不动，
         使用统计照常记录。"""
-        return self._bool("enable_forgetting", False)
+        return self._bool("enable_forgetting", True)
 
     def _forget_after_days(self) -> int:
         return max(1, self._int("forget_after_days", FORGET_DEFAULT_DAYS))

@@ -5,37 +5,41 @@
     "desc": "Gives your chatbot a three-layer long-term memory (notice board / notebook / whispers) using indexed Markdown files, no embedding model needed. Includes automatic history, trash, journals, signed board notices, manual tidying and backup/migration. Please read the first part of the README before use!"
   },
   "config": {
-    "enable_memory": {
-      "description": "Enable long-term memory",
-      "hint": "When on, the plugin appends the index of all three layers (notice board, notebook, whispers) to the system prompt, recalls related memories for each message, and gives the chat model the memory_read / memory_search / memory_write / memory_edit / memory_delete tools. When off, all of that stops; existing memory files stay on disk and come back when you turn it on again."
-    },
-    "recall_max_files": {
-      "description": "Max memories recalled per turn",
-      "hint": "Before each message, the most relevant memories are attached. One file contributes at most 3000 characters, 9000 in total. Set 0 to turn recall off; memory_search still works when needed."
-    },
-    "recall_full_files": {
-      "description": "Recalled files attached in full per turn",
-      "hint": "Of the recalled memories, this many with the highest relevance come with full text; the rest are listed by file name and read on demand. The sender's and mentioned users' profiles always come in full and do not count against this number. Setting it at or above the recall limit gives full text to all of them."
-    },
-    "memory_reminder_turns": {
-      "description": "Remind the model to write memory every N turns",
-      "hint": "Every this many turns the plugin reminds the model to review the conversation and write down what is worth keeping. Right before AstrBot truncates or compacts the context it reminds once more, regardless of this number. Set 0 to turn the per-turn reminder off."
-    },
-    "history_keep_days": {
-      "description": "History retention (days)",
-      "hint": "Before every overwrite or edit the old content is kept as a version for this many days. Each file always keeps its 10 most recent versions. Set 0 to keep them forever."
-    },
-    "trash_keep_days": {
-      "description": "Trash retention (days)",
-      "hint": "Deleted memories go to the trash first and are cleaned up after this many days; meanwhile the management page can view, restore or permanently delete them. Set 0 to keep them forever."
-    },
-    "enable_forgetting": {
-      "description": "Enable memory forgetting",
-      "hint": "When on, memories that have not been recalled or read for a long time leave the index and recall without being deleted: they come back when the person shows up again or the model reads them, and the management page can restore or permanently delete them. Agreements are never forgotten."
-    },
-    "forget_after_days": {
-      "description": "Forget after this many unused days",
-      "hint": "A memory that has not been recalled or read for this many days (unused ones count from their last modification) moves to forgotten. Only used when memory forgetting is on."
+    "memory": {
+      "description": "Long-term memory",
+      "hint": "Every item below only takes effect while long-term memory is on.",
+      "enable_memory": {
+        "description": "Enable long-term memory",
+        "hint": "When on, the plugin appends the index of all three layers (notice board, notebook, whispers) to the system prompt, recalls related memories for each message, and gives the chat model the memory_read / memory_search / memory_write / memory_edit / memory_delete tools. When off, all of that stops; existing memory files stay on disk and come back when you turn it on again."
+      },
+      "recall_max_files": {
+        "description": "Max memories recalled per turn",
+        "hint": "Before each message, the most relevant memories are attached. One file contributes at most 3000 characters, 9000 in total. Set 0 to turn recall off; memory_search still works when needed."
+      },
+      "recall_full_files": {
+        "description": "Recalled files attached in full per turn",
+        "hint": "Of the recalled memories, this many with the highest relevance come with full text; the rest are listed by file name and read on demand. The sender's and mentioned users' profiles always come in full and do not count against this number. Setting it at or above the recall limit gives full text to all of them."
+      },
+      "memory_reminder_turns": {
+        "description": "Remind the model to write memory every N turns",
+        "hint": "Every this many turns the plugin reminds the model to review the conversation and write down what is worth keeping. Right before AstrBot truncates or compacts the context it reminds once more, regardless of this number. Set 0 to turn the per-turn reminder off."
+      },
+      "history_keep_days": {
+        "description": "History retention (days)",
+        "hint": "Before every overwrite or edit the old content is kept as a version for this many days. Each file always keeps its 10 most recent versions. Set 0 to keep them forever."
+      },
+      "trash_keep_days": {
+        "description": "Trash retention (days)",
+        "hint": "Deleted memories go to the trash first and are cleaned up after this many days; meanwhile the management page can view, restore or permanently delete them. Set 0 to keep them forever."
+      },
+      "enable_forgetting": {
+        "description": "Enable memory forgetting",
+        "hint": "When on, memories that have not been recalled or read for a long time leave the index and recall without being deleted: they come back when the person shows up again or the model reads them, and the management page can restore or permanently delete them. Agreements are never forgotten."
+      },
+      "forget_after_days": {
+        "description": "Forget after this many unused days",
+        "hint": "A memory that has not been recalled or read for this many days (unused ones count from their last modification) moves to forgotten. Only used when memory forgetting is on."
+      }
     }
   },
   "pages": {
