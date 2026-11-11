@@ -392,6 +392,9 @@ code {
 
 .pane-detail {
   overflow: auto;
+  /* 详情比视口高时（比如整理页堆了几张卡片），滚动溢出会穿透到根节点，
+   * 让整页也能滚出一段空白；paint containment 把溢出关在这个滚动容器里 */
+  contain: paint;
   background: var(--bg);
 }
 
@@ -938,7 +941,6 @@ select.input {
 
 .row[aria-current="true"] {
   background: var(--accent-soft);
-  box-shadow: inset 3px 0 0 var(--accent);
 }
 
 .row:focus-visible,

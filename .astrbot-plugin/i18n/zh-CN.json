@@ -54,7 +54,7 @@
       "noSignature": "（没有署名）",
       "noStatusMatch": "没有符合条件的告示",
       "boardEmptyTitle": "还没有告示",
-      "boardEmptyHint": "告示会出现在每段对话的开头，适合发通知，比如「11 月 11 日新员工 teto 入职」。",
+      "boardEmptyHint": "告示会出现在每段对话的开头，适合发通知，比如「4 月 1 日新员工 teto 入职」。",
       "boardDetailEmptyTitle": "选择一条告示",
       "boardDetailEmptyHint": "在左侧选一条告示查看、续期或编辑，或者发布一条新的。",
       "publishNotice": "发布告示",
