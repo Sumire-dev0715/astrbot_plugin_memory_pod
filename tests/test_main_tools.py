@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import time
 import types
@@ -239,7 +240,12 @@ def test_tidy_model_options_list_loaded_chat_providers(tmp_path):
 
     class Inst:
         def __init__(self, provider_id, model):
-            self.provider_config = {"id": provider_id, "model": model}
+            self.provider_config = {
+                "id": provider_id,
+                "model": model,
+                "api_key": "sk-TOP-SECRET-KEY",
+                "api_base": "https://secret.example/v1",
+            }
 
         def meta(self):
             return types.SimpleNamespace(id=self.provider_config["id"], model=self.provider_config["model"])
@@ -247,10 +253,15 @@ def test_tidy_model_options_list_loaded_chat_providers(tmp_path):
     plugin.context.provider_manager = types.SimpleNamespace(
         provider_insts=[Inst("provider-b", "model-b"), Inst("provider-a", "model-a")]
     )
-    assert plugin.tidy_model_options() == [
+    options = plugin.tidy_model_options()
+    assert options == [
         {"providerId": "provider-a", "model": "model-a"},
         {"providerId": "provider-b", "model": "model-b"},
     ]
+    # 下拉框只要提供商 ID 和模型名，配置里的密钥字段不能跟着出去
+    dumped = json.dumps(options, ensure_ascii=False)
+    assert "sk-TOP-SECRET-KEY" not in dumped
+    assert "api_key" not in dumped and "api_base" not in dumped
 
 
 def test_tidy_model_options_fall_back_to_enabled_config(tmp_path):
@@ -258,13 +269,17 @@ def test_tidy_model_options_fall_back_to_enabled_config(tmp_path):
     plugin.context.provider_manager = types.SimpleNamespace(
         provider_insts=[],
         providers_config=[
-            {"id": "a", "enable": True, "provider_type": "chat_completion", "model": "m1", "type": "openai"},
-            {"id": "b", "enable": False, "provider_type": "chat_completion", "model": "m2", "type": "openai"},
-            {"id": "c", "enable": True, "provider_type": "speech_to_text", "model": "m3", "type": "openai"},
-            {"id": "d", "enable": True, "provider_type": "chat_completion", "type": "agent_runner"},
+            {"id": "a", "enable": True, "provider_type": "chat_completion", "model": "m1", "type": "openai", "api_key": "sk-TOP-SECRET-KEY", "api_base": "https://secret.example/v1"},
+            {"id": "b", "enable": False, "provider_type": "chat_completion", "model": "m2", "type": "openai", "api_key": "sk-OFF-SECRET"},
+            {"id": "c", "enable": True, "provider_type": "speech_to_text", "model": "m3", "type": "openai", "api_key": "sk-STT-SECRET"},
+            {"id": "d", "enable": True, "provider_type": "chat_completion", "type": "agent_runner", "api_key": "sk-AGENT-SECRET"},
         ],
     )
-    assert plugin.tidy_model_options() == [{"providerId": "a", "model": "m1"}]
+    options = plugin.tidy_model_options()
+    assert options == [{"providerId": "a", "model": "m1"}]
+    dumped = json.dumps(options, ensure_ascii=False)
+    assert "SECRET" not in dumped
+    assert "api_key" not in dumped and "api_base" not in dumped
 
 
 def test_board_notices_count_as_used_so_forgetting_does_not_drop_them(tmp_path):

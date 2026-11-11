@@ -324,7 +324,9 @@ def test_move_posts_only_from_a_confirmed_dialog():
     assert 't("cancel")' in conflict
     assert 't("conflictKeep")' in conflict and 't("conflictOverwrite")' in conflict
     confirm = _between(move, "async function confirmNoConflict(", "const ctrl = ui.dialog(")
-    assert confirm.index("ui.confirm(") < confirm.index('sendMove(null, "overwrite"')
+    assert confirm.index("ui.confirm(") < confirm.index('sendMove(null, "create"')
+    # 无冲突确认框发 create：真正写入时目标里若刚出现同名文件，后端会拒绝
+    assert "create" in confirm
     # 除了定义，只有这两个确认/选择入口会发真正的移动
     assert move.count("sendMove(") == 4
 

@@ -68,10 +68,13 @@ MAX_REMARK = 64
 MAX_QUERY = 200
 MAX_BOARD_TITLE = 120
 MAX_BOARD_BODY = 8000
-# 移动单个文件时目标同名文件的处理（PLAN 3.12.2）：保留两份或用搬来的覆盖
+# 移动单个文件时目标同名文件的处理（PLAN 3.12.2）：保留两份、用搬来的
+# 覆盖，或者页面预览时目标里还没有同名文件（create，写入时若刚出现同名
+# 文件就拒绝，见 migrate_file）。
 MOVE_KEEP_BOTH = "keep"
 MOVE_OVERWRITE = "overwrite"
-MOVE_CONFLICTS = (MOVE_KEEP_BOTH, MOVE_OVERWRITE)
+MOVE_CREATE = "create"
+MOVE_CONFLICTS = (MOVE_KEEP_BOTH, MOVE_OVERWRITE, MOVE_CREATE)
 # 告示卡片上显示的正文开头（字符数）；完整正文在详情里看
 BOARD_EXCERPT_CHARS = 280
 # 导出、导入的暂存：先生成再下载、先预演再执行，期间内容放在内存里
@@ -1153,34 +1156,44 @@ class MemoryDashboard:
         scope, key, store = self._scope_from_body(body)
         name = self._file_name(body.get("file"))
         sid = tidy.scope_id(scope, key)
-        current = await asyncio.to_thread(self.plugin._tidy.task, sid)
-        if current is not None and current.get("state") == tidy.TASK_RUNNING:
-            # 正在跑的整理还会把这份正文写进方案；先取消或等它结束，
-            # 否则"彻底删除"之后方案里仍留着正文
+        book = self.plugin._tidy
+        # 与 tidy_start / 应用方案共用同一把作用域锁：只检查"没在整理"再
+        # 删除是 check-then-act，检查之后才创建的整理任务仍会把刚删掉的
+        # 正文写进方案。锁一直被这个请求拿着，直到删除和清理都完成。
+        if not book.claim(sid):
             raise ApiError("这个作用域正在整理中，请先取消或等待整理结束")
-        report = await store.delete_file_completely(
-            name, actor=history.ACTOR_WEBUI
-        )
-        if not report.ok:
-            # 正文可能只残留在 tidy/*.runs.json 的 before 里（整理合并后
-            # 回收站又按保留期清掉了）。这时 memstore 报"没有找到"，但
-            # 撤销整理仍能把内容写回；把整理记录清掉后按成功处理。
-            if report.message == f"没有找到 {name}":
-                removed = await asyncio.to_thread(
-                    self.plugin._tidy.remove_file, sid, name
-                )
-                if removed:
-                    self._changed(scope, key)
-                    return _ok(
-                        {"file": name},
-                        f"已清除 {name} 在整理记录里的残留内容",
+        try:
+            current = await asyncio.to_thread(book.task, sid)
+            if current is not None and current.get("state") == tidy.TASK_RUNNING:
+                # 正在跑的整理还会把这份正文写进方案；先取消或等它结束，
+                # 否则"彻底删除"之后方案里仍留着正文
+                raise ApiError("这个作用域正在整理中，请先取消或等待整理结束")
+            report = await store.delete_file_completely(
+                name, actor=history.ACTOR_WEBUI
+            )
+            if not report.ok:
+                # 正文可能只残留在 tidy/*.runs.json 的 before 里（整理合并后
+                # 回收站又按保留期清掉了）。这时 memstore 报"没有找到"，但
+                # 撤销整理仍能把内容写回；把整理记录清掉后按成功处理。
+                if report.message == f"没有找到 {name}":
+                    removed = await asyncio.to_thread(
+                        book.remove_file, sid, name, drop_plan=True
                     )
-            raise ApiError(report.message)
-        # 整理记录里也留着改动前原文；彻底删除要一并清掉，否则撤销整理
-        # 会把刚删掉的正文写回来
-        await asyncio.to_thread(self.plugin._tidy.remove_file, sid, name)
-        self._changed(scope, key)
-        return _ok({"file": name}, report.message)
+                    if removed:
+                        self._changed(scope, key)
+                        return _ok(
+                            {"file": name},
+                            f"已清除 {name} 在整理记录里的残留内容",
+                        )
+                raise ApiError(report.message)
+            # 整理记录里也留着改动前原文；彻底删除要一并清掉，否则撤销整理
+            # 或再应用方案会把刚删掉的正文写回来。方案里的写入正文可能是
+            # 这个文件被合并进别的文件后的内容，所以整份方案一起作废。
+            await asyncio.to_thread(book.remove_file, sid, name, drop_plan=True)
+            self._changed(scope, key)
+            return _ok({"file": name}, report.message)
+        finally:
+            book.release(sid)
 
     async def index_rebuild(self) -> dict:
         body = await _body()
@@ -1684,8 +1697,10 @@ class MemoryDashboard:
         先按原样把文件写进目标（created / updated / source 与写入时间不变），
         再把来源文件移进回收站。目标里同名时由页面先问过用户：keep 保留两份
         （新名字加序号，报告里的 renamed 给出对应关系）、overwrite 用搬来的
-        覆盖（在册的旧版进历史，已遗忘的同名副本进回收站）。dryRun 只预览，
-        不写盘；报告的 forgotten 说明目标里是否只有已遗忘的同名副本。
+        覆盖（在册的旧版进历史，已遗忘的同名副本进回收站）、create 表示页面
+        预览时目标里还没有同名文件，真正写入时若刚出现同名文件就拒绝，不能
+        替用户直接覆盖。dryRun 只预览，不写盘；报告的 forgotten 说明目标里
+        是否只有已遗忘的同名副本。
         """
         body = await _body()
         src = self._ref(body.get("from"))
@@ -1705,13 +1720,22 @@ class MemoryDashboard:
         has_conflict = await asyncio.to_thread(dst_store.exists, name)
         has_forgotten = await asyncio.to_thread(dst_store.has_forgotten, name)
         dry_run = bool(body.get("dryRun"))
+        if conflict == MOVE_CREATE and not dry_run and (has_conflict or has_forgotten):
+            # 预览之后目标里才出现同名文件：用户没有做过冲突选择，不能覆盖
+            raise ApiError(f"目标里刚出现同名文件 {name}，请重新确认")
         report = await self.transfer.transfer(
             src,
             dst,
             files=[name],
             include_forgotten=False,
             mode=transfer.MODE_MOVE,
-            policy=memstore.CONFLICT_OVERWRITE,
+            # create 用 skip：即使同名文件恰好在上面的检查和写入之间出现，
+            # 也保留目标里的那份，不覆盖
+            policy=(
+                memstore.CONFLICT_SKIP
+                if conflict == MOVE_CREATE
+                else memstore.CONFLICT_OVERWRITE
+            ),
             dry_run=dry_run,
             keep_both=conflict == MOVE_KEEP_BOTH,
         )
@@ -1723,6 +1747,27 @@ class MemoryDashboard:
         self._changed_ref(src)
         counts = report["counts"]
         changed = counts["added"] + counts["replaced"]
+        if report.get("moved") or changed + counts["same"]:
+            # 搬走/替换后的文件内容不能继续留在两侧作用域的整理记录里：
+            # 之后在目标处「彻底删除（含历史）」只会清目标作用域，来源的
+            # tidy/*.runs.json、*.task.json 仍留着正文，撤销整理或残留方案
+            # 还能把已删除的内容写回；目标一侧旧内容被覆盖时同理。方案里
+            # 的写入正文可能已把这份内容合并进别的文件，整份方案作废。
+            landed = report["renamed"][0]["to"] if report.get("renamed") else name
+            if report.get("moved"):
+                await asyncio.to_thread(
+                    self.plugin._tidy.remove_file,
+                    tidy.scope_id(src.scope, src.key),
+                    name,
+                    drop_plan=True,
+                )
+            if changed + counts["same"]:
+                await asyncio.to_thread(
+                    self.plugin._tidy.remove_file,
+                    tidy.scope_id(dst.scope, dst.key),
+                    landed,
+                    drop_plan=True,
+                )
         if not changed + counts["same"]:
             issues = "；".join(
                 item["reason"] for item in report.get("issues", []) if item.get("reason")

@@ -257,12 +257,14 @@ class TidyBook:
                 if path.is_file():
                     path.unlink()
 
-    def remove_file(self, sid: str, file: str) -> bool:
-        """把一个文件从整理记录里抹掉（管理员彻底删除文件时）。
+    def remove_file(self, sid: str, file: str, *, drop_plan: bool = False) -> bool:
+        """把一个文件从整理记录里抹掉（管理员彻底删除或移走文件时）。
 
         整理记录里的 ops.before 留着改动前的原文，任务方案里的每个
         write/fix 项也带着完整正文；文件被彻底删除后这些副本不能继续
         留在磁盘上，否则撤销整理或再应用方案还能把已删除的正文写回。
+        drop_plan 为真时整份任务方案作废：模型可能已经把这个文件合并进
+        别的文件，残留的 write/fix 正文里仍有它的原文，只删同名操作不够。
         返回是否真的清掉了记录。
         """
         file = (file or "").strip()
@@ -295,15 +297,27 @@ class TidyBook:
                 times.pop(file, None)
                 self._write(self._times_path(sid), times)
                 changed = True
-            if self._purge_from_task(sid, file):
+            if self._purge_from_task(sid, file, drop_plan=drop_plan):
                 changed = True
             return changed
 
-    def _purge_from_task(self, sid: str, file: str) -> bool:
-        """从当前任务方案里删掉这个文件的写入/删除项（调用方已持锁）。"""
+    def _purge_from_task(
+        self, sid: str, file: str, *, drop_plan: bool = False
+    ) -> bool:
+        """从当前任务方案里清掉这个文件的痕迹（调用方已持锁）。
+
+        drop_plan 为真且任务不在运行时，直接丢掉整份方案：方案里的
+        write/fix 正文可能是这个文件被合并进别的文件后的内容，逐项按
+        文件名过滤会留下正文，之后应用方案就把已删除的内容写回去了。
+        """
         task = self.task(sid)
         if task is None:
             return False
+        if drop_plan and task.get("state") != TASK_RUNNING:
+            path = self._task_path(sid)
+            if path.is_file():
+                path.unlink()
+            return True
         plan = task.get("plan")
         if not isinstance(plan, dict):
             return False
@@ -503,10 +517,14 @@ class TidyBook:
 
 
 def file_flags(
-    headers: list[MemoryHeader], contents: dict[str, str]
+    store: ScopeStore, headers: list[MemoryHeader], contents: dict[str, str]
 ) -> dict[str, dict]:
-    """文件列表里的提醒标记：悬空链接与偏长（PLAN 3.12.5/3.12.6）。"""
-    available = {header.file for header in headers}
+    """文件列表里的提醒标记：悬空链接与偏长（PLAN 3.12.5/3.12.6）。
+
+    已遗忘的文件仍能被 memory_read 读到，管理页也把它们算作可用目标；
+    指向它们的 [[链接]] 不算悬空，不能自动改成纯文本。
+    """
+    available = {header.file for header in headers} | set(store.forgotten_files())
     flags: dict[str, dict] = {}
     for header in headers:
         content = contents.get(header.file)
@@ -685,12 +703,18 @@ def _prepare_op(
     signatures: dict[str, str],
     expiries: dict[str, str],
     fallback_signature: str,
+    mtimes: dict[str, float],
 ) -> None:
-    """写入留言板时署名与到期日由插件决定；并记下复盘时的写入时间。"""
+    """写入留言板时署名与到期日由插件决定；并记下开始整理时的写入时间。
+
+    base_mtime 必须来自任务开始时的快照（mtimes），不能用现在重新读到的
+    时间：分批时前几批模型调用期间被改过的文件，否则不会被判为过期，
+    应用时就会用旧正文把它覆盖掉（PLAN 3.12.4）。
+    """
     if op.op in ("write", "fix") and store.layer == memstore.SCOPE_BOARD:
         op.signature = signatures.get(op.file) or fallback_signature
         op.expires = expiries.get(op.file) or ""
-    op.base_mtime = store.mtime(op.file) or 0.0
+    op.base_mtime = mtimes.get(op.file, 0.0)
 
 
 _LINK_RE = re.compile(r"\[\[([^\[\]\n]{1,120})\]\]")
@@ -788,7 +812,7 @@ def auto_fix_operations(
         }
         if op.op == "write":
             written.add(op.file)
-    available = set(final)
+    available = set(final) | set(store.forgotten_files())
     fixes: list[consolidate.Operation] = []
     for file in sorted(final):
         item = final[file]
@@ -823,12 +847,15 @@ def _partial_proposal(
     needs_split: list[str],
     batches: list[Batch],
     notices: list[dict],
+    mtimes: dict[str, float],
 ) -> Proposal:
     ops = list(merged.values())
     ops.extend(auto_fix_operations(store, headers, contents, ops))
     for op in ops:
         if op.op == "fix":
-            op.base_mtime = store.mtime(op.file) or 0.0
+            # 自动修复的正文也来自任务开始时的快照：期间被改过或删掉的
+            # 文件，应用时要靠这个时间判为过期，不能用现在的时间
+            op.base_mtime = mtimes.get(op.file, 0.0)
     return Proposal(
         operations=ops,
         skipped=list(skipped),
@@ -865,6 +892,10 @@ async def propose(
     headers = await asyncio.to_thread(store.headers)
     if not headers:
         raise TidyError("这里还没有记忆，无需整理")
+    # 方案只认任务开始时的快照：先记下写入时间再读正文。读取之后（包括
+    # 后续几批模型调用期间）文件再被改动，应用时就会因时间对不上而跳过，
+    # 不会拿快照里的旧正文覆盖新内容（PLAN 3.12.4）。
+    mtimes = {header.file: header.mtime for header in headers}
     contents: dict[str, str] = {}
     for header in headers:
         content = await store.read(header.file)
@@ -873,7 +904,7 @@ async def propose(
     present = [header for header in headers if header.file in contents]
     existing = {header.file for header in headers}
     is_board = store.layer == memstore.SCOPE_BOARD
-    flags = file_flags(headers, contents)
+    flags = file_flags(store, headers, contents)
     ordered = order_files(present, flags, file_times or {})
     raw_batches, needs_split = split_batches(
         [(header, contents[header.file]) for header in ordered], budget
@@ -924,6 +955,7 @@ async def propose(
             needs_split,
             batches,
             notices,
+            mtimes,
         )
 
     for batch, batch_items in raw_batches:
@@ -1003,7 +1035,14 @@ async def propose(
             ops = [op for op in ops if op.op != "delete"]
             skipped.extend(name for name in sorted(missing_writes) if name not in skipped)
         for op in ops:
-            _prepare_op(op, store, signatures, expiries, fallback_signature)
+            _prepare_op(
+                op,
+                store,
+                signatures,
+                expiries,
+                fallback_signature,
+                mtimes,
+            )
         _merge_ops(
             merged,
             owners,

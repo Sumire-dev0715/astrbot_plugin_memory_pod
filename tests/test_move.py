@@ -6,12 +6,13 @@
 
 from __future__ import annotations
 
+import json
 import os
 import time
 
-from support import pkg_memstore, thing
+from support import pkg_memstore, pkg_tidy, thing
 
-from test_web_api import body, call, route, setup
+from test_web_api import body, call, query, route, setup
 
 
 def make(tmp_path):
@@ -259,3 +260,143 @@ def test_move_keeps_source_when_target_write_is_rejected(tmp_path):
     assert (whisper.root / "huge.md").is_file()
     assert not (notebook.root / "huge.md").exists()
     assert "没有写入目标" in done["message"]
+
+
+# ------------------------------------------------------------ 移动后的整理记录
+
+
+def _tidy_run(dashboard, key):
+    """在悄悄话里跑一次整理并等它结束，返回公开的方案。"""
+    body({"scope": "whisper", "key": key})
+    started = route(dashboard, "tidy_start")
+    assert started["status"] == "ok", started
+    query(scope="whisper", key=key)
+    task = route(dashboard, "tidy_task")["data"]["task"]
+    assert task is not None and task["state"] == "ready", task
+    return task
+
+
+def test_move_drops_source_tidy_plan_with_moved_content(tmp_path):
+    """方案还没应用就把文件搬走：源作用域的方案不能留着这份正文。"""
+    plugin, dashboard, key, whisper, notebook = make(tmp_path)
+    secret = "待整理私密内容-ABC"
+    call(whisper.write("health.md", thing("health", body=secret)))
+
+    async def model(prompt, selected=None):
+        return (
+            json.dumps(
+                [
+                    {
+                        "op": "write",
+                        "file": "health.md",
+                        "type": "note",
+                        "description": "私密",
+                        "content": "方案里的" + secret,
+                        "reason": "改写",
+                    }
+                ]
+            ),
+            [],
+        )
+
+    plugin.call_tidy_model = model
+    task = _tidy_run(dashboard, key)
+    assert "方案里的" + secret in json.dumps(task, ensure_ascii=False)
+    sid = f"whisper-{key}"
+
+    done = move(dashboard, **from_whisper(key, "health.md"))
+    assert done["status"] == "ok", done
+    assert plugin._tidy.task(sid) is None
+    # 之后在目标处彻底删除（含历史），两边的 tidy 文件都不该再有正文
+    body({"scope": "notebook", "key": "Bot-A", "file": "health.md"})
+    purged = route(dashboard, "file_purge")
+    assert purged["status"] == "ok", purged
+    for path in (tmp_path / "tidy").glob("*.json"):
+        text = path.read_text("utf-8")
+        assert secret not in text and "方案里的" + secret not in text, path.name
+
+
+def test_move_clears_source_tidy_run_with_moved_content(tmp_path):
+    """应用过的整理记录里留着改动前原文，搬走文件后也要清掉。"""
+    plugin, dashboard, key, whisper, notebook = make(tmp_path)
+    secret = "私密健康内容-XYZ"
+    call(whisper.write("health.md", thing("health", description="私密", body=secret)))
+
+    async def model(prompt, selected=None):
+        return (
+            json.dumps(
+                [
+                    {
+                        "op": "write",
+                        "file": "health.md",
+                        "type": "note",
+                        "description": "私密",
+                        "content": "整理后的" + secret,
+                        "reason": "改写",
+                    }
+                ]
+            ),
+            [],
+        )
+
+    plugin.call_tidy_model = model
+    task = _tidy_run(dashboard, key)
+    body(
+        {
+            "scope": "whisper",
+            "key": key,
+            "operations": task["plan"]["operations"],
+        }
+    )
+    applied = route(dashboard, "consolidate_apply")
+    assert applied["status"] == "ok", applied
+    sid = f"whisper-{key}"
+    assert any(
+        op.get("file") == "health.md"
+        for run in plugin._tidy.runs(sid)
+        for op in run.get("ops") or []
+    )
+
+    done = move(dashboard, **from_whisper(key, "health.md"))
+    assert done["status"] == "ok", done
+    assert plugin._tidy.task(sid) is None
+    assert all(
+        op.get("file") != "health.md"
+        for run in plugin._tidy.runs(sid)
+        for op in run.get("ops") or []
+    )
+    body({"scope": "notebook", "key": "Bot-A", "file": "health.md"})
+    purged = route(dashboard, "file_purge")
+    assert purged["status"] == "ok", purged
+    for path in (tmp_path / "tidy").glob("*.json"):
+        assert secret not in path.read_text("utf-8"), path.name
+
+
+# ------------------------------------------------------------ 无冲突移动的竞态
+
+
+def test_move_create_refuses_when_target_file_appears_after_preview(tmp_path):
+    """预览时没有冲突、真正写入前目标里多了同名文件：拒绝，不能直接覆盖。"""
+    _, dashboard, key, whisper, notebook = make(tmp_path)
+    call(whisper.write("health.md", thing("health", description="搬来的", body="搬来的内容")))
+    dry = move(dashboard, **from_whisper(key, "health.md", dry_run=True))
+    assert dry["status"] == "ok"
+    assert dry["data"]["conflict"] is False
+
+    call(notebook.write("health.md", thing("health", description="刚出现", body="刚出现的目标内容")))
+    done = move(dashboard, **from_whisper(key, "health.md", conflict="create"))
+    assert done["status"] == "error", done
+    assert "刚出现同名文件" in done["message"]
+    assert (whisper.root / "health.md").is_file()
+    assert "刚出现的目标内容" in call(notebook.read("health.md"))
+
+
+def test_move_create_writes_when_target_is_still_free(tmp_path):
+    _, dashboard, key, whisper, notebook = make(tmp_path)
+    call(whisper.write("health.md", thing("health", description="搬来的", body="搬来的内容")))
+
+    done = move(dashboard, **from_whisper(key, "health.md", conflict="create"))
+    assert done["status"] == "ok", done
+    assert done["data"]["moved"] == 1
+    assert "搬来的内容" in call(notebook.read("health.md"))
+    assert not (whisper.root / "health.md").exists()

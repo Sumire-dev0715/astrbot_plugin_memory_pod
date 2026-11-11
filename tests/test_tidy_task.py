@@ -651,3 +651,250 @@ def test_same_scope_cannot_start_twice(tmp_path):
 
     run(scenario())
 
+
+# ------------------------------------------------------------ 方案过期校验
+
+
+def test_apply_skips_write_when_later_batch_file_changed_during_run(
+    tmp_path, monkeypatch
+):
+    """前一批模型调用期间被改过的文件，应用第二批发出的写入时必须跳过。"""
+    plugin, dashboard = setup(tmp_path)
+    store = plugin._store.notebook_scope("Bot-A")
+    old_body = "乙" * 700
+    write(store, "a.md", body="甲" * 700)
+    write(store, "b.md", body=old_body)
+    monkeypatch.setattr(consolidate, "MAX_INPUT_CHARS", 1000)
+    calls = {"n": 0}
+
+    async def model(prompt, selected=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            # 第一批还在跑时，聊天侧改了第二批的 b.md
+            await store.write(
+                "b.md",
+                thing("b", description="聊天侧新内容", body="聊天侧改过的新正文"),
+            )
+            return "[]", []
+        return (
+            json.dumps(
+                [
+                    {
+                        "op": "write",
+                        "file": "b.md",
+                        "type": "note",
+                        "description": "整理后的 b",
+                        "content": old_body,
+                        "reason": "精简",
+                    }
+                ]
+            ),
+            [],
+        )
+
+    plugin.call_tidy_model = model
+
+    async def scenario():
+        assert (await start(dashboard, "notebook", "Bot-A"))["status"] == "ok"
+        await dashboard.wait_background()
+        task = await get_task(dashboard, "notebook", "Bot-A")
+        assert task["batchCount"] == 2
+        op = next(
+            item for item in task["plan"]["operations"] if item["file"] == "b.md"
+        )
+        # 方案里的基准时间取的是任务开始时的快照，不是调用模型后的时间
+        assert op["baseMtime"] > 0
+        tw.REQUEST.body = {
+            "scope": "notebook",
+            "key": "Bot-A",
+            "operations": task["plan"]["operations"],
+        }
+        applied = await dashboard._wrap(dashboard.consolidate_apply)()
+        assert applied["status"] == "ok", applied
+        result = next(
+            item for item in applied["data"]["results"] if item["file"] == "b.md"
+        )
+        assert result["ok"] is False
+        assert "被改过" in result["message"]
+        assert "聊天侧改过的新正文" in (await store.read("b.md"))
+
+    run(scenario())
+
+
+def test_apply_skips_auto_fix_when_file_changed_during_run(tmp_path):
+    """整理期间被聊天侧改过的文件，方案里的自动修复不能拿快照旧正文覆盖。"""
+    plugin, dashboard = setup(tmp_path)
+    store = plugin._store.notebook_scope("Bot-A")
+    write(store, "user-123.md", body="人物", mem_type="person")
+    write(store, "note.md", body="见 [[User-123]]")
+
+    async def model(prompt, selected=None):
+        await store.write(
+            "note.md",
+            thing("note", description="聊天侧新内容", body="聊天侧刚写的新正文"),
+        )
+        return "[]", []
+
+    plugin.call_tidy_model = model
+
+    async def scenario():
+        assert (await start(dashboard, "notebook", "Bot-A"))["status"] == "ok"
+        await dashboard.wait_background()
+        task = await get_task(dashboard, "notebook", "Bot-A")
+        fix = next(op for op in task["plan"]["operations"] if op["op"] == "fix")
+        assert fix["baseMtime"] > 0
+        tw.REQUEST.body = {
+            "scope": "notebook",
+            "key": "Bot-A",
+            "operations": [fix],
+        }
+        applied = await dashboard._wrap(dashboard.consolidate_apply)()
+        assert applied["status"] == "ok", applied
+        result = applied["data"]["results"][0]
+        assert result["ok"] is False
+        assert "被改过" in result["message"]
+        assert "聊天侧刚写的新正文" in (await store.read("note.md"))
+
+    run(scenario())
+
+
+def test_apply_skips_auto_fix_when_file_deleted_during_run(tmp_path):
+    """整理期间被删进回收站的文件，自动修复不能把它重建出来。"""
+    plugin, dashboard = setup(tmp_path)
+    store = plugin._store.notebook_scope("Bot-A")
+    write(store, "note.md", body="见 [[gone]]")
+
+    async def model(prompt, selected=None):
+        await store.delete("note.md", actor="webui")
+        return "[]", []
+
+    plugin.call_tidy_model = model
+
+    async def scenario():
+        assert (await start(dashboard, "notebook", "Bot-A"))["status"] == "ok"
+        await dashboard.wait_background()
+        task = await get_task(dashboard, "notebook", "Bot-A")
+        fix = next(op for op in task["plan"]["operations"] if op["op"] == "fix")
+        tw.REQUEST.body = {
+            "scope": "notebook",
+            "key": "Bot-A",
+            "operations": [fix],
+        }
+        applied = await dashboard._wrap(dashboard.consolidate_apply)()
+        assert applied["status"] == "ok", applied
+        result = applied["data"]["results"][0]
+        assert result["ok"] is False
+        assert "被改过" in result["message"]
+        assert store.exists("note.md") is False
+        assert [item.file for item in store.trash_entries()] == ["note.md"]
+
+    run(scenario())
+
+
+def test_apply_skips_write_when_file_changed_after_plan_ready(tmp_path):
+    """方案就绪之后再改文件，应用时照旧跳过并说明原因。"""
+    plugin, dashboard = setup(tmp_path)
+    store = plugin._store.notebook_scope("Bot-A")
+    write(store, "a.md", body="旧正文")
+
+    async def model(prompt, selected=None):
+        return (
+            json.dumps(
+                [
+                    {
+                        "op": "write",
+                        "file": "a.md",
+                        "type": "note",
+                        "description": "整理后的 a",
+                        "content": "整理后的正文",
+                        "reason": "改写",
+                    }
+                ]
+            ),
+            [],
+        )
+
+    plugin.call_tidy_model = model
+
+    async def scenario():
+        assert (await start(dashboard, "notebook", "Bot-A"))["status"] == "ok"
+        await dashboard.wait_background()
+        task = await get_task(dashboard, "notebook", "Bot-A")
+        # 方案就绪之后，聊天侧又改了一次
+        await store.write(
+            "a.md",
+            thing("a", description="聊天侧新内容", body="方案就绪后的新正文"),
+        )
+        tw.REQUEST.body = {
+            "scope": "notebook",
+            "key": "Bot-A",
+            "operations": task["plan"]["operations"],
+        }
+        applied = await dashboard._wrap(dashboard.consolidate_apply)()
+        assert applied["status"] == "ok", applied
+        result = applied["data"]["results"][0]
+        assert result["ok"] is False
+        assert "被改过，已跳过" in result["message"]
+        assert "方案就绪后的新正文" in (await store.read("a.md"))
+
+    run(scenario())
+
+
+# ------------------------------------------------------------ 应用保护
+
+
+def test_apply_failed_write_blocks_later_delete(tmp_path):
+    """合并目标没写成就不能删源文件，这是避免丢内容的最后一道闸。"""
+    plugin, _ = setup(tmp_path)
+    store = plugin._store.notebook_scope("Bot-A")
+    write(store, "source.md", body="要保留的正文")
+
+    async def failing_write(*args, **kwargs):
+        return memstore.WriteReport(False, "写入失败（合成）")
+
+    store.write = failing_write
+    base_mtime = store.mtime("source.md") or 0.0
+    ops = [
+        consolidate.Operation(
+            op="write",
+            file="target.md",
+            type="note",
+            description="合并后的资料",
+            content="合并正文",
+            reason="合并",
+        ),
+        consolidate.Operation(
+            op="delete",
+            file="source.md",
+            reason="已合并进 target.md",
+            base_mtime=base_mtime,
+        ),
+    ]
+    results = run(pkg_tidy.apply(store, ops))
+    assert [item["ok"] for item in results] == [False, False]
+    assert results[1]["message"] == "有写入未完成，为避免丢内容已跳过删除"
+    assert run(store.read("source.md")) is not None
+
+
+# ------------------------------------------------------------ 已遗忘文件作为链接目标
+
+
+def test_link_to_forgotten_file_is_not_dangling(tmp_path):
+    """已遗忘的文件仍能被 memory_read 读到，指向它的链接不算悬空。"""
+    plugin, _ = setup(tmp_path)
+    store = plugin._store.notebook_scope("Bot-A")
+    write(store, "gone.md", body="旧资料")
+    write(store, "note.md", body="见 [[gone]]")
+    run(store.forget("gone.md"))
+
+    async def model(prompt, selected=None):
+        return "[]", []
+
+    headers = run(asyncio.to_thread(store.headers))
+    contents = {header.file: run(store.read(header.file)) for header in headers}
+    flags = pkg_tidy.file_flags(store, headers, contents)
+    assert "note.md" not in flags
+    proposal = run(pkg_tidy.propose(store, "小本本", model, file_times={}))
+    assert [op.file for op in proposal.operations if op.op == "fix"] == []
+    assert "见 [[gone]]" in run(store.read("note.md"))
+

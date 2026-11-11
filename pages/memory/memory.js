@@ -1476,7 +1476,9 @@
         danger: true,
       });
       if (ok) {
-        await sendMove(null, "overwrite", payload, targetRef);
+        // create：预览时目标里没有同名文件；真正写入时若刚出现同名文件，
+        // 后端会拒绝，不能替用户直接覆盖
+        await sendMove(null, "create", payload, targetRef);
       }
     }
 

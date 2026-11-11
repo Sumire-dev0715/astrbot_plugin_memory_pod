@@ -406,6 +406,112 @@ def test_file_purge_removes_content_from_task_plan(tmp_path):
     run(scenario())
 
 
+def test_file_purge_drops_plan_with_merged_source_content(tmp_path):
+    """被合并进别的文件的源文件彻底删除后，目标写入正文里的原文也要消失。"""
+    plugin, dashboard = setup(tmp_path)
+    store = plugin._store.notebook_scope("Bot-A")
+    secret = "这是要彻底删除的绝密正文-abc"
+    write(store, "person.md", body="人物资料")
+    write(store, "secret.md", body=secret)
+
+    async def model(prompt, selected=None):
+        return json.dumps(
+            [
+                {
+                    "op": "write",
+                    "file": "person.md",
+                    "type": "note",
+                    "description": "合并后的资料",
+                    "content": "人物资料\n" + secret,
+                    "reason": "合并 secret",
+                },
+                {
+                    "op": "delete",
+                    "file": "secret.md",
+                    "reason": "已合并进 person.md",
+                },
+            ]
+        ), []
+
+    plugin.call_tidy_model = model
+
+    async def scenario():
+        tw.REQUEST.body = {"scope": "notebook", "key": "Bot-A"}
+        tw.REQUEST.query = {}
+        assert (await dashboard._wrap(dashboard.tidy_start)())["status"] == "ok"
+        await dashboard.wait_background()
+        tw.REQUEST.body = {
+            "scope": "notebook",
+            "key": "Bot-A",
+            "file": "secret.md",
+        }
+        purged = await dashboard._wrap(dashboard.file_purge)()
+        assert purged["status"] == "ok", purged
+        # 方案里剩下的 write person.md 带着 secret 的原文：整份方案作废
+        assert plugin._tidy.task("notebook-Bot-A") is None
+        for path in (tmp_path / "tidy").glob("*.json"):
+            assert secret not in path.read_text("utf-8"), path.name
+
+    run(scenario())
+
+
+def test_file_purge_holds_scope_claim_so_tidy_cannot_start_midway(tmp_path):
+    """检查完"没在整理"之后才创建的任务不能再插进来读正文。"""
+    plugin, dashboard = setup(tmp_path)
+    store = plugin._store.notebook_scope("Bot-A")
+    write(store, "secret.md", body="绝密正文-claim")
+    original = store.delete_file_completely
+    started: list[dict] = []
+
+    async def delete_and_start(name, actor=""):
+        # 模拟并发：彻底删除进行到一半时，另一个请求发起整理
+        tw.REQUEST.body = {"scope": "notebook", "key": "Bot-A"}
+        tw.REQUEST.query = {}
+        started.append(await dashboard._wrap(dashboard.tidy_start)())
+        return await original(name, actor=actor)
+
+    store.delete_file_completely = delete_and_start
+    tw.REQUEST.body = {
+        "scope": "notebook",
+        "key": "Bot-A",
+        "file": "secret.md",
+    }
+    result = run(dashboard._wrap(dashboard.file_purge)())
+    assert result["status"] == "ok", result
+    assert started[0]["status"] == "error"
+    assert "整理中" in started[0]["message"]
+    # 请求结束后锁已释放
+    assert plugin._tidy.claim("notebook-Bot-A") is True
+    plugin._tidy.release("notebook-Bot-A")
+
+
+def test_whisper_purge_clears_tidy_records(tmp_path):
+    """清除整段悄悄话时，整理记录里的正文也要一起清掉。"""
+    plugin, dashboard = setup(tmp_path)
+    key = "Bot-A_FriendMessage_10001"
+    store = plugin._store.whisper_scope_by_key(key)
+    write(store, "secret.md", body="绝密正文-whisper")
+    task = pkg_tidy.new_task({"providerId": "p", "model": "m"})
+    task["state"] = pkg_tidy.TASK_READY
+    task["plan"] = {
+        "operations": [
+            {
+                "op": "write",
+                "file": "secret.md",
+                "content": "绝密正文-whisper",
+            }
+        ],
+        "files": ["secret.md"],
+    }
+    plugin._tidy.create_task(f"whisper-{key}", task)
+    tw.REQUEST.body = {"key": key, "target": "memories"}
+    result = run(dashboard._wrap(dashboard.whisper_purge)())
+    assert result["status"] == "ok", result
+    assert plugin._tidy.task(f"whisper-{key}") is None
+    for path in (tmp_path / "tidy").glob("*.json"):
+        assert "绝密正文-whisper" not in path.read_text("utf-8"), path.name
+
+
 def test_file_purge_refuses_while_tidy_running(tmp_path):
     plugin, dashboard = setup(tmp_path)
     store = plugin._store.notebook_scope("Bot-A")

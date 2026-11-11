@@ -104,7 +104,7 @@ async function pickTarget(p, query) {
   assert(/回收站/.test(confirmText), "确认框写明原文件进回收站");
   const beforeM1 = realMoveCalls(p).length;
   click(find(".overlay button", "移动"));
-  await expectMove(p, beforeM1, "overwrite", "health.md");
+  await expectMove(p, beforeM1, "create", "health.md");
   const moved = await p.peek("notebook", "Bot-A", "health.md");
   assert(moved.content && /睡得不好/.test(moved.content), "小本本里有搬过去的内容");
   const gone = await p.peek("whisper", privateKey, "health.md");

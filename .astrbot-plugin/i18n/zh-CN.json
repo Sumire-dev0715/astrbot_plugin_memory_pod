@@ -591,6 +591,8 @@
       "migratePointReplace": "覆盖目标里 {n} 个同名文件；被覆盖的旧内容会先存进历史版本。",
       "migratePointMove": "移动：成功写入目标的文件会从原处删除（进回收站）。",
       "migratePointCopy": "复制：原处的文件保持不变。",
+      "migratePointNotebookVisible": "移过去以后，这个机器人（{platform}）的所有群聊和私聊都能读到这些内容。",
+      "migratePointWhisperVisible": "移过去以后，只有目标这段对话能读到这些内容。",
       "migrated": "迁移完成",
       "migrateResult": "迁移结果",
       "migrateNothing": "还没有可迁移的记忆",

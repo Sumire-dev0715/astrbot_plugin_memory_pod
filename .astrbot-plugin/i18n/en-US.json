@@ -630,6 +630,8 @@
       "migratePointReplace": "Overwrites {n} files with the same name in the target; the old content is saved to history first.",
       "migratePointMove": "Move: files written to the target are removed from the source (into its trash).",
       "migratePointCopy": "Copy: the files at the source stay as they are.",
+      "migratePointNotebookVisible": "After the move, every group chat and private chat of this bot ({platform}) can read this content.",
+      "migratePointWhisperVisible": "After the move, only the target conversation can read this content.",
       "migrated": "Move finished",
       "migrateResult": "Move result",
       "migrateNothing": "No memories to move yet",

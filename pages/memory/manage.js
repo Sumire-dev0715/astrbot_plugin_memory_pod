@@ -1895,6 +1895,16 @@
     async function run() {
       const res = await ui.apiPost("migrate/scope", payload(true));
       const counts = res.counts || {};
+      const from = res.from || {};
+      const to = res.to || {};
+      // 悄悄话搬到别处会改变可见范围：搬到小本本能被这个机器人的所有对话
+      // 读到，搬到另一段对话则是换一群人能读（PLAN 3.12.2 的可见范围提示）
+      const visibilityPoint =
+        from.scope === "whisper" && to.scope === "notebook"
+          ? t("migratePointNotebookVisible", { platform: to.platform || to.key })
+          : from.scope === "whisper" && to.scope === "whisper" && to.key !== from.key
+            ? t("migratePointWhisperVisible")
+            : null;
       const ok = await ui.confirm({
         title: t("migrateTitle"),
         message: store.describeLabel(res.from) + " → " + store.describeLabel(res.to),
@@ -1902,6 +1912,7 @@
           t("migrateWillWrite", { n: (counts.added || 0) + (counts.replaced || 0) }),
           counts.replaced ? t("migratePointReplace", { n: counts.replaced }) : null,
           mode.value === "move" ? t("migratePointMove") : t("migratePointCopy"),
+          visibilityPoint,
         ],
         confirmLabel: t("runMigrate"),
         danger: mode.value === "move" || Boolean(counts.replaced),

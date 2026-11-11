@@ -97,6 +97,19 @@ const { boot, assert, until, sleep, section, summary } = require("../harness.js"
   const stillThere = await p.peek("notebook", "Bot-B", "hello.md");
   assert(stillThere.content, "复制模式下来源还在");
 
+  // 悄悄话搬到小本本：确认框要写明可见范围（PLAN 3.12.2）
+  const whisperOpt = Array.from(src.querySelectorAll("option")).find((o) => /^悄悄话 · /.test(o.textContent));
+  assert(whisperOpt, "迁移来源里有悄悄话: " + Array.from(src.querySelectorAll("option")).map((o) => o.textContent).join(" / "));
+  change(src, whisperOpt.value);
+  await sleep(80);
+  click(find(".pane-detail button", "开始迁移"));
+  await until(() => $(".overlay"), "悄悄话迁移确认");
+  const whisperMoveText = text($(".overlay"));
+  console.log("  悄悄话迁移确认:", whisperMoveText.slice(0, 240));
+  assert(/所有群聊和私聊都能读到/.test(whisperMoveText), "悄悄话搬到小本本要写明可见范围");
+  click(find(".overlay button", "取消"));
+  await until(() => !$(".overlay"), "取消悄悄话迁移");
+
   click(find("[role=tab]", "平台改名"));
   await sleep(100);
   const plat = $$(".pane-detail input.mono");
