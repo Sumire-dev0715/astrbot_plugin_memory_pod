@@ -2795,7 +2795,6 @@
         tags: h("span", { class: "tag tag-muted" }, store.kindLabel(s.kind)),
         desc: t("whisperSub"),
         actions: [
-          h("button", { type: "button", class: "btn btn-sm", onclick: function () { MP.app.showContext(key); } }, icon("context"), t("viewContext")),
           newButton("whisper"),
         ],
       });

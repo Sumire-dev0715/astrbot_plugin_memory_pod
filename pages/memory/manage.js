@@ -192,7 +192,6 @@
         desc: store.sessionSub(s) || t("contextSub"),
         actions: [
           h("button", { type: "button", class: "btn btn-sm", onclick: M.action(load) }, icon("refresh"), t("refresh")),
-          h("button", { type: "button", class: "btn btn-sm btn-ghost", onclick: function () { MP.app.openConversation(key, true); } }, icon("whisper"), t("openWhisper")),
         ],
       });
       root.setAttribute("aria-labelledby", head.id);

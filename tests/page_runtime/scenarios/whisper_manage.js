@@ -72,7 +72,11 @@ const { boot, assert, until, sleep, section, summary } = require("../harness.js"
   await sleep(50);
 
   section("D 上下文面板");
-  click(find(".pane-detail button", "查看上下文"));
+  // 悄悄话详情里的「查看上下文」按钮已去掉，改从顶栏「上下文」进
+  click(find(".nav-item", "上下文"));
+  await sleep(60);
+  // 上下文列表按备注优先显示（"产品讨论群"），这里只要匹配到这一段对话
+  click(find(".row-conv", "产品"));
   await until(() => $(".stackbar"), "上下文面板的比例横条");
   await sleep(100);
   const ctxText = text($(".pane-detail"));

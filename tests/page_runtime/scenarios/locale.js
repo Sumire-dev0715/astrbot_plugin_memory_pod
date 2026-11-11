@@ -78,7 +78,10 @@ const { boot, assert, until, sleep, section, summary } = require("../harness.js"
   click(find(".row-conv", "产品群"));
   await sleep(150);
   scan("conv", $(".shell"));
-  click(find(".pane-detail button", "View context"));
+  // 悄悄话详情里的「View context」按钮已去掉，改从顶栏「Context」进
+  click(find(".nav-item", "Context"));
+  await sleep(80);
+  click(find(".row-conv", "产品"));
   await until(() => $(".stackbar"), "context");
   scan("context", $(".pane-detail"));
   console.log("  上下文:", text($(".pane-detail")).slice(0, 900));
