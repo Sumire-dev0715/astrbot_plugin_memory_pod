@@ -1,7 +1,7 @@
 name: astrbot_plugin_memory_pod
 desc: 鲸群记忆：索引式 Markdown 长期记忆插件，无需 Embedding；三层记忆（留言板 / 小本本 / 悄悄话）、自动历史版本与回收站、日记按段续写、搜索或模式与片段。
 help: 装上即用。聊天模型通过 memory_read / memory_search 查阅记忆，并用 memory_write / memory_edit / memory_delete 写入：留言板是所有会话可见的告示，小本本是这台机器人的所有群聊和私聊共享的记忆，悄悄话只有当前这段对话能读写。上下文的截断与压缩交给 AstrBot 自己的上下文管理策略，插件不改动对话历史。覆盖/删除前自动保存历史，回收站可恢复；日记由插件决定写到哪一篇并按日期分段；管理页可发布带署名的留言板告示、手动整理记忆并撤销。管理页需要 AstrBot v4.24.1 及以上。管理员指令：/mb_status。
-version: v2.3.0-dev.3
+version: v2.3.0-dev.4
 author: Sumire-dev0715
 display_name: 鲸群记忆
 short_desc: 让机器人把留言板、小本本和悄悄话分开记，还能回溯和整理。

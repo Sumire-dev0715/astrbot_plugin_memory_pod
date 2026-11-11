@@ -288,7 +288,7 @@
   /** 整理模型下拉框（PLAN 3.12.1）：选择存在服务端，下次打开还在。 */
   function TidyModelCard(onChange) {
     const root = h("div", { class: "model-picker" });
-    const st = { loading: true, error: "", models: [], selected: null, saving: false };
+    const st = { loading: true, error: "", models: [], selected: null, saving: false, timeout: null, choices: [], customRange: null, draftSeconds: "" };
 
     async function load() {
       st.loading = true;
@@ -297,6 +297,12 @@
         const data = await ui.apiGet("tidy/models");
         st.models = data.models || [];
         st.selected = data.selected || null;
+        st.timeout = data.timeout || { mode: "auto" };
+        st.choices = data.timeoutChoices || [];
+        st.customRange = data.timeoutCustomRange || null;
+        if (st.timeout && st.timeout.mode === "custom") {
+          st.draftSeconds = String(st.timeout.seconds || "");
+        }
         st.error = "";
       } catch (err) {
         st.error = err.message;
@@ -406,8 +412,125 @@
           ? ui.notice("warn", t("tidyPickUnavailable"))
           : st.selected && st.selected.model
             ? h("p", { class: "hint" }, t("tidyPickCurrent", { model: st.selected.providerId + " · " + st.selected.model }))
-            : null
+            : null,
+        timeoutRows()
       );
+    }
+
+    /** 超时下拉框：默认（自动推算）、不限时、3 分钟、5 分钟、自定义。 */
+    function timeoutRows() {
+      const mode = (st.timeout && st.timeout.mode) || "auto";
+      const fixed = st.timeout && st.timeout.seconds ? st.timeout.seconds : null;
+      const selectId = ui.uid("tidy-timeout");
+      const options = [
+        h("option", { value: "auto", selected: mode === "auto" }, t("tidyTimeoutAuto")),
+        h("option", { value: "none", selected: mode === "none" }, t("tidyTimeoutNone")),
+      ];
+      (st.choices || []).forEach(function (seconds) {
+        options.push(
+          h(
+            "option",
+            {
+              value: "fixed:" + seconds,
+              selected: mode === "fixed" && fixed === seconds,
+            },
+            t("tidyTimeoutMinutes", { n: Math.round(seconds / 60) })
+          )
+        );
+      });
+      options.push(
+        h("option", { value: "custom", selected: mode === "custom" }, t("tidyTimeoutCustom"))
+      );
+      const rows = [
+        h("p", { class: "hint" }, t("tidyTimeoutHint")),
+        h(
+          "div",
+          { class: "field-row" },
+          h("label", { class: "field-label", for: selectId }, t("tidyTimeoutTitle")),
+          h(
+            "select",
+            {
+              class: "input",
+              id: selectId,
+              disabled: st.saving,
+              onchange: function (event) {
+                const value = event.target.value;
+                if (value.indexOf("fixed:") === 0) {
+                  saveTimeout({ mode: "fixed", seconds: Number(value.slice(6)) });
+                } else if (value === "custom") {
+                  st.draftSeconds = st.draftSeconds || String(fixed || 300);
+                  paint();
+                } else {
+                  saveTimeout({ mode: value });
+                }
+              },
+            },
+            options
+          )
+        ),
+      ];
+      if (mode === "custom") {
+        const range = st.customRange || [30, 3600];
+        rows.push(
+          h(
+            "div",
+            { class: "field-row" },
+            h(
+              "label",
+              { class: "field-label" },
+              t("tidyTimeoutSecondsLabel", { min: range[0], max: range[1] })
+            ),
+            h("input", {
+              class: "input",
+              type: "number",
+              min: String(range[0]),
+              max: String(range[1]),
+              value: st.draftSeconds || String(fixed || 300),
+              disabled: st.saving,
+              oninput: function (event) {
+                st.draftSeconds = event.target.value;
+              },
+            }),
+            h(
+              "button",
+              {
+                class: "btn",
+                disabled: st.saving,
+                onclick: function () {
+                  saveTimeout({ mode: "custom", seconds: Number(st.draftSeconds) });
+                },
+              },
+              t("tidyTimeoutSave")
+            )
+          )
+        );
+      }
+      return rows;
+    }
+
+    async function saveTimeout(timeout) {
+      if (st.saving) {
+        return;
+      }
+      st.saving = true;
+      paint();
+      try {
+        const data = await ui.apiPost("tidy/timeout", { timeout: timeout });
+        st.timeout = data.timeout || st.timeout;
+        if (st.timeout && st.timeout.mode === "custom") {
+          st.draftSeconds = String(st.timeout.seconds || "");
+        }
+        ui.toast(t("tidyTimeoutSaved"));
+        if (onChange) {
+          onChange();
+        }
+      } catch (err) {
+        ui.toast(err.message, "error");
+        await load();
+        return;
+      }
+      st.saving = false;
+      paint();
     }
 
     paint();
@@ -1013,7 +1136,7 @@
     });
     (ov.whispers || []).forEach(function (item) {
       if (item.fileCount > 0) {
-        targets.push({ ref: store.ref("whisper", item.key), label: t("whisperTitle", { name: store.sessionTitle(item) }) });
+        targets.push({ ref: store.ref("whisper", item.key), label: store.whisperLabel(item, item.key) });
       }
     });
     return targets;

@@ -154,7 +154,20 @@ class FakePlugin:
                 "model": (match or {}).get("model") or selected.get("model", ""),
                 "available": match is not None,
             }
-        return {"models": list(self.tidy_models), "selected": current}
+        return {
+            "models": list(self.tidy_models),
+            "selected": current,
+            "timeout": self._tidy.timeout_setting(),
+            "timeoutChoices": list(pkg_tidy.TIMEOUT_FIXED_CHOICES),
+            "timeoutCustomRange": [
+                pkg_tidy.TIMEOUT_CUSTOM_MIN,
+                pkg_tidy.TIMEOUT_CUSTOM_MAX,
+            ],
+        }
+
+    def set_tidy_timeout(self, raw):
+        self._tidy.save_timeout(raw)
+        return self.tidy_model_state()
 
     async def call_tidy_model(self, prompt, model=None):
         self.prompts.append(prompt)

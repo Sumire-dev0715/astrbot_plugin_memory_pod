@@ -398,6 +398,7 @@ class MemoryDashboard:
             ("board/publish", "POST", self.board_publish, "记忆管理：发布留言板告示"),
             ("tidy/models", "GET", self.tidy_models, "记忆管理：可用的整理模型"),
             ("tidy/model", "POST", self.tidy_model_select, "记忆管理：选择整理模型"),
+            ("tidy/timeout", "POST", self.tidy_timeout, "记忆管理：整理超时"),
             ("tidy/start", "POST", self.tidy_start, "记忆管理：开始整理（后台任务）"),
             ("tidy/task", "GET", self.tidy_task, "记忆管理：整理任务状态"),
             ("tidy/tasks", "GET", self.tidy_tasks, "记忆管理：全部整理任务状态"),
@@ -1294,6 +1295,31 @@ class MemoryDashboard:
         )
         state = await asyncio.to_thread(self.plugin.tidy_model_state)
         return _ok(state, f"整理模型已改为 {provider_id}（{match.get('model', '')}）")
+
+    async def tidy_timeout(self) -> dict:
+        """保存整理调用的超时（PLAN 3.12 补充）：默认自适应、不限时或固定秒数。"""
+        body = await _body()
+        raw = body.get("timeout")
+        if isinstance(raw, dict) and str(raw.get("mode") or "") == tidy.TIMEOUT_MODE_CUSTOM:
+            try:
+                seconds = int(raw.get("seconds"))
+            except (TypeError, ValueError):
+                seconds = 0
+            if not tidy.TIMEOUT_CUSTOM_MIN <= seconds <= tidy.TIMEOUT_CUSTOM_MAX:
+                raise ApiError(
+                    f"自定义超时要在 {tidy.TIMEOUT_CUSTOM_MIN}–"
+                    f"{tidy.TIMEOUT_CUSTOM_MAX} 秒之间"
+                )
+        state = await asyncio.to_thread(self.plugin.set_tidy_timeout, raw)
+        setting = state.get("timeout") or {}
+        mode = setting.get("mode")
+        if mode == "none":
+            note = "整理超时已改为不限时"
+        elif mode in ("fixed", "custom"):
+            note = f"整理超时已改为 {int(setting.get('seconds', 0))} 秒"
+        else:
+            note = "整理超时已改为默认（按内容量自动推算）"
+        return _ok(state, note)
 
     async def tidy_start(self) -> dict:
         """开始一份后台整理任务，立刻返回任务 ID（PLAN 3.12.4）。"""

@@ -653,3 +653,28 @@ def test_body_search_is_reachable_by_mouse_and_by_enter():
     assert memory.count("bodySearchNote(r, st)") == 3  # 定义 + 文件列表 + 告示列表
     assert 'apiGet("search"' in memory
     assert memory.count('event.key === "Enter"') >= 1 and "onEnter" in memory
+
+
+def test_whisper_scope_labels_carry_the_bot_name():
+    """两个机器人时，同一个会话会有两条"悄悄话"，名字一样分不清，标签要带机器人名。"""
+    store = _page("store.js")
+    label = _between(store, "function whisperLabel(", "/** 作用域的完整名称")
+    assert 't("whisperTitleBot"' in label and "{ name: name, bot: bot }" in label
+    assert "s.platform" in label
+    # 作用域名、迁移报告、整理与导出候选、回收站选择框都走这一个函数
+    assert "whisperByKey(r.key), r.key" in store
+    assert "whisperByKey(info.key) || info, info.key" in store
+    assert store.count("whisperLabel(item, item.key)") == 2
+    assert "whisperLabel: whisperLabel" in store
+    manage = _page("manage.js")
+    assert "store.whisperLabel(item, item.key)" in manage
+
+
+def test_tidy_timeout_is_selectable_in_the_page():
+    """整理超时下拉框：默认、不限时、3 分钟、5 分钟、自定义。"""
+    manage = _page("manage.js")
+    card = _between(manage, "function TidyModelCard(", "// ------------------------------------------------------------ 整理：方案审阅")
+    for key in ("tidyTimeoutAuto", "tidyTimeoutNone", "tidyTimeoutMinutes", "tidyTimeoutCustom", "tidyTimeoutSecondsLabel", "tidyTimeoutSave"):
+        assert 't("' + key + '"' in card, key
+    assert 'apiPost("tidy/timeout"' in card
+    assert 'value: "fixed:" + seconds' in card

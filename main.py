@@ -69,9 +69,35 @@ from .web_api import MemoryDashboard
 PLUGIN_NAME = "astrbot_plugin_memory_pod"
 LOG_PREFIX = "[memory_pod] "
 
-# 管理页手动整理调用模型失败时的尝试次数与单次超时（不再有配置项）。
+# 管理页手动整理调用模型失败时的尝试次数（不再有配置项）。
 CONSOLIDATE_RETRIES = 2
-CONSOLIDATE_TIMEOUT = 120
+# 整理单次调用的超时。管理员在管理页选"默认"时按提示词长度推算：每 100 字
+# 给 1 秒，最少 3 分钟、最多 10 分钟——一批最多 6 万字正文，慢模型也要
+# 170 秒以上，固定 120 秒必然超时。超时后的第二次尝试放宽到 1.5 倍。
+TIDY_TIMEOUT_CHARS_PER_SECOND = 100
+TIDY_TIMEOUT_MIN = 180
+TIDY_TIMEOUT_MAX = 600
+TIDY_TIMEOUT_RETRY_FACTOR = 1.5
+TIDY_TIMEOUT_RETRY_MAX = 900
+
+
+def resolve_tidy_timeout(prompt: str, setting: dict | None) -> float | None:
+    """这一次整理调用该等多少秒；None 表示不限时。
+
+    setting 来自管理页（core.tidy.normalize_timeout 校验过）：
+    auto 按提示词长度推算，none 不限时，fixed/custom 用选定或填入的秒数。
+    """
+    mode = str((setting or {}).get("mode") or "auto")
+    if mode == "none":
+        return None
+    if mode in ("fixed", "custom"):
+        seconds = (setting or {}).get("seconds")
+        if isinstance(seconds, (int, float)) and seconds > 0:
+            return float(seconds)
+    size = len(prompt or "")
+    return float(
+        min(max(size / TIDY_TIMEOUT_CHARS_PER_SECOND, TIDY_TIMEOUT_MIN), TIDY_TIMEOUT_MAX)
+    )
 # 拿不到本轮工具声明时（结构异常等）估算工具 schema 的兜底余量；
 # 正常路径按 req.func_tool 的实际 schema 序列化后实测。
 TOOL_SCHEMA_ALLOWANCE = 800
@@ -1429,7 +1455,18 @@ class MemoryPodPlugin(Star):
                 "model": (match or {}).get("model") or selected.get("model", ""),
                 "available": match is not None,
             }
-        return {"models": options, "selected": current}
+        return {
+            "models": options,
+            "selected": current,
+            "timeout": self._tidy.timeout_setting(),
+            "timeoutChoices": list(tidy.TIMEOUT_FIXED_CHOICES),
+            "timeoutCustomRange": [tidy.TIMEOUT_CUSTOM_MIN, tidy.TIMEOUT_CUSTOM_MAX],
+        }
+
+    def set_tidy_timeout(self, raw: object) -> dict:
+        """保存管理页选的整理超时；返回值与 tidy_model_state 同形。"""
+        self._tidy.save_timeout(raw)
+        return self.tidy_model_state()
 
     async def _generate_with_provider(self, provider_id: str, prompt: str):
         """按提供商 ID 调用指定模型。
@@ -1475,26 +1512,37 @@ class MemoryPodPlugin(Star):
             item["providerId"] == provider_id for item in self.tidy_model_options()
         ):
             return None, [f"选择的整理模型 {provider_id} 已不可用"]
+        base_timeout = resolve_tidy_timeout(prompt, self._tidy.timeout_setting())
         for attempt in range(1, CONSOLIDATE_RETRIES + 1):
+            timeout = base_timeout
+            if timeout is not None and attempt > 1:
+                timeout = min(timeout * TIDY_TIMEOUT_RETRY_FACTOR, TIDY_TIMEOUT_RETRY_MAX)
+            wait_note = "不限时" if timeout is None else f"{timeout:g}s"
             try:
-                resp = await asyncio.wait_for(
-                    self._generate_with_provider(provider_id, prompt),
-                    timeout=CONSOLIDATE_TIMEOUT,
-                )
+                call = self._generate_with_provider(provider_id, prompt)
+                if timeout is None:
+                    resp = await call
+                else:
+                    resp = await asyncio.wait_for(call, timeout=timeout)
                 text = self._completion_text(resp)
                 if text and text.strip():
-                    attempts_log.append(f"整理模型 {label} 第 {attempt} 次成功")
+                    attempts_log.append(
+                        f"整理模型 {label} 第 {attempt} 次成功（等待上限 {wait_note}）"
+                    )
                     return text, attempts_log
-                attempts_log.append(f"整理模型 {label} 第 {attempt} 次返回空")
+                attempts_log.append(
+                    f"整理模型 {label} 第 {attempt} 次返回空（等待上限 {wait_note}）"
+                )
             except asyncio.TimeoutError:
                 attempts_log.append(
-                    f"整理模型 {label} 第 {attempt} 次超时（{CONSOLIDATE_TIMEOUT}s）"
+                    f"整理模型 {label} 第 {attempt} 次超时（等待上限 {wait_note}）"
                 )
             except Exception as exc:  # noqa: BLE001 - provider 实现不可控
                 # 异常原文可能带请求内容或鉴权信息，而这段记录会进管理页；
                 # 只留类型。
                 attempts_log.append(
-                    f"整理模型 {label} 第 {attempt} 次失败（{type(exc).__name__}）"
+                    f"整理模型 {label} 第 {attempt} 次失败（{type(exc).__name__}，"
+                    f"等待上限 {wait_note}）"
                 )
             if attempt < CONSOLIDATE_RETRIES:
                 await asyncio.sleep(min(2 ** (attempt - 1), 4))

@@ -103,6 +103,18 @@
     return bits.join(" · ");
   }
 
+  /**
+   * 悄悄话作用域的名称。两台以上机器人时，同一个会话会有两条"悄悄话"，
+   * 名字一样分不清，所以带上平台的机器人名。
+   */
+  function whisperLabel(s, fallbackKey) {
+    const name = sessionTitle(s) || fallbackKey || "";
+    const bot = s && s.platform ? s.platform : "";
+    return bot
+      ? t("whisperTitleBot", { name: name, bot: bot })
+      : t("whisperTitle", { name: name });
+  }
+
   /** 作用域的完整名称，如"小本本 · Bot-A" */
   function scopeLabel(r) {
     if (!r) {
@@ -114,8 +126,7 @@
     if (r.scope === "notebook") {
       return t("notebookTitle", { platform: r.key });
     }
-    const s = whisperByKey(r.key);
-    return t("whisperTitle", { name: s ? sessionTitle(s) : r.key });
+    return whisperLabel(whisperByKey(r.key), r.key);
   }
 
   /** 迁移报告里的作用域（transfer.describe 的结构） */
@@ -129,8 +140,7 @@
     if (info.scope === "notebook") {
       return t("notebookTitle", { platform: info.platform || info.key });
     }
-    const known = whisperByKey(info.key);
-    return t("whisperTitle", { name: sessionTitle(known || info) || info.key });
+    return whisperLabel(whisperByKey(info.key) || info, info.key);
   }
 
   /** 有记忆的全部作用域（整理、导出、迁移的候选） */
@@ -147,7 +157,7 @@
     });
     (ov.whispers || []).forEach(function (item) {
       if (item.fileCount > 0) {
-        items.push({ ref: ref("whisper", item.key), label: t("whisperTitle", { name: sessionTitle(item) }), count: item.fileCount });
+        items.push({ ref: ref("whisper", item.key), label: whisperLabel(item, item.key), count: item.fileCount });
       }
     });
     return items;
@@ -161,7 +171,7 @@
       items.push({ ref: ref("notebook", item.key), label: t("notebookTitle", { platform: item.platform || item.key }), count: item.fileCount });
     });
     (ov.whispers || []).forEach(function (item) {
-      items.push({ ref: ref("whisper", item.key), label: t("whisperTitle", { name: sessionTitle(item) }), count: item.fileCount });
+      items.push({ ref: ref("whisper", item.key), label: whisperLabel(item, item.key), count: item.fileCount });
     });
     return items;
   }
@@ -342,6 +352,7 @@
     sessionTitle: sessionTitle,
     sessionSub: sessionSub,
     scopeLabel: scopeLabel,
+    whisperLabel: whisperLabel,
     describeLabel: describeLabel,
     scopesWithFiles: scopesWithFiles,
     allScopes: allScopes,

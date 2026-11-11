@@ -58,6 +58,46 @@ MAX_ACTIVE_TASKS = 2
 
 MODEL_FILENAME = "model.json"
 
+# 整理调用的超时（管理页可选）：auto 按提示词长度推算，none 不限时，
+# fixed 用固定秒数，custom 由管理员填。
+TIMEOUT_MODE_AUTO = "auto"
+TIMEOUT_MODE_NONE = "none"
+TIMEOUT_MODE_FIXED = "fixed"
+TIMEOUT_MODE_CUSTOM = "custom"
+TIMEOUT_MODES = (
+    TIMEOUT_MODE_AUTO,
+    TIMEOUT_MODE_NONE,
+    TIMEOUT_MODE_FIXED,
+    TIMEOUT_MODE_CUSTOM,
+)
+# 下拉框里的两个固定档：3 分钟、5 分钟
+TIMEOUT_FIXED_CHOICES = (180, 300)
+TIMEOUT_CUSTOM_MIN = 30
+TIMEOUT_CUSTOM_MAX = 3600
+DEFAULT_TIMEOUT = {"mode": TIMEOUT_MODE_AUTO}
+
+
+def normalize_timeout(raw: object) -> dict:
+    """校验管理页传来的超时设置；不合法的值退回默认（自动推算）。"""
+    if not isinstance(raw, dict):
+        return dict(DEFAULT_TIMEOUT)
+    mode = str(raw.get("mode") or "").strip()
+    if mode == TIMEOUT_MODE_NONE:
+        return {"mode": TIMEOUT_MODE_NONE}
+    if mode in (TIMEOUT_MODE_FIXED, TIMEOUT_MODE_CUSTOM):
+        try:
+            seconds = int(raw.get("seconds"))
+        except (TypeError, ValueError):
+            return dict(DEFAULT_TIMEOUT)
+        if mode == TIMEOUT_MODE_FIXED and seconds not in TIMEOUT_FIXED_CHOICES:
+            return dict(DEFAULT_TIMEOUT)
+        if mode == TIMEOUT_MODE_CUSTOM and not (
+            TIMEOUT_CUSTOM_MIN <= seconds <= TIMEOUT_CUSTOM_MAX
+        ):
+            return dict(DEFAULT_TIMEOUT)
+        return {"mode": mode, "seconds": seconds}
+    return dict(DEFAULT_TIMEOUT)
+
 # 撤销时判断"之后有没有再改过"的写入时间误差
 MTIME_TOLERANCE = consolidate.MTIME_TOLERANCE
 
@@ -509,8 +549,29 @@ class TidyBook:
             "model": str(model or "").strip(),
         }
         with self._lock:
-            self._write(self.base_dir / MODEL_FILENAME, selected)
+            # 超时设置和模型存在同一个文件里，改模型不能把它抹掉
+            data = self._read(self.base_dir / MODEL_FILENAME)
+            payload = dict(selected)
+            payload["timeout"] = normalize_timeout(
+                data.get("timeout") if isinstance(data, dict) else None
+            )
+            self._write(self.base_dir / MODEL_FILENAME, payload)
         return selected
+
+    def timeout_setting(self) -> dict:
+        data = self._read(self.base_dir / MODEL_FILENAME)
+        return normalize_timeout(
+            data.get("timeout") if isinstance(data, dict) else None
+        )
+
+    def save_timeout(self, raw: object) -> dict:
+        setting = normalize_timeout(raw)
+        with self._lock:
+            data = self._read(self.base_dir / MODEL_FILENAME)
+            payload = dict(data) if isinstance(data, dict) else {}
+            payload["timeout"] = setting
+            self._write(self.base_dir / MODEL_FILENAME, payload)
+        return setting
 
 
 # ---------------------------------------------------------------- 分批
