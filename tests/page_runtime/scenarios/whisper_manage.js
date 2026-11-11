@@ -118,9 +118,10 @@ const { boot, assert, until, sleep, section, summary } = require("../harness.js"
   // 展开一项看对比
   click(find(".ops button", "查看改动"));
   await until(() => $(".op-change .diff") || $(".op-change .md"), "展开改动", 4000);
-  // 取消第三项
-  const box3 = $$(".ops input[type=checkbox]")[2];
-  click(box3);
+  // 取消删除项（方案顺序由合并逻辑决定，按类型找更稳）
+  const deleteBox = $(".ops .op-delete input[type=checkbox]");
+  assert(deleteBox, "方案里有删除项");
+  click(deleteBox);
   await sleep(20);
   assert(/应用选中的 2 项/.test(text($(".sticky-actions"))), "按钮文案随勾选变化: " + text($(".sticky-actions")));
   // 离开会提示
@@ -132,7 +133,7 @@ const { boot, assert, until, sleep, section, summary } = require("../harness.js"
   await until(() => $(".overlay"), "应用确认");
   const at = text($(".overlay"));
   console.log("  应用确认:", at.slice(0, 260));
-  assert(/新建 0 个、改写 1 个、自动修复 0 个、删除 1 个/.test(at) && /撤销/.test(at), "应用确认写清数量和可撤销");
+  assert(/新建 1 个、改写 1 个、自动修复 0 个、删除 0 个/.test(at) && /撤销/.test(at), "应用确认写清数量和可撤销");
   click(find(".overlay button", "应用"));
   await until(() => p.lastCall("consolidate/apply"), "consolidate/apply");
   const ap = p.lastCall("consolidate/apply");

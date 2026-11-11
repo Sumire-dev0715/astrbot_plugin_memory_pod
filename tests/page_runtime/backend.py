@@ -7,6 +7,7 @@ tests/test_page_runtime.py 用 start() 在后台线程里起它，再让 node �
 控制用的路径（页面不会调用）：
   GET /__reset[?empty=1]            重新生成合成数据（empty=1 是什么都没有的新装状态）
   GET /__fail?endpoint=&count=      让某个接口接下来的 count 次请求返回错误
+  GET /__clear_model                清掉已选的整理模型
   GET /__peek?scope=&key=&file=     读磁盘上的文件原文，给断言用
 所有数据都是代码里造出来的合成内容，不读任何真实的记忆。
 """
@@ -155,6 +156,11 @@ class Handler(BaseHTTPRequestHandler):
             return self._send({"ok": True})
         if endpoint == "__fail":
             STATE.setdefault("fail", {})[params["endpoint"]] = int(params.get("count", "1"))
+            return self._send({"ok": True})
+        if endpoint == "__clear_model":
+            model_file = STATE["plugin"]._tidy.base_dir / "model.json"
+            if model_file.is_file():
+                model_file.unlink()
             return self._send({"ok": True})
         failing = STATE.get("fail", {})
         if failing.get(endpoint, 0) > 0:

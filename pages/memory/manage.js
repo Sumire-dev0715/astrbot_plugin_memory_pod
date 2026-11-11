@@ -557,6 +557,10 @@
       ),
       autoCount ? ui.notice("info", t("autoFixCount", { n: autoCount })) : null,
       (plan.needsSplit || []).length ? ui.notice("warn", t("needsSplitHint", { n: plan.needsSplit.length }) + " " + plan.needsSplit.join(t("listSeparator"))) : null,
+      // 批外操作、读不出的文件等说明由后端给（管理员排错用，保留中文原因）
+      (plan.notices || [])
+        .filter(function (item) { return item && item.kind !== "needs_split" && item.message; })
+        .map(function (item) { return ui.notice("warn", item.message); }),
       (plan.skipped || []).length ? ui.notice("info", t("consolidateSkipped", { n: plan.skipped.length })) : null,
       list
     );

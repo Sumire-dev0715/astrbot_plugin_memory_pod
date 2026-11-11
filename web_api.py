@@ -435,6 +435,10 @@ class MemoryDashboard:
         """等整理任务跑完；测试驱动后台任务用，页面不会调用。"""
         await self.tidy_runner.wait()
 
+    async def stop_background(self) -> None:
+        """插件卸载/重载时取消整理任务，别让旧实例继续写任务状态。"""
+        await self.tidy_runner.stop()
+
     def _purge_routes(self) -> None:
         apis = getattr(self.plugin.context, "registered_web_apis", None)
         if isinstance(apis, list):
@@ -679,13 +683,9 @@ class MemoryDashboard:
         meta = await asyncio.to_thread(
             self.plugin._tidy.meta, tidy.scope_id(scope, key)
         )
-        task = await asyncio.to_thread(
-            self.plugin._tidy.task, tidy.scope_id(scope, key)
-        )
         data["scope"] = scope
         data["key"] = key
         data["tidy"] = self._tidy_info(meta)
-        data["task"] = tidy.public_task(task)
         data["forgettingEnabled"] = self.plugin._forgetting_on()
         data["forgetAfterDays"] = self.plugin._forget_after_days()
         # 删除、恢复的确认框要写清能找回多久：0 表示永久保留（PLAN 3.1）
@@ -1149,6 +1149,11 @@ class MemoryDashboard:
         scope, key, store = self._scope_from_body(body)
         name = self._file_name(body.get("file"))
         sid = tidy.scope_id(scope, key)
+        current = await asyncio.to_thread(self.plugin._tidy.task, sid)
+        if current is not None and current.get("state") == tidy.TASK_RUNNING:
+            # 正在跑的整理还会把这份正文写进方案；先取消或等它结束，
+            # 否则"彻底删除"之后方案里仍留着正文
+            raise ApiError("这个作用域正在整理中，请先取消或等待整理结束")
         report = await store.delete_file_completely(
             name, actor=history.ACTOR_WEBUI
         )
@@ -1314,11 +1319,14 @@ class MemoryDashboard:
                         store,
                         label,
                         lambda prompt: self.plugin.call_tidy_model(prompt, model),
+                        task_id=task["id"],
                     )
                 finally:
                     book.release(sid)
 
-            started = self.tidy_runner.schedule(sid, work)
+            started = self.tidy_runner.schedule(
+                sid, work, on_drop=lambda: book.release(sid)
+            )
             if not started:
 
                 def change(state: dict) -> None:
@@ -1364,11 +1372,20 @@ class MemoryDashboard:
         body = await _body()
         scope, key, _ = self._scope_from_body(body)
         sid = tidy.scope_id(scope, key)
-        task = await asyncio.to_thread(self.plugin._tidy.cancel_task, sid)
+        current = await asyncio.to_thread(self.plugin._tidy.task, sid)
+        if current is None:
+            raise ApiError("没有找到整理任务")
+        task = await asyncio.to_thread(
+            self.plugin._tidy.cancel_task, sid, current.get("id")
+        )
         if task is None:
             raise ApiError("没有找到整理任务")
         if task.get("state") != tidy.TASK_CANCELLED:
             raise ApiError("没有正在进行的整理任务")
+        # 立刻释放这一处：排队中的任务不会再执行，正在跑的任务靠任务 ID
+        # 防止旧实例覆盖新任务；界面文案承诺"取消后可以重新整理"。
+        self.tidy_runner.drop(sid)
+        self.plugin._tidy.release(sid)
         return _ok({"task": tidy.public_task(task)}, "已取消")
 
     async def consolidate_apply(self) -> dict:

@@ -2647,6 +2647,9 @@ class MemoryPodPlugin(Star):
         上下文统计与记忆在每次变更时已即时落盘。
         """
         self.dashboard.unregister()
+        # 先停整理任务：否则插件重载后旧实例的后台任务还会继续跑，
+        # 写同一份 tidy/<作用域>.task.json，把新实例的方案覆盖掉
+        await self.dashboard.stop_background()
         for task in list(self._tasks):
             task.cancel()
         if self._tasks:

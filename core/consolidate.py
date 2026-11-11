@@ -270,6 +270,7 @@ def parse_operations(
     allow_expires: bool = False,
     board: bool = False,
     allow_fix: bool = False,
+    max_operations: int | None = MAX_OPERATIONS,
 ) -> list[Operation] | None:
     """解析并校验整理方案；输出无法解析时返回 None（区别于"无需整理"的空列表）。
 
@@ -279,7 +280,9 @@ def parse_operations(
     allow_expires 只在整理留言板、应用页面回传的方案时为真；其他作用域
     的 expires 字段一律忽略（PLAN 3.9.2 第 3 条只让留言板有到期日）。
     allow_fix 让调用方接受插件生成的 fix 条目（管理页回传的方案）；
-    模型输出里不接受。
+    模型输出里不接受。max_operations 限制模型输出条数；管理页回传的
+    方案已经过管理员确认，传 None 表示不截断（PLAN 3.12.6 要求所有自动
+    修复都能应用）。
     """
     data = _load_array(text)
     if not isinstance(data, list):
@@ -303,7 +306,9 @@ def parse_operations(
     fix_seen: set[str] = set()
     delete_seen: set[str] = set()
     for entry in data:
-        if len(ops) >= MAX_OPERATIONS or not isinstance(entry, dict):
+        if (
+            max_operations is not None and len(ops) >= max_operations
+        ) or not isinstance(entry, dict):
             continue
         op = str(entry.get("op", "")).strip().lower()
         file = _plan_file(entry)
@@ -391,6 +396,7 @@ def operations_from_payload(
         allow_expires=allow_expires,
         board=board,
         allow_fix=True,
+        max_operations=None,
     )
     return ops or []
 
