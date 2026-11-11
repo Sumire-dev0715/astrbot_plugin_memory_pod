@@ -386,14 +386,13 @@
       const selectId = ui.uid("tidy-model");
       ui.replace(
         root,
-        h("p", { class: "hint" }, t("tidyPickHint")),
         h(
           "div",
           { class: "field-row" },
           h(
             "label",
             { class: "field-label", for: selectId },
-            t("tidyPickTitle")
+            t("tidyChooseModel")
           ),
           h(
             "select",
@@ -410,9 +409,7 @@
         ),
         st.selected && !st.selected.available
           ? ui.notice("warn", t("tidyPickUnavailable"))
-          : st.selected && st.selected.model
-            ? h("p", { class: "hint" }, t("tidyPickCurrent", { model: st.selected.providerId + " · " + st.selected.model }))
-            : null,
+          : null,
         timeoutRows()
       );
     }
@@ -444,7 +441,6 @@
         h("option", { value: "custom", selected: mode === "custom" }, t("tidyTimeoutCustom"))
       );
       const rows = [
-        h("p", { class: "hint" }, t("tidyTimeoutHint")),
         h(
           "div",
           { class: "field-row" },

@@ -90,7 +90,7 @@ const { boot, assert, until, sleep, section, summary } = require("../harness.js"
   assert(/user identification|User identification|user identifier/i.test(text($(".pane-detail"))) || /AstrBot's \"user identification\"/i.test(text($(".pane-detail"))) || true, "用户识别提示");
   click(find(".nav-item", "Manage"));
   await sleep(80);
-  for (const sec of ["Overview", "Tidy up", "Trash and forgotten", "Backup & migration"]) {
+  for (const sec of ["Overview", "Memory tidy-up", "Trash and forgotten", "Backup & migration"]) {
     click(find(".row-section", sec));
     await sleep(100);
     scan("manage-" + sec, $(".shell"));
