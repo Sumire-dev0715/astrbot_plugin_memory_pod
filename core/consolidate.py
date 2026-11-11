@@ -1,9 +1,11 @@
-"""记忆整理：把一个作用域的全部记忆交给模型复盘，产出一份可预览的修改方案。
+"""记忆整理：分批把一个作用域的全部记忆交给模型复盘，产出一份可预览的修改方案。
 
 记忆越积越多，难免出现同一个人分散在几个文件、前后矛盾、相对日期失效、
 描述写得含糊这类问题。整理就是复盘：合并重复、修正过时、规范格式。
-方案只包含两种操作——整文件写入与删除——先在 WebUI 里预览，管理员勾选
-确认后才落盘；模型不直接动磁盘。应用时先写后删，合并途中出错也不丢内容。
+一次整理按预算分批覆盖这一处的全部文件，每批附上全部文件的清单，最后
+合成一份方案（PLAN 3.12.5）；方案只包含整文件写入与删除，外加插件生成
+的悬空链接自动修复（PLAN 3.12.6）。先在 WebUI 里预览，管理员勾选确认后
+才落盘；模型不直接动磁盘。应用时先写后删，合并途中出错也不丢内容。
 
 整理只处理管理员选中的那一个作用域（留言板 / 某台机器人的小本本 /
 某段对话的悄悄话），悄悄话的整理永远看不到别的对话的内容（PLAN 3.8.3）。
@@ -53,6 +55,12 @@ CONSOLIDATE_PROMPT = """你是聊天机器人的记忆整理助手。下面是�
 
 这次只整理上面这一处；留言板、小本本、悄悄话是三层不同的记忆，不要在这里跨层搬动内容。
 
+{catalog}
+
+{dangling}
+
+{long_files}
+
 {write_rules}
 
 输出放在 <operations></operations> 标签内，是一个 JSON 数组，元素只有两种：
@@ -60,7 +68,7 @@ CONSOLIDATE_PROMPT = """你是聊天机器人的记忆整理助手。下面是�
 {{"op": "delete", "file": "文件名.md", "reason": "为什么删除，如：已合并进 user-123.md"}}
 write 会整文件覆盖（新建或改写），所以 content 必须是完整正文，不能只写改动的部分。
 
-记忆文件：
+本批记忆文件：
 {files}"""
 
 
@@ -80,6 +88,14 @@ class Operation:
     origin: str = ""
     # 预览时目标文件的写入时间（不存在为 0），应用时据此识别期间被改过的文件
     base_mtime: float = 0.0
+    # 插件自动修复悬空链接生成的条目（PLAN 3.12.6），管理员可以取消勾选
+    auto: bool = False
+    # 自动修复所依据的改写目标：那个改写没有应用时，这一条也要跳过
+    depends_on: str = ""
+
+    @property
+    def is_fix(self) -> bool:
+        return self.op == "fix"
 
     def render(self) -> str:
         name = self.file[: -len(MEMORY_FILE_SUFFIX)]
@@ -100,7 +116,7 @@ class Operation:
             "reason": self.reason,
             "baseMtime": self.base_mtime,
         }
-        if self.op == "write":
+        if self.op in ("write", "fix"):
             data.update(
                 type=self.type,
                 description=self.description,
@@ -110,6 +126,10 @@ class Operation:
                 signature=self.signature,
                 expires=self.expires,
             )
+        if self.auto:
+            data["auto"] = True
+        if self.depends_on:
+            data["dependsOn"] = self.depends_on
         return data
 
 
@@ -119,8 +139,17 @@ def build_prompt(
     now: float | None = None,
     *,
     board: bool = False,
+    catalog: list[MemoryHeader] | None = None,
+    dangling: dict[str, list[str]] | None = None,
+    long_files: dict[str, list[str]] | None = None,
+    total_files: int | None = None,
 ) -> tuple[str, list[str]]:
-    """拼整理提示词；返回 (提示词, 因超出预算未纳入的文件名)。"""
+    """拼整理提示词；返回 (提示词, 因超出预算未纳入的文件名)。
+
+    catalog 是这一处全部文件的清单（只有文件名与一句话摘要，不含正文），
+    让模型知道本批之外还有哪些文件（PLAN 3.12.5）；dangling / long_files
+    是本批文件里的悬空链接与偏长原因（PLAN 3.12.6）。
+    """
     blocks: list[str] = []
     skipped: list[str] = []
     used = 0
@@ -140,11 +169,46 @@ def build_prompt(
         "人物档案的文件名和 type 必须对上；agreement 类正文附 "
         "**Why:** 与 **How to apply:** 两行"
     )
+    catalog_lines = [
+        f"- {header.file} — {header.description or '（无描述）'}"
+        for header in catalog or []
+    ]
+    total = len(catalog) if total_files is None and catalog is not None else (
+        total_files or len(files)
+    )
+    catalog_block = (
+        "这一处共有 "
+        f"{total} 个文件，本批处理其中 {len(files)} 个。下面是这一处的"
+        "全部文件清单（只有文件名和一句话摘要，正文没有附上；不要改写本批"
+        "之外的文件）：\n" + ("\n".join(catalog_lines) or "（空）")
+    )
+    dangling_lines = [
+        f"- {file}: " + "、".join(f"[[{name}]]" for name in names)
+        for file, names in (dangling or {}).items()
+        if names
+    ]
+    dangling_block = (
+        "本批文件里的悬空链接（必须处理：改成指向这一处已有的正确文件，"
+        "或者去掉方括号改成普通文字）：\n"
+        + ("\n".join(dangling_lines) or "（没有）")
+    )
+    long_lines = [
+        f"- {file}：" + "；".join(reasons)
+        for file, reasons in (long_files or {}).items()
+        if reasons
+    ]
+    long_block = (
+        "本批里偏长的文件（由你决定是否拆分；不拆也可以）：\n"
+        + ("\n".join(long_lines) or "（没有）")
+    )
     prompt = CONSOLIDATE_PROMPT.format(
         scope_label=scope_label,
         files="\n\n".join(blocks) or "（空）",
         write_rules=WRITE_RULES,
         type_rules=type_rules,
+        catalog=catalog_block,
+        dangling=dangling_block,
+        long_files=long_block,
     )
     return prompt, skipped
 
@@ -179,13 +243,24 @@ def _plan_file(entry: dict) -> str:
     return file
 
 
+def _is_fix_entry(entry: dict) -> bool:
+    """这条方案条目是不是插件生成的自动修复（可以单独取消勾选）。"""
+    return (
+        str(entry.get("op", "")).strip().lower() == "fix"
+        and bool(entry.get("auto"))
+    )
+
+
 def _is_write_intent(entry: dict) -> bool:
-    """这条方案条目是否在要求写入。
+    """这条方案条目是否在要求写入（不含插件的自动修复）。
 
     op 缺省按 write 处理；不认识的 op（例如 update）说明模型想写却没按
     格式写，也按写入意图对待——宁可放弃同方案的删除，也不能丢内容。
     """
-    return str(entry.get("op", "") or "write").strip().lower() != "delete"
+    return (
+        str(entry.get("op", "") or "write").strip().lower() != "delete"
+        and not _is_fix_entry(entry)
+    )
 
 
 def parse_operations(
@@ -194,6 +269,7 @@ def parse_operations(
     *,
     allow_expires: bool = False,
     board: bool = False,
+    allow_fix: bool = False,
 ) -> list[Operation] | None:
     """解析并校验整理方案；输出无法解析时返回 None（区别于"无需整理"的空列表）。
 
@@ -202,6 +278,8 @@ def parse_operations(
     两条可能各只含一部分合并结果，写哪条都会丢内容）、不认识的 op。
     allow_expires 只在整理留言板、应用页面回传的方案时为真；其他作用域
     的 expires 字段一律忽略（PLAN 3.9.2 第 3 条只让留言板有到期日）。
+    allow_fix 让调用方接受插件生成的 fix 条目（管理页回传的方案）；
+    模型输出里不接受。
     """
     data = _load_array(text)
     if not isinstance(data, list):
@@ -209,13 +287,21 @@ def parse_operations(
     # 先数一遍每个文件被要求写入几次：重复写入的方案自相矛盾，整条不应用，
     # 并由 missing_write_files 让调用方放弃同方案的删除。
     write_counts: dict[str, int] = {}
+    fix_counts: dict[str, int] = {}
     for entry in data:
-        if isinstance(entry, dict) and _is_write_intent(entry):
-            file = _plan_file(entry)
-            if file:
-                write_counts[file] = write_counts.get(file, 0) + 1
+        if not isinstance(entry, dict):
+            continue
+        file = _plan_file(entry)
+        if not file:
+            continue
+        if _is_fix_entry(entry):
+            fix_counts[file] = fix_counts.get(file, 0) + 1
+        elif _is_write_intent(entry):
+            write_counts[file] = write_counts.get(file, 0) + 1
     ops: list[Operation] = []
-    seen: set[str] = set()
+    write_seen: set[str] = set()
+    fix_seen: set[str] = set()
+    delete_seen: set[str] = set()
     for entry in data:
         if len(ops) >= MAX_OPERATIONS or not isinstance(entry, dict):
             continue
@@ -223,7 +309,6 @@ def parse_operations(
         file = _plan_file(entry)
         if (
             not file
-            or file in seen
             or file.lower() == INDEX_FILENAME.lower()
             or not _SAFE_FILE_RE.match(file)
         ):
@@ -234,48 +319,59 @@ def parse_operations(
         except (TypeError, ValueError):
             base_mtime = 0.0
         if op == "delete":
-            if file not in existing:
+            if file not in existing or file in write_seen or file in delete_seen or file in fix_seen:
                 continue
+            delete_seen.add(file)
             ops.append(
                 Operation(op="delete", file=file, reason=reason, base_mtime=base_mtime)
             )
-        elif op == "write":
-            if write_counts.get(file, 0) > 1:
-                # 文件名占住，同方案里针对它的删除也不能应用
-                seen.add(file)
-                continue
-            mem_type = (
-                "" if board else str(entry.get("type", "")).strip().lower()
-            )
-            content = str(entry.get("content", "")).strip()
-            if not content or len(content) > MAX_CONTENT_CHARS:
-                continue
-            if not board and (
-                mem_type not in MEMORY_TYPES
-                or person_type_problem(file, mem_type)
-            ):
-                continue
-            signature = " ".join(str(entry.get("signature", "")).split())
-            # 页面回传的方案会带回到期日；格式不对就当没有，不因此丢掉整条
-            expires = ""
-            if allow_expires:
-                expires, _ = expiry.normalize(entry.get("expires"))
-            ops.append(
-                Operation(
-                    op="write",
-                    file=file,
-                    reason=reason,
-                    type=mem_type,
-                    description=" ".join(str(entry.get("description", "")).split()),
-                    content=content,
-                    signature=signature,
-                    expires=expires,
-                    base_mtime=base_mtime,
-                )
-            )
-        else:
             continue
-        seen.add(file)
+        is_fix = _is_fix_entry(entry)
+        if is_fix and (not allow_fix or fix_counts.get(file, 0) > 1):
+            continue
+        if not is_fix and (op != "write" or write_counts.get(file, 0) > 1):
+            continue
+        if file in delete_seen or (is_fix and file in fix_seen) or (
+            not is_fix and file in write_seen
+        ):
+            continue
+        mem_type = "" if board else str(entry.get("type", "")).strip().lower()
+        content = str(entry.get("content", "")).strip()
+        if not content or len(content) > MAX_CONTENT_CHARS:
+            continue
+        if not board and (
+            mem_type not in MEMORY_TYPES
+            or person_type_problem(file, mem_type)
+        ):
+            continue
+        signature = " ".join(str(entry.get("signature", "")).split())
+        # 页面回传的方案会带回到期日；格式不对就当没有，不因此丢掉整条
+        expires = ""
+        if allow_expires:
+            expires, _ = expiry.normalize(entry.get("expires"))
+        ops.append(
+            Operation(
+                op="fix" if is_fix else "write",
+                file=file,
+                reason=reason,
+                type=mem_type,
+                description=" ".join(str(entry.get("description", "")).split()),
+                content=content,
+                signature=signature,
+                expires=expires,
+                base_mtime=base_mtime,
+                auto=is_fix,
+                depends_on=(
+                    _plan_file({"file": entry.get("dependsOn")})
+                    if is_fix and entry.get("dependsOn")
+                    else ""
+                ),
+            )
+        )
+        if is_fix:
+            fix_seen.add(file)
+        else:
+            write_seen.add(file)
     return ops
 
 
@@ -294,6 +390,7 @@ def operations_from_payload(
         existing,
         allow_expires=allow_expires,
         board=board,
+        allow_fix=True,
     )
     return ops or []
 
@@ -356,7 +453,9 @@ def is_stale(op: Operation, current_mtime: float | None) -> bool:
 
 
 def ordered(ops: list[Operation]) -> list[Operation]:
-    """应用顺序：先写后删，合并途中出错也不会先把源文件删掉。"""
-    return [op for op in ops if op.op == "write"] + [
-        op for op in ops if op.op == "delete"
-    ]
+    """应用顺序：先写、再自动修复、最后删，合并途中出错也不会先删源文件。"""
+    return (
+        [op for op in ops if op.op == "write"]
+        + [op for op in ops if op.op == "fix"]
+        + [op for op in ops if op.op == "delete"]
+    )

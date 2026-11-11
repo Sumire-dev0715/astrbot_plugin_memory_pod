@@ -184,8 +184,18 @@ class MemoryPodPlugin(Star):
         self._tasks: set[asyncio.Task] = set()
         # 作用域目录 -> 上次遗忘扫描时间
         self._last_sweep: dict[Path, float] = {}
-        # 管理页手动整理的记录与进行中标记
+        # 管理页整理的任务状态、记录与进度
         self._tidy = tidy.TidyBook(data_dir / "tidy")
+        try:
+            interrupted = self._tidy.mark_interrupted()
+        except OSError as exc:
+            # 数据目录只读等情况下不能因为标记中断而拖垮插件加载
+            logger.warning(LOG_PREFIX + f"标记整理中断失败：{exc}")
+            interrupted = 0
+        if interrupted:
+            logger.info(
+                LOG_PREFIX + f"上次有 {interrupted} 个整理任务没有跑完，已标记为中断"
+            )
         self.dashboard = MemoryDashboard(self)
         self.dashboard.register()
 
@@ -1339,45 +1349,146 @@ class MemoryPodPlugin(Star):
 
     # ============================================================ 模型调用链
 
-    async def _call_model(
-        self,
-        prompt: str,
-    ) -> tuple[str | None, list[str]]:
-        """用 AstrBot 的默认对话模型做一次管理页整理（PLAN 3.8.4）。
+    def tidy_model_options(self) -> list[dict]:
+        """AstrBot「模型提供商」里所有启用的对话模型（PLAN 3.12.1）。
 
-        返回 (成功文本或 None, 尝试记录)。不再支持单独配置整理模型。
+        首选用 AstrBot 已经加载的聊天提供商实例（`provider_manager.provider_insts`，
+        只有启用的才会加载；AstrBot 4.29.4 `core/provider/manager.py` 第
+        712-830 行）。实例不可用时退回读提供商配置里启用的对话模型。
         """
-        attempts_log: list[str] = []
-        provider = await self._current_provider(None)
+        try:
+            manager = getattr(self.context, "provider_manager", None)
+        except Exception:  # noqa: BLE001 - 上下文实现异常时按没有提供商处理
+            manager = None
+        options: list[dict] = []
+        seen: set[str] = set()
+        for inst in list(getattr(manager, "provider_insts", None) or []):
+            try:
+                meta = inst.meta()
+            except Exception:  # noqa: BLE001 - 单个提供商异常不能拖垮列表
+                meta = None
+            config = getattr(inst, "provider_config", None) or {}
+            provider_id = str(
+                getattr(meta, "id", "") or config.get("id") or ""
+            ).strip()
+            model = str(
+                getattr(meta, "model", "") or config.get("model") or ""
+            ).strip()
+            if not provider_id or provider_id in seen:
+                continue
+            seen.add(provider_id)
+            options.append({"providerId": provider_id, "model": model})
+        if options:
+            return sorted(options, key=lambda item: (item["providerId"], item["model"]))
+        for config in list(getattr(manager, "providers_config", None) or []):
+            if not isinstance(config, dict) or not config.get("enable"):
+                continue
+            if str(config.get("provider_type") or "chat_completion") != "chat_completion":
+                continue
+            if str(config.get("type") or "") == "agent_runner":
+                continue
+            provider_id = str(config.get("id") or "").strip()
+            if not provider_id or provider_id in seen:
+                continue
+            seen.add(provider_id)
+            options.append(
+                {
+                    "providerId": provider_id,
+                    "model": str(config.get("model") or "").strip(),
+                }
+            )
+        return sorted(options, key=lambda item: (item["providerId"], item["model"]))
+
+    def tidy_model_state(self) -> dict:
+        """管理页下拉框要的数据：可用模型列表与当前选择是否仍然可用。"""
+        options = self.tidy_model_options()
+        selected = self._tidy.selected_model()
+        current = None
+        if selected is not None:
+            match = next(
+                (
+                    item
+                    for item in options
+                    if item["providerId"] == selected["providerId"]
+                ),
+                None,
+            )
+            current = {
+                "providerId": selected["providerId"],
+                # 提供商还在时显示它当前的模型名；被删掉后显示记住的名字
+                "model": (match or {}).get("model") or selected.get("model", ""),
+                "available": match is not None,
+            }
+        return {"models": options, "selected": current}
+
+    async def _generate_with_provider(self, provider_id: str, prompt: str):
+        """按提供商 ID 调用指定模型。
+
+        AstrBot 4.29.4 的公开入口是 `Context.llm_generate(chat_provider_id=...)`
+        （`astrbot/core/star/context.py` 第 193-235 行），它内部用
+        `ProviderManager.get_provider_by_id`（`core/provider/manager.py` 第
+        240-242 行）找到实例后调用 `text_chat`。旧版本没有 llm_generate 时
+        退回 `Context.get_provider_by_id`（`star/context.py` 第 456 行）。
+        """
+        generate = getattr(self.context, "llm_generate", None)
+        if callable(generate):
+            return await generate(chat_provider_id=provider_id, prompt=prompt)
+        getter = getattr(self.context, "get_provider_by_id", None)
+        provider = None
+        if callable(getter):
+            provider = await self._maybe_await(getter(provider_id))
         if provider is None:
-            return None, ["没有可用的默认对话模型"]
+            try:
+                manager = getattr(self.context, "provider_manager", None)
+            except Exception:  # noqa: BLE001 - 上下文实现异常时按没有提供商处理
+                manager = None
+            getter = getattr(manager, "get_provider_by_id", None)
+            if callable(getter):
+                provider = await self._maybe_await(getter(provider_id))
+        if provider is None:
+            raise LookupError(f"provider {provider_id} not found")
+        return await provider.text_chat(prompt=prompt)
+
+    async def call_tidy_model(
+        self, prompt: str, model: dict | None = None
+    ) -> tuple[str | None, list[str]]:
+        """用管理员选定的整理模型做一次整理（PLAN 3.12.1，不再用默认模型）。"""
+        selected = model or self._tidy.selected_model()
+        attempts_log: list[str] = []
+        if not selected or not selected.get("providerId"):
+            return None, ["没有选择整理模型"]
+        provider_id = str(selected.get("providerId"))
+        label = provider_id
+        if selected.get("model"):
+            label += f"（{selected['model']}）"
+        if not any(
+            item["providerId"] == provider_id for item in self.tidy_model_options()
+        ):
+            return None, [f"选择的整理模型 {provider_id} 已不可用"]
         for attempt in range(1, CONSOLIDATE_RETRIES + 1):
             try:
                 resp = await asyncio.wait_for(
-                    provider.text_chat(prompt=prompt), timeout=CONSOLIDATE_TIMEOUT
+                    self._generate_with_provider(provider_id, prompt),
+                    timeout=CONSOLIDATE_TIMEOUT,
                 )
                 text = self._completion_text(resp)
                 if text and text.strip():
-                    attempts_log.append(f"默认对话模型第 {attempt} 次成功")
+                    attempts_log.append(f"整理模型 {label} 第 {attempt} 次成功")
                     return text, attempts_log
-                attempts_log.append(f"默认对话模型第 {attempt} 次返回空")
+                attempts_log.append(f"整理模型 {label} 第 {attempt} 次返回空")
             except asyncio.TimeoutError:
                 attempts_log.append(
-                    f"默认对话模型第 {attempt} 次超时（{CONSOLIDATE_TIMEOUT}s）"
+                    f"整理模型 {label} 第 {attempt} 次超时（{CONSOLIDATE_TIMEOUT}s）"
                 )
             except Exception as exc:  # noqa: BLE001 - provider 实现不可控
                 # 异常原文可能带请求内容或鉴权信息，而这段记录会进管理页；
                 # 只留类型。
                 attempts_log.append(
-                    f"默认对话模型第 {attempt} 次失败（{type(exc).__name__}）"
+                    f"整理模型 {label} 第 {attempt} 次失败（{type(exc).__name__}）"
                 )
             if attempt < CONSOLIDATE_RETRIES:
                 await asyncio.sleep(min(2 ** (attempt - 1), 4))
         return None, attempts_log
-
-    async def call_consolidator(self, prompt: str) -> tuple[str | None, list[str]]:
-        """管理页整理记忆用的模型调用：使用 AstrBot 的默认对话模型。"""
-        return await self._call_model(prompt)
 
     @staticmethod
     async def _maybe_await(value):
@@ -2452,6 +2563,7 @@ class MemoryPodPlugin(Star):
             )
         )
         limit = context["turnLimit"]
+        selected_tidy = self._tidy.selected_model()
         limit_line = (
             f"AstrBot 轮数上限：{limit}（由 AstrBot 自行截断）"
             if limit > 0
@@ -2467,7 +2579,12 @@ class MemoryPodPlugin(Star):
             *estimate_lines,
             "AstrBot 摘要："
             + (f"有（{len(summary)} 字）" if summary else "AstrBot 还没有压缩过这段对话"),
-            "记忆整理：管理页手动发起，使用 AstrBot 的默认对话模型",
+            "记忆整理：管理页手动发起，使用选定的整理模型"
+            + (
+                f"（{selected_tidy['providerId']}）"
+                if selected_tidy
+                else "（还没有选择）"
+            ),
             f"相关记忆召回：{self._recall_label()}",
             f"记忆遗忘：{self._forget_label(umo)}",
             f"小本本长文件：{self._long_files_label(long_files)}",

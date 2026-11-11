@@ -1,12 +1,19 @@
-"""管理页的手动整理：让模型复盘一个作用域，给出可预览、可撤销的修改方案。
+"""管理页的整理：后台分批复盘一个作用域，给出可预览、可取消、可撤销的修改方案。
 
-定期自动整理已经删除（PLAN 3.8.4）：整理只由管理员在管理页发起，使用
-AstrBot 的默认对话模型。每处同一时间只跑一份（TidyBook.claim），模型认为
-不需要整理就什么都不改；应用后记下改动前的原文，最近 KEEP_RUNS 次可以撤销。
+整理只由管理员在管理页发起，使用管理员选定的 AstrBot 对话模型（PLAN
+3.12.1）。每处同一时间只跑一份，请求立刻返回任务 ID，状态记在 tidy/
+下，刷新页面或跳到别的页面再回来都能看到（PLAN 3.12.4）。一次整理分批
+覆盖这一处的全部文件，每批不超过 MAX_INPUT_CHARS；每批成功后记下参与
+整理的文件的本次时间，下一次按它轮换顺序（PLAN 3.12.5）。方案生成后
+插件再按应用后的内容检查悬空链接，自动修复作为单独的操作列进方案
+（PLAN 3.12.6）。应用后记下改动前的原文，最近 KEEP_RUNS 次可以撤销。
 
 磁盘布局（插件数据目录下 tidy/）：
+    model.json              管理员选定的整理模型
     <作用域>.json           上次整理的时间与结论
     <作用域>.runs.json      最近几次应用的改动记录（含改动前原文，供撤销）
+    <作用域>.task.json      当前/最近一次整理任务的状态与方案
+    <作用域>.files.json     每个文件上次参与整理的时间
 """
 
 from __future__ import annotations
@@ -15,6 +22,7 @@ import asyncio
 import json
 import os
 import re
+import secrets
 import tempfile
 import threading
 import time
@@ -22,7 +30,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Awaitable, Callable
 
-from . import consolidate, history, journal, memstore, origin, writer
+from . import consolidate, history, insights, journal, memstore, origin, writer
 from .memstore import (
     CONFLICT_OVERWRITE,
     CONFLICT_SKIP,
@@ -38,12 +46,42 @@ TRIGGER_MANUAL = "manual"
 
 OUTCOME_APPLIED = "applied"
 
+# 整理任务的状态（PLAN 3.12.4）。queued 仍算 running，只是还没轮到执行。
+TASK_RUNNING = "running"
+TASK_READY = "ready"
+TASK_FAILED = "failed"
+TASK_CANCELLED = "cancelled"
+TASK_INTERRUPTED = "interrupted"
+
+# 同时最多跑几处整理（PLAN 3.12.4）
+MAX_ACTIVE_TASKS = 2
+
+MODEL_FILENAME = "model.json"
+
 # 撤销时判断"之后有没有再改过"的写入时间误差
 MTIME_TOLERANCE = consolidate.MTIME_TOLERANCE
 
 
+def _now() -> float:
+    """当前时间；单独成函数，测试可以替换它造出不同时间的版本。"""
+    return time.time()
+
+
 class TidyError(Exception):
-    """可以直接展示给管理员的错误。"""
+    """可以直接展示给管理员的错误；proposal 是失败前已经完成的批次。"""
+
+    def __init__(self, message: str, proposal: "Proposal | None" = None):
+        super().__init__(message)
+        self.proposal = proposal
+        self.batch_index = 0
+
+
+class TidyCancelled(Exception):
+    """整理任务被管理员取消；已完成的批次留在 proposal 里。"""
+
+    def __init__(self, proposal: "Proposal | None" = None):
+        super().__init__("整理已取消")
+        self.proposal = proposal
 
 
 def scope_id(scope: str, key: str | None) -> str:
@@ -52,10 +90,20 @@ def scope_id(scope: str, key: str | None) -> str:
     return f"{scope}-{key or ''}"
 
 
+def parse_scope_id(sid: str) -> tuple[str, str]:
+    """把 tidy/ 里的任务文件名还原成 (scope, key)。"""
+    if sid == "board":
+        return "board", ""
+    for prefix in ("notebook-", "whisper-"):
+        if sid.startswith(prefix):
+            return prefix[:-1], sid[len(prefix):]
+    return "", ""
+
+
 def scope_label(scope: str, key: str | None) -> str:
     """整理提示词里的作用域名称。
 
-    这段提示词会发给 AstrBot 的默认对话模型，所以悄悄话不能用群名、
+    这段提示词会发给管理员选定的整理模型，所以悄悄话不能用群名、
     昵称或带群号的目录名：群名只在管理页里显示（PLAN 3.9.1 第 1 条）。
     """
     if scope == "board":
@@ -99,12 +147,35 @@ class TidyMeta:
 
 
 @dataclass
+class Batch:
+    """一批要送给模型的文件；index 从 1 开始。"""
+
+    index: int
+    files: list[str] = field(default_factory=list)
+
+
+@dataclass
 class Proposal:
     """一次复盘的结果：空的 operations 表示模型认为不需要整理。"""
 
     operations: list[consolidate.Operation]
     skipped: list[str] = field(default_factory=list)
     files: list[str] = field(default_factory=list)
+    # 单个文件就超过一批的预算，没有送给模型（PLAN 3.12.5）
+    needs_split: list[str] = field(default_factory=list)
+    batches: list[Batch] = field(default_factory=list)
+    # 给页面看的补充说明（需要先拆分的文件等）
+    notices: list[dict] = field(default_factory=list)
+
+    def plan_dict(self) -> dict:
+        return {
+            "operations": [op.to_dict() for op in self.operations],
+            "skipped": list(self.skipped),
+            "files": list(self.files),
+            "needsSplit": list(self.needs_split),
+            "notices": list(self.notices),
+            "fileCount": len(self.files),
+        }
 
 
 class TidyBook:
@@ -181,7 +252,7 @@ class TidyBook:
 
     def remove(self, sid: str) -> None:
         with self._lock:
-            for suffix in (".json", ".runs.json"):
+            for suffix in (".json", ".runs.json", ".task.json", ".files.json"):
                 path = self._path(sid, suffix)
                 if path.is_file():
                     path.unlink()
@@ -218,76 +289,835 @@ class TidyBook:
                     kept_runs.append({**run, "ops": kept_ops})
             if changed:
                 self._write(self._path(sid, ".runs.json"), kept_runs)
+            times = self.file_times(sid)
+            if file in times:
+                times.pop(file, None)
+                self._write(self._times_path(sid), times)
+                changed = True
             return changed
 
+    # ---- 整理任务（PLAN 3.12.4）
 
-# ---------------------------------------------------------------- 复盘与应用
+    def _task_path(self, sid: str) -> Path:
+        return self._path(sid, ".task.json")
+
+    def _times_path(self, sid: str) -> Path:
+        return self._path(sid, ".files.json")
+
+    def task(self, sid: str) -> dict | None:
+        data = self._read(self._task_path(sid))
+        return data if isinstance(data, dict) and data.get("state") else None
+
+    def write_task(self, sid: str, task: dict) -> dict:
+        with self._lock:
+            self._write(self._task_path(sid), task)
+        return task
+
+    def update_task(
+        self,
+        sid: str,
+        change: Callable[[dict], None],
+        *,
+        only_state: str | None = TASK_RUNNING,
+    ) -> dict | None:
+        """在锁里读出最新的任务、改完写回；状态已经不是 only_state 时不动。
+
+        取消操作也会走这把锁，所以后台任务完成一批时的进度更新不会把
+        "已取消"覆盖回"整理中"。
+        """
+        with self._lock:
+            task = self.task(sid)
+            if task is None:
+                return None
+            if only_state is not None and task.get("state") != only_state:
+                return task
+            change(task)
+            task["updatedAt"] = round(_now(), 3)
+            self._write(self._task_path(sid), task)
+            return task
+
+    def create_task(self, sid: str, task: dict) -> dict:
+        with self._lock:
+            self._write(self._task_path(sid), task)
+        return task
+
+    def cancel_task(self, sid: str) -> dict | None:
+        """取消正在跑的任务；已完成的批次和方案原样保留。"""
+        def change(task: dict) -> None:
+            task["state"] = TASK_CANCELLED
+            task["message"] = "已取消"
+            task["queued"] = False
+
+        return self.update_task(sid, change)
+
+    def clear_task(self, sid: str) -> None:
+        with self._lock:
+            path = self._task_path(sid)
+            if path.is_file():
+                path.unlink()
+
+    def mark_interrupted(self, now: float | None = None) -> int:
+        """插件启动时把上次没跑完的任务标成已中断；完成的批次保留。"""
+        stamp = _now() if now is None else now
+        count = 0
+        with self._lock:
+            if not self.base_dir.is_dir():
+                return 0
+            for path in sorted(self.base_dir.glob("*.task.json")):
+                data = self._read(path)
+                if not isinstance(data, dict) or data.get("state") != TASK_RUNNING:
+                    continue
+                data["state"] = TASK_INTERRUPTED
+                data["message"] = "插件重启，整理已中断"
+                data["queued"] = False
+                data["updatedAt"] = round(stamp, 3)
+                self._write(path, data)
+                count += 1
+        return count
+
+    def all_tasks(self) -> list[dict]:
+        """磁盘上全部作用域的整理任务（管理页打开时一次读回）。"""
+        result: list[dict] = []
+        with self._lock:
+            if not self.base_dir.is_dir():
+                return result
+            for path in sorted(self.base_dir.glob("*.task.json")):
+                sid = path.name[: -len(".task.json")]
+                data = self._read(path)
+                if isinstance(data, dict) and data.get("state"):
+                    result.append({**data, "sid": sid})
+        return result
+
+    # ---- 每个文件上次参与整理的时间（PLAN 3.12.5）
+
+    def file_times(self, sid: str) -> dict[str, float]:
+        data = self._read(self._times_path(sid))
+        if not isinstance(data, dict):
+            return {}
+        result: dict[str, float] = {}
+        for file, value in data.items():
+            try:
+                result[str(file)] = float(value)
+            except (TypeError, ValueError):
+                continue
+        return result
+
+    def touch_files(self, sid: str, files: list[str], now: float | None = None) -> None:
+        """记下这一批文件参与整理的时间（每批成功后调用）。"""
+        stamp = _now() if now is None else now
+        with self._lock:
+            times = self.file_times(sid)
+            for file in files:
+                if file:
+                    times[file] = round(stamp, 3)
+            self._write(self._times_path(sid), times)
+
+    # ---- 选定的整理模型（PLAN 3.12.1）
+
+    def selected_model(self) -> dict | None:
+        data = self._read(self.base_dir / MODEL_FILENAME)
+        if not isinstance(data, dict):
+            return None
+        provider_id = str(data.get("providerId") or "").strip()
+        if not provider_id:
+            return None
+        return {
+            "providerId": provider_id,
+            "model": str(data.get("model") or "").strip(),
+        }
+
+    def save_model(self, provider_id: str, model: str) -> dict:
+        selected = {
+            "providerId": str(provider_id or "").strip(),
+            "model": str(model or "").strip(),
+        }
+        with self._lock:
+            self._write(self.base_dir / MODEL_FILENAME, selected)
+        return selected
+
+
+# ---------------------------------------------------------------- 分批
+
+
+def file_flags(
+    headers: list[MemoryHeader], contents: dict[str, str]
+) -> dict[str, dict]:
+    """文件列表里的提醒标记：悬空链接与偏长（PLAN 3.12.5/3.12.6）。"""
+    available = {header.file for header in headers}
+    flags: dict[str, dict] = {}
+    for header in headers:
+        content = contents.get(header.file)
+        if content is None:
+            continue
+        doc = memstore.parse_memory(content)
+        missing = insights.dangling_links(
+            memstore.extract_links(doc.body), available
+        )
+        reasons = insights.long_file_reasons(
+            header.file, header.type, doc.body, len(content.encode("utf-8"))
+        )
+        if missing or reasons:
+            flags[header.file] = {"dangling": missing, "long": reasons}
+    return flags
+
+
+def order_files(
+    headers: list[MemoryHeader],
+    flags: dict[str, dict],
+    times: dict[str, float],
+) -> list[MemoryHeader]:
+    """整理顺序（PLAN 3.12.5）：
+
+    有悬空链接或偏长标记的文件优先；其次是从没整理过的；再按上次参与
+    整理的时间从早到晚。文件名兜底，保证同一份数据每次顺序一致。
+    """
+    def key(header: MemoryHeader) -> tuple:
+        return (
+            0 if flags.get(header.file) else 1,
+            0 if header.file not in times else 1,
+            times.get(header.file, 0.0),
+            header.file,
+        )
+
+    return sorted(headers, key=key)
+
+
+def split_batches(
+    files: list[tuple[MemoryHeader, str]],
+    budget: int | None = None,
+) -> tuple[list[tuple[Batch, list[tuple[MemoryHeader, str]]]], list[str]]:
+    """把排好序的文件按预算切批；返回 (批列表, 单个就超预算的文件名)。
+
+    每个文件只出现在一批里，各批正文合计不超过预算。单个文件超过预算
+    时不送给模型，由调用方在方案里标"需要先拆分"（PLAN 3.12.5）。
+    """
+    limit = consolidate.MAX_INPUT_CHARS if budget is None else budget
+    batches: list[tuple[Batch, list[tuple[MemoryHeader, str]]]] = []
+    current: list[tuple[MemoryHeader, str]] = []
+    used = 0
+    needs_split: list[str] = []
+    for header, content in files:
+        size = len(content)
+        if size > limit:
+            needs_split.append(header.file)
+            continue
+        if current and used + size > limit:
+            index = len(batches) + 1
+            batches.append(
+                (Batch(index, [item[0].file for item in current]), current)
+            )
+            current = []
+            used = 0
+        current.append((header, content))
+        used += size
+    if current:
+        index = len(batches) + 1
+        batches.append((Batch(index, [item[0].file for item in current]), current))
+    return batches, needs_split
+
+
+# ---------------------------------------------------------------- 复盘
+
+
+def _split_journal_ops(
+    ops: list[consolidate.Operation], journal_files: set[str]
+) -> list[consolidate.Operation]:
+    # 日记只作整理参考，不允许整理改写或删除：流水账过时与否不该由一次
+    # 复盘决定；误改也能撤销，但日记本就不该进入这套合并逻辑。
+    return [
+        op
+        for op in ops
+        if op.file not in journal_files and not journal.is_journal(op.file, op.type)
+    ]
+
+
+def _merge_ops(
+    merged: dict[str, consolidate.Operation],
+    origins: dict[str, bool],
+    ops: list[consolidate.Operation],
+    batch_files: set[str],
+) -> None:
+    """把一批方案并进总方案；同一文件以真正看过它的那一批为准。"""
+    for op in ops:
+        current = merged.get(op.file)
+        in_batch = op.file in batch_files
+        if current is None:
+            merged[op.file] = op
+            origins[op.file] = in_batch
+            continue
+        if in_batch and not origins.get(op.file, False):
+            # 这条来自真正附了正文的批次，比只看过文件清单的批次可靠
+            merged[op.file] = op
+            origins[op.file] = True
+
+
+def _board_fields(
+    headers: list[MemoryHeader], contents: dict[str, str], is_board: bool
+) -> tuple[dict[str, str], dict[str, str], str]:
+    if not is_board:
+        return {}, {}, ""
+    signatures: dict[str, str] = {}
+    expiries: dict[str, str] = {}
+    for header in headers:
+        content = contents.get(header.file)
+        if content is None:
+            continue
+        doc = memstore.parse_memory(content)
+        signatures[header.file] = doc.signature
+        expiries[header.file] = doc.expires
+    fallback = next((value for value in signatures.values() if value), "管理员")
+    return signatures, expiries, fallback
+
+
+def _prepare_op(
+    op: consolidate.Operation,
+    store: ScopeStore,
+    signatures: dict[str, str],
+    expiries: dict[str, str],
+    fallback_signature: str,
+) -> None:
+    """写入留言板时署名与到期日由插件决定；并记下复盘时的写入时间。"""
+    if op.op in ("write", "fix") and store.layer == memstore.SCOPE_BOARD:
+        op.signature = signatures.get(op.file) or fallback_signature
+        op.expires = expiries.get(op.file) or ""
+    op.base_mtime = store.mtime(op.file) or 0.0
+
+
+_LINK_RE = re.compile(r"\[\[([^\[\]\n]{1,120})\]\]")
+
+
+def _fix_links(body: str, available: set[str]) -> tuple[str, list[str]]:
+    """按应用后的文件集合修复悬空链接；返回 (新正文, 改动说明)。
+
+    忽略大小写和 .md 后缀能唯一对上某个文件时改成指向它；对不上的
+    去掉方括号只留文字（PLAN 3.12.6）。
+    """
+    stems: dict[str, list[str]] = {}
+    for file in available:
+        stem = file[: -len(memstore.MEMORY_FILE_SUFFIX)] if file.endswith(
+            memstore.MEMORY_FILE_SUFFIX
+        ) else file
+        stems.setdefault(stem.lower(), []).append(stem)
+    missing = set(
+        insights.dangling_links(memstore.extract_links(body), available)
+    )
+    if not missing:
+        return body, []
+    changes: list[str] = []
+
+    def replace(match: re.Match) -> str:
+        target = match.group(1).strip()
+        name = insights.normalize_link_target(target)
+        if name not in missing:
+            return match.group(0)
+        stem = name[: -len(memstore.MEMORY_FILE_SUFFIX)] if name.endswith(
+            memstore.MEMORY_FILE_SUFFIX
+        ) else name
+        candidates = stems.get(stem.lower()) or []
+        if len(candidates) == 1:
+            changes.append(f"[[{target}]] 改成 [[{candidates[0]}]]")
+            return f"[[{candidates[0]}]]"
+        changes.append(f"[[{target}]] 改成纯文本")
+        return target
+
+    fixed = _LINK_RE.sub(replace, body)
+    return fixed, changes
+
+
+def auto_fix_operations(
+    store: ScopeStore,
+    headers: list[MemoryHeader],
+    contents: dict[str, str],
+    ops: list[consolidate.Operation],
+) -> list[consolidate.Operation]:
+    """按方案应用后的内容检查全部文件的悬空链接，生成单独的修复操作。"""
+    is_board = store.layer == memstore.SCOPE_BOARD
+    final: dict[str, dict] = {}
+    for header in headers:
+        content = contents.get(header.file)
+        if content is None:
+            continue
+        doc = memstore.parse_memory(content)
+        final[header.file] = {
+            "type": memstore.effective_type(header.file, doc.type),
+            "description": doc.description,
+            "body": doc.body,
+            "signature": doc.signature,
+            "expires": doc.expires,
+        }
+    written: set[str] = set()
+    for op in ops:
+        if op.op == "delete":
+            final.pop(op.file, None)
+            written.discard(op.file)
+            continue
+        if op.op not in ("write", "fix"):
+            continue
+        base = final.get(op.file) or {
+            "type": "",
+            "description": "",
+            "body": "",
+            "signature": "",
+            "expires": "",
+        }
+        final[op.file] = {
+            "type": op.type or base["type"],
+            "description": op.description or base["description"],
+            "body": op.content,
+            "signature": (op.signature or base["signature"]) if is_board else "",
+            "expires": (op.expires or base["expires"]) if is_board else "",
+        }
+        if op.op == "write":
+            written.add(op.file)
+    available = set(final)
+    fixes: list[consolidate.Operation] = []
+    for file in sorted(final):
+        item = final[file]
+        fixed, changes = _fix_links(item["body"], available)
+        if not changes or fixed == item["body"]:
+            continue
+        fixes.append(
+            consolidate.Operation(
+                op="fix",
+                file=file,
+                reason=("自动修复悬空链接：" + "；".join(changes))[
+                    : consolidate.MAX_REASON_CHARS
+                ],
+                type=item["type"],
+                description=item["description"],
+                content=fixed,
+                signature=item["signature"] if is_board else "",
+                expires=item["expires"] if is_board else "",
+                auto=True,
+                depends_on=file if file in written else "",
+            )
+        )
+    return fixes
+
+
+def _partial_proposal(
+    store: ScopeStore,
+    headers: list[MemoryHeader],
+    contents: dict[str, str],
+    merged: dict[str, consolidate.Operation],
+    skipped: list[str],
+    needs_split: list[str],
+    batches: list[Batch],
+    notices: list[dict],
+) -> Proposal:
+    ops = list(merged.values())
+    ops.extend(auto_fix_operations(store, headers, contents, ops))
+    for op in ops:
+        if op.op == "fix":
+            op.base_mtime = store.mtime(op.file) or 0.0
+    return Proposal(
+        operations=ops,
+        skipped=list(skipped),
+        files=sorted(header.file for header in headers),
+        needs_split=list(needs_split),
+        batches=list(batches),
+        notices=list(notices),
+    )
 
 
 async def propose(
     store: ScopeStore,
     label: str,
     call_model: Callable[[str], Awaitable[tuple[str | None, list[str]]]],
+    *,
+    now: float | None = None,
+    on_planned: Callable[[list[Batch], list[str], int], None] | None = None,
+    on_batch: Callable[[Batch, "Proposal"], None] | None = None,
+    cancelled: Callable[[], bool] | None = None,
+    budget: int | None = None,
+    file_times: dict[str, float] | None = None,
 ) -> Proposal:
-    """把作用域的全部记忆交给模型复盘；失败抛 TidyError。"""
+    """分批把作用域的全部记忆交给模型复盘；失败抛 TidyError。
+
+    每批调用一次模型，各批文件互不重叠（PLAN 3.12.5）。取消时抛
+    TidyCancelled，异常里带着已经完成的批次；失败时 TidyError.proposal
+    同理。两者都已经包含悬空链接的自动修复操作。
+    """
+    stamp = _now() if now is None else now
     headers = await asyncio.to_thread(store.headers)
     if not headers:
         raise TidyError("这里还没有记忆，无需整理")
-    files = []
+    contents: dict[str, str] = {}
     for header in headers:
         content = await store.read(header.file)
         if content:
-            files.append((header, content))
+            contents[header.file] = content
+    present = [header for header in headers if header.file in contents]
+    existing = {header.file for header in headers}
     is_board = store.layer == memstore.SCOPE_BOARD
-    prompt, skipped = consolidate.build_prompt(label, files, board=is_board)
-    text, attempts = await call_model(prompt)
-    if not text:
-        raise TidyError(
-            "整理模型调用失败：" + ("；".join(attempts) or "没有可用的模型提供商")
-        )
-    existing = {h.file for h in headers}
-    ops = consolidate.parse_operations(text, existing, board=is_board)
-    if ops is None:
-        raise TidyError("模型返回的整理方案无法解析，请重试")
-    # 日记只作整理参考，不允许整理改写或删除：流水账过时与否不该由一次
-    # 复盘决定；误改也能撤销，但日记本就不该进入这套合并逻辑。
+    flags = file_flags(present, contents)
+    ordered = order_files(present, flags, file_times or {})
+    raw_batches, needs_split = split_batches(
+        [(header, contents[header.file]) for header in ordered], budget
+    )
+    batches = [batch for batch, _ in raw_batches]
+    notices: list[dict] = [
+        {
+            "kind": "needs_split",
+            "file": file,
+            "message": "这个文件单独就超过一次整理的预算，需要先拆分",
+        }
+        for file in needs_split
+    ]
+    if on_planned is not None:
+        on_planned(batches, needs_split, len(headers))
+    signatures, expiries, fallback_signature = _board_fields(
+        present, contents, is_board
+    )
     journal_files = {
         header.file
         for header in headers
         if journal.is_journal(header.file, header.type)
     }
-    ops = [
-        op
-        for op in ops
-        if op.file not in journal_files and not journal.is_journal(op.file, op.type)
-    ]
-    # 有写入没通过校验（类型与文件名对不上、正文为空等）时，同方案的删除
-    # 必须一起放弃：合并目标没落盘，再删源文件就会丢内容。
-    missing_writes = consolidate.missing_write_files(text, ops)
-    if missing_writes:
-        ops = [op for op in ops if op.op != "delete"]
-        skipped.extend(sorted(missing_writes))
-    # 留言板每条告示都必须带署名，且署名由插件决定：改写沿用原署名，
-    # 合并出的新告示用这次整理看到的第一个署名；都没有时按管理页操作
-    # 署名"管理员"。模型给的 signature 不可信（提示注入可能借整理换掉
-    # 别人告示的署名），这里一律覆盖。
-    if store.layer == memstore.SCOPE_BOARD:
-        signatures = {}
-        expiries = {}
-        for header, content in files:
-            doc = memstore.parse_memory(content)
-            signatures[header.file] = doc.signature
-            expiries[header.file] = doc.expires
-        fallback = next((value for value in signatures.values() if value), "管理员")
+    merged: dict[str, consolidate.Operation] = {}
+    origins: dict[str, bool] = {}
+    skipped: list[str] = []
+    catalog = headers
+
+    def partial() -> Proposal:
+        return _partial_proposal(
+            store,
+            present,
+            contents,
+            merged,
+            skipped,
+            needs_split,
+            batches,
+            notices,
+        )
+
+    for batch, batch_items in raw_batches:
+        if cancelled is not None and cancelled():
+            raise TidyCancelled(partial())
+        dangling = {
+            header.file: (flags.get(header.file) or {}).get("dangling", [])
+            for header, _ in batch_items
+        }
+        long_files = {
+            header.file: (flags.get(header.file) or {}).get("long", [])
+            for header, _ in batch_items
+        }
+        prompt, _ = consolidate.build_prompt(
+            label,
+            batch_items,
+            stamp,
+            board=is_board,
+            catalog=catalog,
+            dangling=dangling,
+            long_files=long_files,
+            total_files=len(headers),
+        )
+        text, attempts = await call_model(prompt)
+        if cancelled is not None and cancelled():
+            raise TidyCancelled(partial())
+        if not text:
+            error = TidyError(
+                f"第 {batch.index} 批整理模型调用失败："
+                + ("；".join(attempts) or "没有可用的模型"),
+                partial(),
+            )
+            error.batch_index = batch.index
+            raise error
+        ops = consolidate.parse_operations(text, existing, board=is_board)
+        if ops is None:
+            error = TidyError(
+                f"第 {batch.index} 批的整理方案无法解析，请重试", partial()
+            )
+            error.batch_index = batch.index
+            raise error
+        ops = _split_journal_ops(ops, journal_files)
+        # 有写入没通过校验（类型与文件名对不上、正文为空等）时，同方案的删除
+        # 必须一起放弃：合并目标没落盘，再删源文件就会丢内容。
+        missing_writes = consolidate.missing_write_files(text, ops)
+        if missing_writes:
+            ops = [op for op in ops if op.op != "delete"]
+            skipped.extend(name for name in sorted(missing_writes) if name not in skipped)
         for op in ops:
-            if op.op == "write":
-                op.signature = signatures.get(op.file) or fallback
-                # 到期日同样沿用原告示；合并出的新告示不凭空设日期
-                op.expires = expiries.get(op.file) or ""
-    # 记下复盘时各目标文件的写入时间，应用时据此识别期间被改过的文件
-    for op in ops:
-        op.base_mtime = store.mtime(op.file) or 0.0
-    return Proposal(operations=ops, skipped=skipped, files=sorted(existing))
+            _prepare_op(op, store, signatures, expiries, fallback_signature)
+        _merge_ops(merged, origins, ops, set(batch.files))
+        if on_batch is not None:
+            on_batch(batch, partial())
+    final = partial()
+    return final
+
+
+# ---------------------------------------------------------------- 后台任务
+
+
+def new_task(model: dict | None, now: float | None = None) -> dict:
+    """一份新整理任务的初始状态（PLAN 3.12.4）。"""
+    stamp = _now() if now is None else now
+    return {
+        "id": f"{int(stamp * 1000)}-{secrets.token_hex(4)}",
+        "state": TASK_RUNNING,
+        "startedAt": round(stamp, 3),
+        "updatedAt": round(stamp, 3),
+        "model": {
+            "providerId": str((model or {}).get("providerId") or ""),
+            "model": str((model or {}).get("model") or ""),
+        },
+        "queued": False,
+        "fileCount": 0,
+        "batchCount": 0,
+        "batchesDone": 0,
+        "batches": [],
+        "needsSplit": [],
+        "plan": {},
+        "message": "",
+    }
+
+
+def public_task(task: dict | None) -> dict | None:
+    """给页面的任务视图：只带状态、进度和方案，不含内部路径。"""
+    if not isinstance(task, dict):
+        return None
+    plan = task.get("plan") if isinstance(task.get("plan"), dict) else {}
+    batches = []
+    for item in task.get("batches") or []:
+        if not isinstance(item, dict):
+            continue
+        batches.append(
+            {
+                "index": int(item.get("index") or 0),
+                "files": [str(name) for name in item.get("files") or []],
+                "state": str(item.get("state") or ""),
+                "error": str(item.get("error") or ""),
+            }
+        )
+    return {
+        "id": str(task.get("id") or ""),
+        "state": str(task.get("state") or ""),
+        "startedAt": float(task.get("startedAt") or 0.0),
+        "updatedAt": float(task.get("updatedAt") or 0.0),
+        "queued": bool(task.get("queued")),
+        "model": {
+            "providerId": str((task.get("model") or {}).get("providerId") or ""),
+            "model": str((task.get("model") or {}).get("model") or ""),
+        },
+        "fileCount": int(task.get("fileCount") or 0),
+        "batchCount": int(task.get("batchCount") or 0),
+        "batchesDone": int(task.get("batchesDone") or 0),
+        "batches": batches,
+        "needsSplit": [str(name) for name in task.get("needsSplit") or []],
+        "plan": {
+            "operations": [
+                op
+                for op in plan.get("operations") or []
+                if isinstance(op, dict)
+            ],
+            "skipped": [str(name) for name in plan.get("skipped") or []],
+            "files": [str(name) for name in plan.get("files") or []],
+            "needsSplit": [
+                str(name) for name in plan.get("needsSplit") or []
+            ],
+            "notices": [
+                item
+                for item in plan.get("notices") or []
+                if isinstance(item, dict)
+            ],
+            "fileCount": int(plan.get("fileCount") or 0),
+        },
+        "message": str(task.get("message") or ""),
+    }
+
+
+def _save_partial(book: TidyBook, sid: str, proposal: Proposal | None) -> None:
+    if proposal is None:
+        return
+
+    def change(task: dict) -> None:
+        task["plan"] = proposal.plan_dict()
+        task["needsSplit"] = list(proposal.needs_split)
+
+    book.update_task(sid, change, only_state=None)
+
+
+async def run_task(
+    book: TidyBook,
+    sid: str,
+    store: ScopeStore,
+    label: str,
+    call_model: Callable[[str], Awaitable[tuple[str | None, list[str]]]],
+    *,
+    now_fn: Callable[[], float] = _now,
+) -> dict | None:
+    """在后台执行一份整理任务；进度、方案和终态都写进 tidy/。"""
+
+    def cancelled() -> bool:
+        task = book.task(sid)
+        return task is None or task.get("state") != TASK_RUNNING
+
+    def stopped() -> None:
+        def change(task: dict) -> None:
+            task["queued"] = False
+            task["message"] = "正在读取文件…"
+
+        book.update_task(sid, change)
+
+    def planned(batches: list[Batch], needs_split: list[str], file_count: int) -> None:
+        def change(task: dict) -> None:
+            task["fileCount"] = file_count
+            task["batchCount"] = len(batches)
+            task["batchesDone"] = 0
+            task["needsSplit"] = list(needs_split)
+            task["batches"] = [
+                {"index": batch.index, "files": list(batch.files), "state": "pending", "error": ""}
+                for batch in batches
+            ]
+            task["message"] = ""
+
+        book.update_task(sid, change)
+
+    def batch_done(batch: Batch, proposal: Proposal) -> None:
+        book.touch_files(sid, batch.files, now_fn())
+
+        def change(task: dict) -> None:
+            task["batchesDone"] = batch.index
+            items = task.get("batches") or []
+            if 1 <= batch.index <= len(items):
+                items[batch.index - 1]["state"] = "done"
+                items[batch.index - 1]["error"] = ""
+            task["plan"] = proposal.plan_dict()
+
+        book.update_task(sid, change)
+
+    if cancelled():
+        return book.task(sid)
+    stopped()
+    try:
+        proposal = await propose(
+            store,
+            label,
+            call_model,
+            now=now_fn(),
+            on_planned=planned,
+            on_batch=batch_done,
+            cancelled=cancelled,
+            file_times=book.file_times(sid),
+        )
+    except TidyCancelled as exc:
+        _save_partial(book, sid, exc.proposal)
+        return book.task(sid)
+    except TidyError as exc:
+        if cancelled():
+            _save_partial(book, sid, exc.proposal)
+            return book.task(sid)
+        if exc.proposal is not None:
+            _save_partial(book, sid, exc.proposal)
+
+        def change(task: dict) -> None:
+            task["state"] = TASK_FAILED
+            task["queued"] = False
+            task["message"] = str(exc) or "整理失败"
+            index = int(getattr(exc, "batch_index", 0) or 0)
+            items = task.get("batches") or []
+            if 1 <= index <= len(items):
+                items[index - 1]["state"] = "failed"
+                items[index - 1]["error"] = str(exc) or "整理失败"
+
+        book.update_task(sid, change)
+        return book.task(sid)
+    except asyncio.CancelledError:
+        def change(task: dict) -> None:
+            task["state"] = TASK_INTERRUPTED
+            task["queued"] = False
+            task["message"] = "插件停止，整理已中断"
+
+        book.update_task(sid, change)
+        raise
+    except Exception as exc:  # noqa: BLE001 - 后台任务不能把异常抛回请求
+        if cancelled():
+            return book.task(sid)
+
+        def change(task: dict) -> None:
+            task["state"] = TASK_FAILED
+            task["queued"] = False
+            task["message"] = f"整理失败（{type(exc).__name__}）"
+
+        book.update_task(sid, change)
+        return book.task(sid)
+    else:
+        def change(task: dict) -> None:
+            task["state"] = TASK_READY
+            task["queued"] = False
+            task["message"] = ""
+            task["batchesDone"] = len(proposal.batches)
+            for item in task.get("batches") or []:
+                if item.get("state") == "pending":
+                    item["state"] = "done"
+            task["plan"] = proposal.plan_dict()
+
+        book.update_task(sid, change)
+        return book.task(sid)
+
+
+class TidyRunner:
+    """整理任务的调度：同时最多跑 max_active 处，其余排队（PLAN 3.12.4）。"""
+
+    def __init__(self, max_active: int = MAX_ACTIVE_TASKS):
+        self.max_active = max(1, int(max_active))
+        self._active: set[str] = set()
+        self._pending: list[tuple[str, Callable[[], Awaitable[None]]]] = []
+        self.tasks: set[asyncio.Task] = set()
+        self._loop = None
+
+    def schedule(
+        self, sid: str, work: Callable[[], Awaitable[None]]
+    ) -> bool:
+        """排入一个任务；返回 False 表示正在排队，还不算开始执行。"""
+        loop = asyncio.get_running_loop()
+        if self._loop is not loop:
+            # 请求循环换了（测试里每次 asyncio.run 都是新循环）：旧任务已结束
+            self._loop = loop
+            self._active.clear()
+            self._pending.clear()
+            self.tasks.clear()
+        if len(self._active) >= self.max_active:
+            self._pending.append((sid, work))
+            return False
+        self._spawn(sid, work)
+        return True
+
+    def _spawn(
+        self, sid: str, work: Callable[[], Awaitable[None]]
+    ) -> None:
+        self._active.add(sid)
+        task = asyncio.create_task(self._run(sid, work))
+        self.tasks.add(task)
+        task.add_done_callback(self.tasks.discard)
+
+    async def _run(
+        self, sid: str, work: Callable[[], Awaitable[None]]
+    ) -> None:
+        try:
+            await work()
+        finally:
+            self._active.discard(sid)
+            while self._pending:
+                next_sid, next_work = self._pending.pop(0)
+                if next_sid in self._active:
+                    continue
+                self._spawn(next_sid, next_work)
+                break
+
+    def active_count(self) -> int:
+        return len(self._active)
+
+    def pending_count(self) -> int:
+        return len(self._pending)
+
+    async def wait(self) -> None:
+        """等所有已排队的任务结束（测试与页面运行时后端用）。"""
+        while self.tasks:
+            await asyncio.gather(*list(self.tasks), return_exceptions=True)
+
+
+# ---------------------------------------------------------------- 合并与应用
 
 
 def _merged_source(
@@ -364,17 +1194,22 @@ async def apply(
     ops: list[consolidate.Operation],
     actor: str = history.ACTOR_TIDY,
 ) -> list[dict]:
-    """先写后删地应用方案；每项结果带改动前原文（before）供撤销。"""
+    """先写、再自动修复、最后删地应用方案；每项结果带改动前原文供撤销。"""
     await _inherit_origins(store, ops)
     results = []
     write_failed = False
+    written: set[str] = set()
     for op in consolidate.ordered(ops):
         before = await store.read(op.file)
         # 删除会连使用统计一起清掉，撤销时要原样还回去
         usage = store.usage_of(op.file).to_raw() if op.op == "delete" else None
-        if consolidate.is_stale(op, store.mtime(op.file)):
+        if op.op == "fix" and op.depends_on and op.depends_on not in written:
+            ok, message = False, "生成自动修复所依据的改写没有应用，已跳过"
+        elif consolidate.is_stale(op, store.mtime(op.file)) and not (
+            op.op == "fix" and op.file in written
+        ):
             ok, message = False, "复盘之后这个文件被改过，已跳过；请重新整理"
-        elif op.op == "write":
+        elif op.op in ("write", "fix"):
             report = await store.write(op.file, op.render(), actor=actor)
             ok, message = report.ok, report.message
         elif write_failed:
@@ -385,6 +1220,8 @@ async def apply(
             ok, message = report.ok, report.message
         if op.op == "write" and not ok:
             write_failed = True
+        if op.op in ("write", "fix") and ok:
+            written.add(op.file)
         item = {
             "op": op.op,
             "file": op.file,
@@ -444,7 +1281,7 @@ def public_run(run: dict) -> dict:
                 "op": op.get("op", ""),
                 "file": op.get("file", ""),
                 "reason": op.get("reason", ""),
-                "created": op.get("op") == "write" and op.get("before") is None,
+                "created": op.get("op") in ("write", "fix") and op.get("before") is None,
             }
             for op in run.get("ops") or []
             if isinstance(op, dict)
@@ -458,43 +1295,60 @@ async def undo(
     """撤销一次整理：被删的文件写回、被改写的恢复原文、新建的删掉。
 
     之后又被改过的文件不动（以免盖掉新内容），逐项报告。先恢复被删的
-    源文件、再回退写入，与应用时的先写后删相反。
+    源文件、再回退写入，与应用时的先写后删相反。同一个文件同时有写入和
+    自动修复时，整组按最后一次应用后的写入时间判断，恢复最早的原文。
     """
     ops = [op for op in run.get("ops") or [] if isinstance(op, dict)]
-    ordered = [op for op in ops if op.get("op") == "delete"] + [
-        op for op in ops if op.get("op") == "write"
-    ]
+    deletes = [op for op in ops if op.get("op") == "delete"]
+    groups: dict[str, list[dict]] = {}
+    for op in ops:
+        if op.get("op") == "delete":
+            continue
+        file = str(op.get("file") or "")
+        groups.setdefault(file, []).append(op)
     results = []
-    for op in ordered:
+    for op in deletes:
         file = str(op.get("file") or "")
         before = op.get("before")
         current = store.mtime(file)
-        if op.get("op") == "delete":
-            if current is not None or store.has_forgotten(file):
-                ok, message = False, "同名文件已经存在，没有写回"
-            elif not isinstance(before, str):
-                ok, message = False, "没有留下原文，无法写回"
-            else:
-                entry = ImportEntry(file, before, usage=Usage.from_raw(op.get("usage")))
-                outcome = await store.import_files(
-                    [entry], CONFLICT_SKIP, actor=actor
-                )
-                ok = bool(outcome) and outcome[0].landed
-                message = "已写回" if ok else (outcome[0].reason if outcome else "写回失败")
+        if current is not None or store.has_forgotten(file):
+            ok, message = False, "同名文件已经存在，没有写回"
+        elif not isinstance(before, str):
+            ok, message = False, "没有留下原文，无法写回"
         else:
-            after = float(op.get("afterMtime") or 0.0)
-            if current is None or abs(current - after) > MTIME_TOLERANCE:
-                ok, message = False, "整理之后这个文件又被改过或删掉，没有回退"
-            elif before is None:
-                report = await store.delete(file, actor=actor)
-                ok, message = report.ok, "已删除整理时新建的文件" if report.ok else report.message
-            else:
-                outcome = await store.import_files(
-                    [ImportEntry(file, str(before))],
-                    CONFLICT_OVERWRITE,
-                    actor=actor,
-                )
-                ok = bool(outcome) and outcome[0].landed
-                message = "已恢复原文" if ok else (outcome[0].reason if outcome else "恢复失败")
-        results.append({"op": op.get("op", ""), "file": file, "ok": ok, "message": message})
+            entry = ImportEntry(file, before, usage=Usage.from_raw(op.get("usage")))
+            outcome = await store.import_files(
+                [entry], CONFLICT_SKIP, actor=actor
+            )
+            ok = bool(outcome) and outcome[0].landed
+            message = "已写回" if ok else (outcome[0].reason if outcome else "写回失败")
+        results.append({"op": "delete", "file": file, "ok": ok, "message": message})
+    for file, group in groups.items():
+        first = group[0]
+        last = group[-1]
+        before = first.get("before")
+        current = store.mtime(file)
+        after = float(last.get("afterMtime") or 0.0)
+        if current is None or abs(current - after) > MTIME_TOLERANCE:
+            ok, message = False, "整理之后这个文件又被改过或删掉，没有回退"
+        elif before is None:
+            report = await store.delete(file, actor=actor)
+            ok, message = report.ok, "已删除整理时新建的文件" if report.ok else report.message
+        else:
+            outcome = await store.import_files(
+                [ImportEntry(file, str(before))],
+                CONFLICT_OVERWRITE,
+                actor=actor,
+            )
+            ok = bool(outcome) and outcome[0].landed
+            message = "已恢复原文" if ok else (outcome[0].reason if outcome else "恢复失败")
+        for op in group:
+            results.append(
+                {
+                    "op": op.get("op", ""),
+                    "file": file,
+                    "ok": ok,
+                    "message": message,
+                }
+            )
     return results

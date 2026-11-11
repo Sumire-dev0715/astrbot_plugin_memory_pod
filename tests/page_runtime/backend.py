@@ -52,6 +52,7 @@ def run(coro):
 
 def seed(base: Path, empty: bool = False):
     plugin, dashboard = tw.setup(base)
+    plugin._tidy.save_model("provider-a", "model-a")
     if empty:
         return plugin, dashboard
     plugin.config.update(enable_forgetting=True, forget_after_days=60)
@@ -180,7 +181,8 @@ class Handler(BaseHTTPRequestHandler):
             tw.REQUEST.body = json.loads(self.rfile.read(length) or b"{}")
         else:
             tw.REQUEST.body = None
-        result = run(dash._wrap(found[0][2])())
+        # 所有请求都跑在同一个常驻事件循环里：整理的后台任务要跨请求继续跑
+        result = STATE["call"](dash._wrap(found[0][2])())
         self._send(result)
 
     def do_GET(self):
@@ -192,6 +194,13 @@ class Handler(BaseHTTPRequestHandler):
 
 def reset(empty: bool = False):
     old = STATE.get("tmp")
+    old_dashboard = STATE.get("dashboard")
+    call = STATE.get("call")
+    if old_dashboard is not None and call is not None:
+        try:
+            call(old_dashboard.wait_background())
+        except Exception:
+            pass
     tmp = Path(tempfile.mkdtemp(prefix="mp-page-runtime-"))
     STATE["tmp"] = tmp
     STATE["fail"] = {}
@@ -201,14 +210,25 @@ def reset(empty: bool = False):
 
 
 class Backend:
-    """在后台线程里跑的本机 HTTP 后端（一次只处理一个请求，所以共用的假请求对象不会串）。"""
+    """在后台线程的常驻事件循环里跑本机 HTTP 后端（一次只处理一个请求）。"""
 
     def __init__(self):
+        self.loop = asyncio.new_event_loop()
+        self.loop_thread = threading.Thread(target=self._run_loop, daemon=True)
+        self.loop_thread.start()
+        STATE["call"] = self.call
         reset()
         self.server = HTTPServer(("127.0.0.1", 0), Handler)
         self.port = self.server.server_address[1]
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
+
+    def _run_loop(self):
+        asyncio.set_event_loop(self.loop)
+        self.loop.run_forever()
+
+    def call(self, coro):
+        return asyncio.run_coroutine_threadsafe(coro, self.loop).result()
 
     def reset(self, empty: bool = False):
         reset(empty=empty)
@@ -217,6 +237,14 @@ class Backend:
         self.server.shutdown()
         self.server.server_close()
         self.thread.join(timeout=5)
+        dash = STATE.get("dashboard")
+        if dash is not None:
+            try:
+                self.call(dash.wait_background())
+            except Exception:
+                pass
+        self.loop.call_soon_threadsafe(self.loop.stop)
+        self.loop_thread.join(timeout=5)
         shutil.rmtree(STATE.get("tmp"), ignore_errors=True)
 
 

@@ -132,7 +132,7 @@ const { boot, assert, until, sleep, section, summary } = require("../harness.js"
   await until(() => $(".overlay"), "应用确认");
   const at = text($(".overlay"));
   console.log("  应用确认:", at.slice(0, 260));
-  assert(/新建 0 个、改写 1 个、删除 1 个/.test(at) && /撤销/.test(at), "应用确认写清数量和可撤销");
+  assert(/新建 0 个、改写 1 个、自动修复 0 个、删除 1 个/.test(at) && /撤销/.test(at), "应用确认写清数量和可撤销");
   click(find(".overlay button", "应用"));
   await until(() => p.lastCall("consolidate/apply"), "consolidate/apply");
   const ap = p.lastCall("consolidate/apply");

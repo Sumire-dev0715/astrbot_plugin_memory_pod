@@ -217,17 +217,218 @@
     return { el: root, reload: load };
   }
 
+  // ------------------------------------------------------------ 整理：模型与任务状态
+
+  const TASK_STATE_KEYS = {
+    running: "taskRunning",
+    ready: "taskReady",
+    failed: "taskFailed",
+    cancelled: "taskCancelled",
+    interrupted: "taskInterrupted",
+  };
+
+  function taskStateText(state) {
+    return t(TASK_STATE_KEYS[state] || "taskRunning");
+  }
+
+  function taskProgressText(task) {
+    if (task.state === "running" && !task.batchCount) {
+      return task.queued ? t("taskQueued") : t("taskPreparing");
+    }
+    return t("taskProgress", {
+      done: task.batchesDone || 0,
+      total: task.batchCount || 0,
+      files: task.fileCount || 0,
+    });
+  }
+
+  function taskModelText(task) {
+    const model = task.model || {};
+    return model.model ? model.providerId + " · " + model.model : model.providerId || "";
+  }
+
+  function taskProgressBar(task) {
+    const total = task.batchCount || 0;
+    const done = Math.min(task.batchesDone || 0, total);
+    const percent = total ? Math.round((done / total) * 100) : 0;
+    return h(
+      "div",
+      { class: "progress", role: "progressbar", "aria-valuemin": "0", "aria-valuemax": String(total), "aria-valuenow": String(done) },
+      h("span", { class: "progress-fill", style: "width:" + percent + "%" }),
+      h("span", { class: "progress-text" }, taskProgressText(task))
+    );
+  }
+
+  /** 任务状态的一行摘要：状态、模型、文件与批次进度、需要先拆分的文件 */
+  function taskSummary(task) {
+    const bits = [h("span", { class: "tag tag-task-" + task.state }, taskStateText(task.state))];
+    if (task.queued) {
+      bits.push(h("span", { class: "tag tag-muted" }, t("taskQueued")));
+    }
+    if (taskModelText(task)) {
+      bits.push(h("span", { class: "hint" }, t("taskModelLabel", { model: taskModelText(task) })));
+    }
+    if (task.fileCount) {
+      bits.push(h("span", { class: "hint" }, t("taskFiles", { n: task.fileCount }) + (task.batchCount ? " · " + t("taskBatches", { n: task.batchCount }) : "")));
+    }
+    return h("div", { class: "task-summary" }, bits);
+  }
+
+  function needsSplitNotice(task) {
+    const names = (task && task.needsSplit) || [];
+    if (!names.length) {
+      return null;
+    }
+    return ui.notice(
+      "warn",
+      t("needsSplitHint", { n: names.length }) + " " + names.join(t("listSeparator"))
+    );
+  }
+
+  /** 整理模型下拉框（PLAN 3.12.1）：选择存在服务端，下次打开还在。 */
+  function TidyModelCard(onChange) {
+    const root = h("div", { class: "model-picker" });
+    const st = { loading: true, error: "", models: [], selected: null, saving: false };
+
+    async function load() {
+      st.loading = true;
+      paint();
+      try {
+        const data = await ui.apiGet("tidy/models");
+        st.models = data.models || [];
+        st.selected = data.selected || null;
+        st.error = "";
+      } catch (err) {
+        st.error = err.message;
+      }
+      st.loading = false;
+      paint();
+      return !st.error;
+    }
+
+    function ready() {
+      return Boolean(st.selected && st.selected.available);
+    }
+
+    function requireReady() {
+      if (ready()) {
+        return true;
+      }
+      ui.toast(t(st.selected ? "tidyPickUnavailable" : "tidyPickNeed"), "warn");
+      return false;
+    }
+
+    async function choose(providerId) {
+      if (!providerId || st.saving) {
+        return;
+      }
+      st.saving = true;
+      paint();
+      try {
+        const data = await ui.apiPost("tidy/model", { providerId: providerId });
+        st.models = data.models || st.models;
+        st.selected = data.selected || null;
+        ui.toast(t("tidyPickSaved"));
+        if (onChange) {
+          onChange();
+        }
+      } catch (err) {
+        ui.toast(err.message, "error");
+        await load();
+        return;
+      }
+      st.saving = false;
+      paint();
+    }
+
+    function paint() {
+      if (st.loading) {
+        ui.replace(root, ui.spinner(t("loading")));
+        return;
+      }
+      if (st.error) {
+        ui.replace(root, ui.errorState(st.error, load));
+        return;
+      }
+      if (!st.models.length) {
+        ui.replace(root, ui.notice("warn", t("tidyPickEmpty")));
+        return;
+      }
+      const options = [h("option", { value: "" }, t("tidyPickPlaceholder"))];
+      if (st.selected && !st.selected.available) {
+        options.push(
+          h(
+            "option",
+            { value: st.selected.providerId, selected: true },
+            t("tidyPickOptionUnavailable", { provider: st.selected.providerId })
+          )
+        );
+      }
+      st.models.forEach(function (item) {
+        const label = item.model ? item.providerId + " · " + item.model : item.providerId;
+        options.push(
+          h(
+            "option",
+            {
+              value: item.providerId,
+              selected: Boolean(st.selected && st.selected.providerId === item.providerId && st.selected.available),
+            },
+            label
+          )
+        );
+      });
+      const selectId = ui.uid("tidy-model");
+      ui.replace(
+        root,
+        h("p", { class: "hint" }, t("tidyPickHint")),
+        h(
+          "div",
+          { class: "field-row" },
+          h(
+            "label",
+            { class: "field-label", for: selectId },
+            t("tidyPickTitle")
+          ),
+          h(
+            "select",
+            {
+              class: "input",
+              id: selectId,
+              disabled: st.saving,
+              onchange: function (event) {
+                choose(event.target.value);
+              },
+            },
+            options
+          )
+        ),
+        st.selected && !st.selected.available
+          ? ui.notice("warn", t("tidyPickUnavailable"))
+          : st.selected && st.selected.model
+            ? h("p", { class: "hint" }, t("tidyPickCurrent", { model: st.selected.providerId + " · " + st.selected.model }))
+            : null
+      );
+    }
+
+    paint();
+    load();
+    return { el: root, load: load, ready: ready, requireReady: requireReady, state: st };
+  }
+
   // ------------------------------------------------------------ 整理：方案审阅
 
   function opKind(op, existing) {
     if (op.op === "delete") {
       return "delete";
     }
+    if (op.op === "fix") {
+      return "fix";
+    }
     return existing.has(op.file) ? "rewrite" : "create";
   }
 
   function countOps(ops, existing) {
-    const counts = { create: 0, rewrite: 0, delete: 0 };
+    const counts = { create: 0, rewrite: 0, delete: 0, fix: 0 };
     ops.forEach(function (op) {
       counts[opKind(op, existing)] += 1;
     });
@@ -251,8 +452,8 @@
   }
 
   /** 展开一项改动：改写看对比、新建看正文、删除看现在的内容（都在点开时才去读） */
-  async function changeView(r, op, kind) {
-    if (kind === "create") {
+  async function changeView(r, op, kind, existing) {
+    if (kind === "create" || (kind === "fix" && !existing.has(op.file))) {
       return h("div", { class: "doc" }, MP.markdown.render(op.content || ""));
     }
     const current = await ui.apiGet("file", { scope: r.scope, key: r.key, file: op.file });
@@ -269,6 +470,7 @@
     const ops = plan.operations || [];
     const existing = new Set(plan.files || []);
     const selected = new Set(ops.map(function (_, i) { return i; }));
+    const autoCount = ops.filter(function (op) { return op.op === "fix"; }).length;
     const list = h("ul", { class: "ops" });
     ops.forEach(function (op, index) {
       const kind = opKind(op, existing);
@@ -287,7 +489,7 @@
             if (open && !area.firstChild) {
               ui.replace(area, ui.spinner());
               try {
-                ui.replace(area, await changeView(r, op, kind));
+                ui.replace(area, await changeView(r, op, kind, existing));
               } catch (err) {
                 ui.replace(area, ui.errorState(err.message));
               }
@@ -353,6 +555,8 @@
           h("button", { type: "button", class: "btn btn-ghost btn-sm", onclick: function () { setAll(false); } }, t("selectNone"))
         )
       ),
+      autoCount ? ui.notice("info", t("autoFixCount", { n: autoCount })) : null,
+      (plan.needsSplit || []).length ? ui.notice("warn", t("needsSplitHint", { n: plan.needsSplit.length }) + " " + plan.needsSplit.join(t("listSeparator"))) : null,
       (plan.skipped || []).length ? ui.notice("info", t("consolidateSkipped", { n: plan.skipped.length })) : null,
       list
     );
@@ -365,12 +569,13 @@
     };
   }
 
-  /** 应用整理方案前的确认：写清会新建、改写、删除几个文件，以及怎么撤销 */
+  /** 应用整理方案前的确认：写清会新建、改写、自动修复、删除几个文件，以及怎么撤销 */
   function confirmApply(counts, label) {
     return ui.confirm({
       title: t("applyTitle", { label: label }),
       points: [
-        t("applyCounts", { create: counts.create, rewrite: counts.rewrite, del: counts.delete }),
+        t("applyCounts", { create: counts.create, rewrite: counts.rewrite, fix: counts.fix || 0, del: counts.delete }),
+        counts.fix ? t("applyPointAutoFix") : null,
         counts.rewrite || counts.delete ? t("applyPointBackup") : null,
         counts.delete ? t("applyPointDelete") : null,
         t("applyPointUndo"),
@@ -388,6 +593,9 @@
     function okText(item) {
       if (kind === "undo") {
         return t(item.op === "delete" ? "resultRestored" : "resultRolledBack");
+      }
+      if (item.op === "fix") {
+        return t("resultFixed");
       }
       return t(item.op === "delete" ? "resultDeleted" : "resultWritten");
     }
@@ -409,6 +617,9 @@
   function runOpLabel(op) {
     if (op.op === "delete") {
       return t("op_delete");
+    }
+    if (op.op === "fix") {
+      return t("op_fix");
     }
     return op.created ? t("op_create") : t("op_rewrite");
   }
@@ -492,7 +703,7 @@
                 "ul",
                 { class: "run-ops" },
                 (run.ops || []).map(function (op) {
-                  return h("li", null, h("span", { class: "tag tag-op-" + (op.op === "delete" ? "delete" : op.created ? "create" : "rewrite") }, runOpLabel(op)), h("span", { class: "mono" }, op.file), op.reason ? h("span", { class: "op-reason" }, op.reason) : null);
+                  return h("li", null, h("span", { class: "tag tag-op-" + (op.op === "delete" ? "delete" : op.op === "fix" ? "fix" : op.created ? "create" : "rewrite") }, runOpLabel(op)), h("span", { class: "mono" }, op.file), op.reason ? h("span", { class: "op-reason" }, op.reason) : null);
                 })
               )
             );
@@ -508,13 +719,28 @@
 
   // ------------------------------------------------------------ 整理一处
 
-  /** 整理一处记忆：让默认对话模型复盘，预览方案，勾选后应用；下面是整理记录 */
+  /** 整理一处记忆：选模型、后台分批复盘，刷新或离开再回来都能看到任务状态；下面是整理记录 */
   function TidyPanel(view, r, opts) {
     const root = h("div", { class: "detail" });
     const label = store.scopeLabel(r);
-    const st = { phase: "idle", error: "", review: null, results: null };
+    const st = { phase: "loading", task: null, error: "", review: null, results: null };
+    const modelCard = TidyModelCard();
     const runs = RunsSection(r);
+    const TERMINAL = ["ready", "failed", "cancelled", "interrupted"];
     let applyBtn = null;
+    let pollTimer = null;
+    let pollToken = 0;
+
+    function stopPolling() {
+      if (pollTimer) {
+        clearTimeout(pollTimer);
+        pollTimer = null;
+      }
+    }
+
+    function isTerminal(task) {
+      return Boolean(task && TERMINAL.indexOf(task.state) >= 0);
+    }
 
     function updateApply() {
       if (applyBtn && st.review) {
@@ -523,18 +749,106 @@
       }
     }
 
+    function setTask(task) {
+      st.task = task || null;
+      st.review = null;
+      if (!task) {
+        st.phase = st.results ? "done" : "idle";
+        return;
+      }
+      if (isTerminal(task)) {
+        const plan = task.plan || {};
+        const operations = plan.operations || [];
+        st.review = operations.length ? PlanReview(r, plan, updateApply) : null;
+        st.phase = "review";
+      } else {
+        st.phase = "running";
+      }
+    }
+
+    function schedulePoll() {
+      stopPolling();
+      if (!st.task || st.task.state !== "running") {
+        return;
+      }
+      const token = ++pollToken;
+      pollTimer = setTimeout(async function () {
+        pollTimer = null;
+        if (token !== pollToken || !root.isConnected) {
+          return;
+        }
+        await loadTask(true);
+      }, 800);
+    }
+
+    async function loadTask(quiet) {
+      try {
+        const data = await ui.apiGet("tidy/task", { scope: r.scope, key: r.key });
+        setTask(data.task);
+        if (!quiet) {
+          st.error = "";
+        }
+      } catch (err) {
+        st.error = err.message;
+        if (st.phase === "loading") {
+          // 任务状态读不到时给错误态和重试入口，不能一直转圈
+          st.phase = "idle";
+        }
+      }
+      paint();
+      schedulePoll();
+    }
+
     async function start() {
-      st.phase = "running";
+      if (!modelCard.requireReady()) {
+        return;
+      }
+      if (st.review && st.review.size() > 0) {
+        const ok = await ui.confirm({
+          title: t("discardTitle"),
+          message: t("discardTaskPlan"),
+          confirmLabel: t("discard"),
+          danger: true,
+        });
+        if (!ok) {
+          return;
+        }
+      }
+      st.phase = "starting";
+      st.task = null;
+      st.review = null;
+      st.results = null;
       st.error = "";
       paint();
       try {
-        const plan = await ui.apiPost("consolidate/preview", { scope: r.scope, key: r.key });
-        st.review = PlanReview(r, plan, updateApply);
-        st.phase = "plan";
+        const data = await ui.apiPost("tidy/start", { scope: r.scope, key: r.key });
+        setTask(data.task);
       } catch (err) {
         st.error = err.message;
         st.phase = "idle";
       }
+      paint();
+      schedulePoll();
+    }
+
+    async function cancel() {
+      const ok = await ui.confirm({
+        title: t("taskCancelConfirmTitle"),
+        message: t("taskCancelConfirmPoint"),
+        confirmLabel: t("taskCancel"),
+        danger: true,
+      });
+      if (!ok) {
+        return;
+      }
+      try {
+        const res = await ui.apiPost("tidy/cancel", { scope: r.scope, key: r.key });
+        setTask(res.task);
+        ui.toast(t("taskCancelledNotice"), "info");
+      } catch (err) {
+        ui.toast(err.message, "error");
+      }
+      stopPolling();
       paint();
     }
 
@@ -553,11 +867,13 @@
         st.results = res.results || [];
         ui.toast(ui.resultMessage(res, t("applied")));
         st.phase = "done";
+        st.task = null;
+        st.review = null;
         await store.changed(r);
         runs.reload();
       } catch (err) {
         ui.toast(err.message, "error");
-        st.phase = "plan";
+        st.phase = "review";
       }
       paint();
     }
@@ -566,9 +882,67 @@
       return h("button", { type: "button", class: "btn btn-primary btn-sm", onclick: M.action(start) }, icon("sparkles"), text);
     }
 
+    function runningBody() {
+      return [
+        taskSummary(st.task),
+        st.task.queued ? ui.notice("info", t("taskQueuedHint")) : null,
+        taskProgressBar(st.task),
+        needsSplitNotice(st.task),
+        h(
+          "div",
+          { class: "actions" },
+          h(
+            "button",
+            { type: "button", class: "btn btn-sm", onclick: M.action(cancel) },
+            icon("stop"),
+            t("taskCancel")
+          )
+        ),
+      ];
+    }
+
+    function terminalBody() {
+      const task = st.task;
+      const notice = task.state === "ready"
+        ? null
+        : task.state === "failed"
+          ? ui.notice("danger", t("taskFailedNotice", { message: task.message || t("requestFailed") }))
+          : task.state === "cancelled"
+            ? ui.notice("info", t("taskCancelledNotice"))
+            : task.state === "interrupted"
+              ? ui.notice("warn", t("taskInterruptedNotice"))
+              : null;
+      if (!st.review || !st.review.total) {
+        return [
+          taskSummary(task),
+          notice,
+          needsSplitNotice(task),
+          task.state === "ready" && !(task.needsSplit || []).length
+            ? ui.emptyState({ icon: "check", title: t("consolidateNothingTitle"), hint: t("consolidateNothingHint"), compact: true })
+            : null,
+          h("div", { class: "actions" }, startButton(t("consolidateAgain"))),
+        ];
+      }
+      applyBtn = h("button", { type: "button", class: "btn btn-primary btn-sm", onclick: M.action(apply) }, icon("check"), h("span", { class: "btn-label" }, t("applyN", { n: st.review.size() })));
+      const discard = h("button", { type: "button", class: "btn btn-ghost btn-sm", onclick: function () { st.review = null; st.phase = "idle"; paint(); } }, t("discardPlan"));
+      return [
+        taskSummary(task),
+        notice,
+        needsSplitNotice(task),
+        st.review.el,
+        h("div", { class: "actions sticky-actions" }, applyBtn, discard),
+      ];
+    }
+
     function body() {
-      if (st.phase === "running") {
+      if (st.phase === "loading") {
+        return ui.spinner(t("loading"));
+      }
+      if (st.phase === "starting") {
         return ui.spinner(t("consolidateRunning", { label: label }));
+      }
+      if (st.phase === "running") {
+        return runningBody();
       }
       if (st.phase === "applying") {
         return ui.spinner(t("applying"));
@@ -576,13 +950,8 @@
       if (st.phase === "done") {
         return [ui.notice("ok", t("consolidateDoneNotice")), resultList(st.results, "apply"), h("div", { class: "actions" }, startButton(t("consolidateAgain")))];
       }
-      if (st.phase === "plan" && st.review) {
-        if (!st.review.total) {
-          return [ui.emptyState({ icon: "check", title: t("consolidateNothingTitle"), hint: t("consolidateNothingHint"), compact: true }), st.review.el.querySelector(".notice"), h("div", { class: "actions" }, startButton(t("consolidateAgain")))];
-        }
-        applyBtn = h("button", { type: "button", class: "btn btn-primary btn-sm", onclick: M.action(apply) }, icon("check"), h("span", { class: "btn-label" }, t("applyN", { n: st.review.size() })));
-        const discard = h("button", { type: "button", class: "btn btn-ghost btn-sm", onclick: function () { st.phase = "idle"; st.review = null; paint(); } }, t("discardPlan"));
-        return [st.review.el, h("div", { class: "actions sticky-actions" }, applyBtn, discard)];
+      if (st.phase === "review") {
+        return terminalBody();
       }
       return [
         h("p", null, t("consolidateHint", { label: label })),
@@ -595,17 +964,32 @@
     function paint() {
       const head = M.detailHead({ view: view, title: t("tidyTitle"), desc: label });
       root.setAttribute("aria-labelledby", head.id);
-      ui.replace(root, opts && opts.onBack ? backLink(opts.backLabel || t("back"), opts.onBack) : null, head.el, card(null, body()), card(null, runs.el));
+      ui.replace(
+        root,
+        opts && opts.onBack ? backLink(opts.backLabel || t("back"), opts.onBack) : null,
+        head.el,
+        card(t("tidyPickTitle"), modelCard.el),
+        card(null, body()),
+        card(null, runs.el)
+      );
       updateApply();
     }
 
     paint();
+    loadTask();
     return {
       el: root,
-      // 刷新只重读下面的整理记录；正在生成、审阅中的方案原样留着
-      reload: function () { return runs.reload(); },
-      isDirty: function () { return st.phase === "plan" && Boolean(st.review && st.review.total); },
-      markClean: function () { st.phase = "idle"; },
+      // 刷新时重读模型与任务状态；正在审阅的方案原样留着
+      reload: async function () {
+        const modelOk = await modelCard.load();
+        if (st.phase === "running" || st.phase === "loading" || !st.review) {
+          await loadTask(true);
+        }
+        const runsOk = await runs.reload();
+        return modelOk && runsOk !== false;
+      },
+      isDirty: function () { return Boolean(st.review && st.review.size() > 0); },
+      markClean: function () { st.review = null; st.phase = "idle"; paint(); },
     };
   }
 
@@ -633,8 +1017,33 @@
 
   function TidyAllPanel(opts) {
     const root = h("div", { class: "detail" });
-    const st = { phase: "idle", targets: [], index: 0, stop: false, groups: [], results: [] };
+    const st = { phase: "idle", targets: [], tasks: {}, errors: {}, groups: [], results: [] };
+    const modelCard = TidyModelCard();
     let applyBtn = null;
+    let pollTimer = null;
+    let pollToken = 0;
+
+    function sidOf(ref) {
+      return store.sid(ref);
+    }
+
+    function taskOf(target) {
+      return st.tasks[sidOf(target.ref)] || null;
+    }
+
+    function anyRunning() {
+      return st.targets.some(function (target) {
+        const task = taskOf(target);
+        return task && task.state === "running";
+      });
+    }
+
+    function stopPolling() {
+      if (pollTimer) {
+        clearTimeout(pollTimer);
+        pollTimer = null;
+      }
+    }
 
     function chosenTotal() {
       return st.groups.reduce(function (sum, g) { return sum + (g.review ? g.review.size() : 0); }, 0);
@@ -648,39 +1057,134 @@
       }
     }
 
+    async function loadTasks() {
+      const data = await ui.apiGet("tidy/tasks");
+      (data.tasks || []).forEach(function (task) {
+        const ref = store.ref(task.scope, task.key);
+        if (st.targets.some(function (item) { return store.sameRef(item.ref, ref); })) {
+          st.tasks[sidOf(ref)] = task;
+        }
+      });
+    }
+
+    function finish() {
+      st.groups = st.targets.map(function (target) {
+        const sid = sidOf(target.ref);
+        if (st.errors[sid]) {
+          return { target: target, error: st.errors[sid] };
+        }
+        const task = st.tasks[sid];
+        if (!task) {
+          return { target: target, error: t("taskMissing") };
+        }
+        const plan = task.plan || {};
+        const review = (plan.operations || []).length ? PlanReview(target.ref, plan, updateApply) : null;
+        return { target: target, task: task, review: review, nothing: !review && task.state === "ready" };
+      });
+      st.phase = "review";
+      paint();
+    }
+
+    function poll() {
+      stopPolling();
+      if (st.phase !== "running") {
+        return;
+      }
+      const token = ++pollToken;
+      pollTimer = setTimeout(async function () {
+        pollTimer = null;
+        if (token !== pollToken || !root.isConnected) {
+          return;
+        }
+        try {
+          await loadTasks();
+        } catch (err) {
+          st.errors.poll = err.message;
+        }
+        if (anyRunning()) {
+          paint();
+          poll();
+        } else {
+          finish();
+        }
+      }, 800);
+    }
+
     async function start() {
+      if (!modelCard.requireReady()) {
+        return;
+      }
       st.targets = consolidateTargets();
       if (!st.targets.length) {
         ui.toast(t("consolidateAllNone"), "info");
         return;
       }
-      st.phase = "running";
-      st.stop = false;
-      st.groups = [];
-      for (let i = 0; i < st.targets.length && !st.stop; i += 1) {
-        const target = st.targets[i];
-        st.index = i;
-        paint();
-        try {
-          const plan = await ui.apiPost("consolidate/preview", { scope: target.ref.scope, key: target.ref.key });
-          const review = PlanReview(target.ref, plan, updateApply);
-          st.groups.push({ target: target, review: review.total ? review : null, nothing: !review.total });
-        } catch (err) {
-          st.groups.push({ target: target, error: err.message });
+      if (st.review && chosenTotal() > 0) {
+        const ok = await ui.confirm({
+          title: t("discardTitle"),
+          message: t("discardTaskPlan"),
+          confirmLabel: t("discard"),
+          danger: true,
+        });
+        if (!ok) {
+          return;
         }
       }
-      st.phase = "review";
+      st.phase = "starting";
+      st.tasks = {};
+      st.errors = {};
+      st.groups = [];
+      st.results = [];
       paint();
+      for (const target of st.targets) {
+        const sid = sidOf(target.ref);
+        try {
+          const data = await ui.apiPost("tidy/start", { scope: target.ref.scope, key: target.ref.key });
+          st.tasks[sid] = data.task;
+        } catch (err) {
+          st.errors[sid] = err.message;
+        }
+      }
+      st.phase = "running";
+      paint();
+      poll();
+    }
+
+    async function cancelAll() {
+      const ok = await ui.confirm({
+        title: t("taskCancelAllTitle"),
+        message: t("taskCancelConfirmPoint"),
+        confirmLabel: t("taskCancel"),
+        danger: true,
+      });
+      if (!ok) {
+        return;
+      }
+      for (const target of st.targets) {
+        const task = taskOf(target);
+        if (!task || task.state !== "running") {
+          continue;
+        }
+        try {
+          const res = await ui.apiPost("tidy/cancel", { scope: target.ref.scope, key: target.ref.key });
+          st.tasks[sidOf(target.ref)] = res.task;
+        } catch (err) {
+          st.errors[sidOf(target.ref)] = err.message;
+        }
+      }
+      stopPolling();
+      finish();
     }
 
     async function apply() {
-      const counts = { create: 0, rewrite: 0, delete: 0 };
+      const counts = { create: 0, rewrite: 0, delete: 0, fix: 0 };
       const work = st.groups.filter(function (g) { return g.review && g.review.size(); });
       work.forEach(function (g) {
         const c = countOps(g.review.chosen(), g.review.existing);
         counts.create += c.create;
         counts.rewrite += c.rewrite;
         counts.delete += c.delete;
+        counts.fix += c.fix;
       });
       if (!work.length || !(await confirmApply(counts, t("consolidateAllScope", { n: work.length })))) {
         return;
@@ -702,6 +1206,33 @@
       paint();
     }
 
+    function taskBox(target) {
+      const sid = sidOf(target.ref);
+      const error = st.errors[sid];
+      const task = st.tasks[sid];
+      const head = h("div", { class: "group-head" }, h("h3", { class: "card-title" }, target.label));
+      if (error) {
+        return card(null, [head, ui.notice("danger", error)]);
+      }
+      if (!task) {
+        return card(null, [head, ui.spinner(t("taskPreparing"))]);
+      }
+      return card(null, [
+        head,
+        taskSummary(task),
+        task.state === "running"
+          ? taskProgressBar(task)
+          : task.state === "failed"
+            ? ui.notice("danger", t("taskFailedNotice", { message: task.message || t("requestFailed") }))
+            : task.state === "cancelled"
+              ? ui.notice("info", t("taskCancelledNotice"))
+              : task.state === "interrupted"
+                ? ui.notice("warn", t("taskInterruptedNotice"))
+                : null,
+        needsSplitNotice(task),
+      ]);
+    }
+
     function groupBox(g) {
       const headLine = h("div", { class: "group-head" }, h("h3", { class: "card-title" }, g.target.label));
       if (g.error) {
@@ -710,18 +1241,26 @@
       if (g.nothing) {
         return card(null, [headLine, h("p", { class: "hint" }, t("consolidateNothingHint"))]);
       }
-      return card(null, [headLine, g.review.el]);
+      const stateNotice = g.task && g.task.state === "failed"
+        ? ui.notice("danger", t("taskFailedNotice", { message: g.task.message || t("requestFailed") }))
+        : g.task && g.task.state === "cancelled"
+          ? ui.notice("info", t("taskCancelledNotice"))
+          : g.task && g.task.state === "interrupted"
+            ? ui.notice("warn", t("taskInterruptedNotice"))
+            : null;
+      return card(null, [headLine, stateNotice, needsSplitNotice(g.task), g.review ? g.review.el : null]);
     }
 
     function body() {
-      if (st.phase === "running") {
-        const current = st.targets[st.index];
+      if (st.phase === "starting" || st.phase === "running") {
         return [
-          ui.spinner(t("consolidateAllRunning", { i: st.index + 1, n: st.targets.length, label: current ? current.label : "" })),
+          h("p", { class: "hint" }, t("consolidateAllRunningHint", { n: st.targets.length })),
+          st.errors.poll ? ui.notice("danger", st.errors.poll) : null,
+          st.targets.map(taskBox),
           h(
             "div",
             { class: "actions" },
-            h("button", { type: "button", class: "btn btn-sm", disabled: st.stop, onclick: function () { st.stop = true; paint(); } }, icon("stop"), st.stop ? t("stopping") : t("stopAfterCurrent"))
+            h("button", { type: "button", class: "btn btn-sm", onclick: M.action(cancelAll) }, icon("stop"), t("taskCancelAll"))
           ),
         ];
       }
@@ -753,6 +1292,7 @@
       return [
         h("p", null, t("consolidateAllHint")),
         h("p", { class: "hint" }, t("consolidateAllCount", { n: consolidateTargets().length })),
+        st.errors.poll ? ui.notice("danger", st.errors.poll) : null,
         h("div", { class: "actions" }, h("button", { type: "button", class: "btn btn-primary btn-sm", onclick: M.action(start) }, icon("sparkles"), t("consolidateAll"))),
       ];
     }
@@ -760,22 +1300,33 @@
     function paint() {
       const head = M.detailHead({ view: "manage", title: t("consolidateAllTitle") });
       root.setAttribute("aria-labelledby", head.id);
-      ui.replace(root, opts && opts.onBack ? backLink(t("backToTidy"), opts.onBack) : null, head.el, body());
+      ui.replace(
+        root,
+        opts && opts.onBack ? backLink(t("backToTidy"), opts.onBack) : null,
+        head.el,
+        card(t("tidyPickTitle"), modelCard.el),
+        card(null, body())
+      );
       updateApply();
     }
 
     paint();
     return {
       el: root,
-      // 刷新只更新「共 N 处」；正在整理、审阅、应用时原样留着
-      reload: function () {
-        if (st.phase === "idle") {
+      // 刷新时重读模型；正在跑的任务继续轮询，审阅中的方案原样留着
+      reload: async function () {
+        const modelOk = await modelCard.load();
+        if (st.phase === "running") {
+          await loadTasks();
+          paint();
+          poll();
+        } else if (st.phase === "idle") {
           paint();
         }
-        return true;
+        return modelOk;
       },
       isDirty: function () { return st.phase === "review" && chosenTotal() > 0; },
-      markClean: function () { st.phase = "idle"; },
+      markClean: function () { st.phase = "idle"; st.groups = []; paint(); },
     };
   }
 
@@ -852,17 +1403,89 @@
     return list;
   }
 
+  /** 所有作用域的整理任务：打开管理页就能看到刷新前留下的整理中、方案已就绪等状态 */
+  function TidyTasksCard() {
+    const root = h("div");
+    let tasks = null;
+    let error = "";
+
+    function taskRow(task) {
+      const ref = store.ref(task.scope, task.key);
+      return h(
+        "li",
+        { class: "item" },
+        h("div", { class: "item-title" }, store.scopeLabel(ref)),
+        taskSummary(task),
+        task.state === "running" ? taskProgressBar(task) : null,
+        task.state === "failed"
+          ? h("p", { class: "hint" }, t("taskFailedNotice", { message: task.message || t("requestFailed") }))
+          : null,
+        h(
+          "div",
+          { class: "actions" },
+          h(
+            "button",
+            {
+              type: "button",
+              class: "btn btn-sm",
+              onclick: function () { MP.app.openManage("tidy", { tidySid: store.sid(ref) }); },
+            },
+            icon("chevronRight"),
+            t("viewTask")
+          )
+        )
+      );
+    }
+
+    function paint() {
+      const title = h("h3", { class: "card-title" }, t("tasksTitle"));
+      if (error) {
+        ui.replace(root, card(null, [title, ui.errorState(error, load)]));
+        return;
+      }
+      if (!tasks) {
+        ui.replace(root, card(null, [title, ui.spinner()]));
+        return;
+      }
+      if (!tasks.length) {
+        ui.replace(root, card(null, [title, h("p", { class: "hint" }, t("tasksNone"))]));
+        return;
+      }
+      ui.replace(root, card(null, [title, h("ul", { class: "items" }, tasks.map(taskRow))]));
+    }
+
+    async function load() {
+      try {
+        const data = await ui.apiGet("tidy/tasks");
+        tasks = data.tasks || [];
+        error = "";
+      } catch (err) {
+        error = err.message;
+      }
+      paint();
+      return !error;
+    }
+
+    paint();
+    load();
+    return { el: root, reload: load };
+  }
+
   function TidyHome() {
     const root = h("div", { class: "detail" });
     const head = M.detailHead({ view: "manage", title: t("manageTidy"), desc: t("manageTidyHint") });
     root.setAttribute("aria-labelledby", head.id);
     const gate = M.overviewGate();
+    const modelCard = TidyModelCard();
+    const tasksCard = TidyTasksCard();
     ui.replace(
       root,
       head.el,
       gate
         ? card(null, gate)
         : [
+            card(t("tidyPickTitle"), modelCard.el),
+            tasksCard.el,
             card(
               t("consolidateAllTitle"),
               [
@@ -879,7 +1502,14 @@
             ),
           ]
     );
-    return { el: root };
+    return {
+      el: root,
+      reload: async function () {
+        const modelOk = await modelCard.load();
+        const tasksOk = await tasksCard.reload();
+        return modelOk && tasksOk !== false;
+      },
+    };
   }
 
   function MaintHome() {

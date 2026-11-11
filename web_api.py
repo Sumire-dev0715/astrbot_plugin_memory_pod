@@ -359,6 +359,8 @@ class MemoryDashboard:
         self.transfer = transfer.MemoryTransfer(plugin._store, plugin._registry)
         # 令牌 -> (过期时间, 内容)：生成好的备份、上传待导入的备份
         self._staged: dict[str, tuple[float, Any]] = {}
+        # 整理任务的调度：每处一个任务，同时最多跑 tidy.MAX_ACTIVE_TASKS 处
+        self.tidy_runner = tidy.TidyRunner(tidy.MAX_ACTIVE_TASKS)
 
     # ------------------------------------------------------------ 注册
 
@@ -388,12 +390,12 @@ class MemoryDashboard:
             ("whisper/remark", "POST", self.whisper_remark, "记忆管理：会话备注"),
             ("whisper/purge", "POST", self.whisper_purge, "记忆管理：清除会话数据"),
             ("board/publish", "POST", self.board_publish, "记忆管理：发布留言板告示"),
-            (
-                "consolidate/preview",
-                "POST",
-                self.consolidate_preview,
-                "记忆管理：生成整理方案",
-            ),
+            ("tidy/models", "GET", self.tidy_models, "记忆管理：可用的整理模型"),
+            ("tidy/model", "POST", self.tidy_model_select, "记忆管理：选择整理模型"),
+            ("tidy/start", "POST", self.tidy_start, "记忆管理：开始整理（后台任务）"),
+            ("tidy/task", "GET", self.tidy_task, "记忆管理：整理任务状态"),
+            ("tidy/tasks", "GET", self.tidy_tasks, "记忆管理：全部整理任务状态"),
+            ("tidy/cancel", "POST", self.tidy_cancel, "记忆管理：取消整理任务"),
             (
                 "consolidate/apply",
                 "POST",
@@ -428,6 +430,10 @@ class MemoryDashboard:
 
     def unregister(self) -> None:
         self._purge_routes()
+
+    async def wait_background(self) -> None:
+        """等整理任务跑完；测试驱动后台任务用，页面不会调用。"""
+        await self.tidy_runner.wait()
 
     def _purge_routes(self) -> None:
         apis = getattr(self.plugin.context, "registered_web_apis", None)
@@ -500,7 +506,7 @@ class MemoryDashboard:
         self.plugin.invalidate_scope(scope, key)
 
     def _scope_label(self, scope: str, key: str | None) -> str:
-        # 整理提示词会发给默认对话模型，群名/群号不能进去（PLAN 3.9.1）
+        # 整理提示词会发给管理员选定的整理模型，群名/群号不能进去（PLAN 3.9.1）
         return tidy.scope_label(scope, key)
 
     def _stage(self, payload: Any) -> str:
@@ -673,9 +679,13 @@ class MemoryDashboard:
         meta = await asyncio.to_thread(
             self.plugin._tidy.meta, tidy.scope_id(scope, key)
         )
+        task = await asyncio.to_thread(
+            self.plugin._tidy.task, tidy.scope_id(scope, key)
+        )
         data["scope"] = scope
         data["key"] = key
         data["tidy"] = self._tidy_info(meta)
+        data["task"] = tidy.public_task(task)
         data["forgettingEnabled"] = self.plugin._forgetting_on()
         data["forgetAfterDays"] = self.plugin._forget_after_days()
         # 删除、恢复的确认框要写清能找回多久：0 表示永久保留（PLAN 3.1）
@@ -1229,30 +1239,140 @@ class MemoryDashboard:
 
     # ------------------------------------------------------------ 记忆整理
 
-    async def consolidate_preview(self) -> dict:
+    def _require_tidy_model(self) -> dict:
+        """整理请求必须有可用的选定模型（PLAN 3.12.1）。"""
+        state = self.plugin.tidy_model_state()
+        selected = state.get("selected")
+        if not selected:
+            raise ApiError("请先在管理页上方选择一个整理模型")
+        if not selected.get("available"):
+            raise ApiError("选择的整理模型已不可用，请重新选择")
+        return {
+            "providerId": selected["providerId"],
+            "model": selected.get("model", ""),
+        }
+
+    async def tidy_models(self) -> dict:
+        """列出 AstrBot 里启用的对话模型，以及当前选择是否可用。"""
+        state = await asyncio.to_thread(self.plugin.tidy_model_state)
+        return _ok(state)
+
+    async def tidy_model_select(self) -> dict:
+        """记住管理员选定的整理模型（tidy/model.json）。"""
+        body = await _body()
+        provider_id = _text(body.get("providerId")).strip()
+        if not provider_id:
+            raise ApiError("请选择一个整理模型")
+        state = await asyncio.to_thread(self.plugin.tidy_model_state)
+        match = next(
+            (
+                item
+                for item in state.get("models", [])
+                if item["providerId"] == provider_id
+            ),
+            None,
+        )
+        if match is None:
+            raise ApiError("这个整理模型不可用，请重新选择")
+        await asyncio.to_thread(
+            self.plugin._tidy.save_model,
+            match["providerId"],
+            match.get("model", ""),
+        )
+        state = await asyncio.to_thread(self.plugin.tidy_model_state)
+        return _ok(state, f"整理模型已改为 {provider_id}（{match.get('model', '')}）")
+
+    async def tidy_start(self) -> dict:
+        """开始一份后台整理任务，立刻返回任务 ID（PLAN 3.12.4）。"""
         body = await _body()
         scope, key, store = self._scope_from_body(body)
+        model = self._require_tidy_model()
         book = self.plugin._tidy
         sid = tidy.scope_id(scope, key)
+        current = await asyncio.to_thread(book.task, sid)
+        if current is not None and current.get("state") == tidy.TASK_RUNNING:
+            raise ApiError("这个作用域正在整理中，请等待结果")
+        files = await asyncio.to_thread(store.list_files)
+        if not files:
+            raise ApiError("这里还没有记忆，无需整理")
+        # 与旧版一致：同一处同一时间只允许一个任务（claim 在任务结束时释放）
         if not book.claim(sid):
             raise ApiError("这个作用域正在整理中，请等待结果")
         try:
-            proposal = await tidy.propose(
-                store, self._scope_label(scope, key), self.plugin.call_consolidator
-            )
-        finally:
+            task = tidy.new_task(model)
+            task["queued"] = self.tidy_runner.active_count() >= tidy.MAX_ACTIVE_TASKS
+            if task["queued"]:
+                task["message"] = "排队中，等待前面的整理任务完成"
+            await asyncio.to_thread(book.create_task, sid, task)
+            label = self._scope_label(scope, key)
+
+            async def work() -> None:
+                try:
+                    await tidy.run_task(
+                        book,
+                        sid,
+                        store,
+                        label,
+                        lambda prompt: self.plugin.call_tidy_model(prompt, model),
+                    )
+                finally:
+                    book.release(sid)
+
+            started = self.tidy_runner.schedule(sid, work)
+            if not started:
+
+                def change(state: dict) -> None:
+                    state["queued"] = True
+                    state["message"] = "排队中，等待前面的整理任务完成"
+
+                await asyncio.to_thread(book.update_task, sid, change)
+        except BaseException:
             book.release(sid)
+            raise
+        latest = await asyncio.to_thread(book.task, sid)
         return _ok(
             {
-                "operations": [op.to_dict() for op in proposal.operations],
-                "skipped": proposal.skipped,
-                "fileCount": len(proposal.files),
-                "files": proposal.files,
+                "taskId": task["id"],
+                "task": tidy.public_task(latest),
             }
         )
 
+    async def tidy_task(self) -> dict:
+        """一处整理的当前/最近一次任务状态。"""
+        scope, key, _ = self._scope_from_query()
+        task = await asyncio.to_thread(
+            self.plugin._tidy.task, tidy.scope_id(scope, key)
+        )
+        return _ok({"task": tidy.public_task(task)})
+
+    async def tidy_tasks(self) -> dict:
+        """全部作用域的任务状态：管理页打开时一次读回（PLAN 3.12.4）。"""
+        tasks = []
+        for task in await asyncio.to_thread(self.plugin._tidy.all_tasks):
+            scope, key = tidy.parse_scope_id(str(task.get("sid") or ""))
+            if not scope:
+                continue
+            item = tidy.public_task(task)
+            if item is None:
+                continue
+            item.update(scope=scope, key=key)
+            tasks.append(item)
+        return _ok({"tasks": tasks})
+
+    async def tidy_cancel(self) -> dict:
+        """取消正在跑的整理；已经完成的批次保留在方案里。"""
+        body = await _body()
+        scope, key, _ = self._scope_from_body(body)
+        sid = tidy.scope_id(scope, key)
+        task = await asyncio.to_thread(self.plugin._tidy.cancel_task, sid)
+        if task is None:
+            raise ApiError("没有找到整理任务")
+        if task.get("state") != tidy.TASK_CANCELLED:
+            raise ApiError("没有正在进行的整理任务")
+        return _ok({"task": tidy.public_task(task)}, "已取消")
+
     async def consolidate_apply(self) -> dict:
-        """应用整理方案（管理页手动整理，使用默认对话模型）。"""
+        """应用整理方案（管理页手动整理，使用管理员选定的模型生成）。"""
         body = await _body()
         scope, key, store = self._scope_from_body(body)
         raw_ops = body.get("operations")
@@ -1276,6 +1396,9 @@ class MemoryDashboard:
             ops = [op for op in ops if op.op != "delete"]
         book = self.plugin._tidy
         sid = tidy.scope_id(scope, key)
+        current = await asyncio.to_thread(book.task, sid)
+        if current is not None and current.get("state") == tidy.TASK_RUNNING:
+            raise ApiError("这个作用域正在整理中，请等待结果")
         if not book.claim(sid):
             raise ApiError("这个作用域正在整理中，请稍后再试")
         try:
@@ -1316,6 +1439,9 @@ class MemoryDashboard:
                 book.update_meta(sid, change)
 
             await asyncio.to_thread(record)
+            # 方案应用以后清掉（PLAN 3.12.4）；一项都没应用时也清掉，
+            # 因为那些条目已经被校验为过期，留着只会重复失败
+            await asyncio.to_thread(book.clear_task, sid)
         finally:
             book.release(sid)
         self._changed(scope, key)

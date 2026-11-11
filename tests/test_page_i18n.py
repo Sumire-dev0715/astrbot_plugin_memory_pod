@@ -82,7 +82,7 @@ def _families() -> dict[str, set[str]]:
         "partNote_": set(context_stats.PART_KEYS),
         "policy_": set(memstore.CONFLICT_POLICIES),
         "outcome_": set(transfer.OUTCOMES),
-        "op_": {"create", "rewrite", "delete"},
+        "op_": {"create", "rewrite", "delete", "fix"},
         "windowSource_": window_sources,
     }
 

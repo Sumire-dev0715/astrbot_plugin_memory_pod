@@ -2750,3 +2750,72 @@ select.input {
     animation-duration: 1.5s !important;
   }
 }
+
+/* 整理任务：状态标签、进度条与模型选择 */
+.field-row {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.model-picker {
+  display: grid;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+
+.task-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+  margin: var(--sp-2) 0;
+}
+
+.progress {
+  position: relative;
+  display: flex;
+  align-items: center;
+  min-height: 26px;
+  margin: var(--sp-2) 0;
+  background: var(--surface-2);
+  border-radius: var(--r-pill);
+  overflow: hidden;
+}
+
+.progress-fill {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  background: var(--accent-soft);
+}
+
+.progress-text {
+  position: relative;
+  padding: 2px var(--sp-3);
+  color: var(--text-2);
+  font-size: var(--fs-sm);
+}
+
+.tag-op-fix,
+.tag-task-running {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.tag-task-ready {
+  background: var(--ok-soft);
+  color: var(--ok);
+}
+
+.tag-task-failed {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.tag-task-cancelled,
+.tag-task-interrupted {
+  background: var(--surface-2);
+  color: var(--text-3);
+}

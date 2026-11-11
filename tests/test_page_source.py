@@ -302,7 +302,7 @@ def test_overview_shows_user_identifier_notice():
     assert "turnLimitNotice" not in overview
     # 上下文面板里同样提示
     assert 't("userIdentifierNotice")' in _between(
-        manage, "function ContextPanel(key) {", "整理：方案审阅"
+        manage, "function ContextPanel(key) {", "整理：模型与任务状态"
     )
 
 
@@ -310,7 +310,7 @@ def test_context_panel_is_read_only():
     app = _page("app.js")
     manage = _page("manage.js")
     assert '"tabContext"' in app
-    panel = _between(manage, "function ContextPanel(key) {", "整理：方案审阅")
+    panel = _between(manage, "function ContextPanel(key) {", "整理：模型与任务状态")
     assert 'apiGet("whisper/context"' in panel
     assert 't("contextReadonlyNotice")' in panel
     assert 't("summaryTitle")' in panel
@@ -329,7 +329,7 @@ def test_context_panel_shows_composition_bar_cache_rate_and_summary():
     assert "(parts[k] / total) * 100" in bar
     assert 't("cacheRate"' in bar
     assert "data.cacheHit / data.actual" in bar
-    panel = _between(manage, "function ContextPanel(key) {", "整理：方案审阅")
+    panel = _between(manage, "function ContextPanel(key) {", "整理：模型与任务状态")
     assert "data.hasSummary" in panel and "data.summary" in panel
 
 

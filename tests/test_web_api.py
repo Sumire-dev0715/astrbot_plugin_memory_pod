@@ -86,8 +86,10 @@ class FakePlugin:
         self.config = {"enable_memory": True}
         self.invalidated: list = []
         self.reply = ""
+        self.replies: list[str] = []
         self.prompts: list[str] = []
         self.astrbot_config: dict = {}
+        self.tidy_models = [{"providerId": "provider-a", "model": "model-a"}]
 
     def _bool(self, key, default):
         return self.config.get(key, default)
@@ -132,24 +134,62 @@ class FakePlugin:
     def platform_ids(self):
         return ["Bot-A"]
 
-    async def call_consolidator(self, prompt):
+    def tidy_model_options(self):
+        return list(self.tidy_models)
+
+    def tidy_model_state(self):
+        selected = self._tidy.selected_model()
+        current = None
+        if selected is not None:
+            match = next(
+                (
+                    item
+                    for item in self.tidy_models
+                    if item["providerId"] == selected["providerId"]
+                ),
+                None,
+            )
+            current = {
+                "providerId": selected["providerId"],
+                "model": (match or {}).get("model") or selected.get("model", ""),
+                "available": match is not None,
+            }
+        return {"models": list(self.tidy_models), "selected": current}
+
+    async def call_tidy_model(self, prompt, model=None):
         self.prompts.append(prompt)
+        if self.replies:
+            return self.replies.pop(0), []
         return self.reply, []
 
 
 def setup(tmp_path):
     plugin = FakePlugin(tmp_path)
+    plugin._tidy.save_model("provider-a", "model-a")
     dashboard = web_api.MemoryDashboard(plugin)
     return plugin, dashboard
 
 
-def call(coro):
-    return asyncio.run(coro)
+def call(coro, dashboard=None):
+    async def runner():
+        try:
+            return await coro
+        finally:
+            if dashboard is not None:
+                await dashboard.wait_background()
+
+    return asyncio.run(runner())
 
 
 def route(dashboard, name):
-    """像注册到 AstrBot 的路由一样调用：把 ApiError 转成 status=error。"""
-    return call(dashboard._wrap(getattr(dashboard, name))())
+    """像注册到 AstrBot 的路由一样调用：把 ApiError 转成 status=error。
+
+    整理在后台跑；这里等它跑完再返回，方便断言最终状态。
+    """
+    return call(
+        dashboard._wrap(getattr(dashboard, name))(),
+        dashboard=dashboard,
+    )
 
 
 def body(data):
@@ -163,6 +203,17 @@ def query(**params):
 
 def raw(result):
     return result.get("data", {})
+
+
+def start_tidy(dashboard, scope, key):
+    """发起一次整理并等后台任务跑完，返回公开的任务状态。"""
+    body({"scope": scope, "key": key})
+    result = route(dashboard, "tidy_start")
+    assert result["status"] == "ok", result
+    query(scope=scope, key=key)
+    task = raw(route(dashboard, "tidy_task"))["task"]
+    assert task is not None
+    return task
 
 
 def test_overview_lists_three_layers(tmp_path):
@@ -502,19 +553,18 @@ def test_whisper_scopes_are_addressable_by_key_only(tmp_path):
     assert [item["file"] for item in data["files"]] == ["other.md"]
 
 
-def test_consolidate_preview_only_sees_selected_scope(tmp_path):
+def test_tidy_start_only_sees_selected_scope(tmp_path):
     plugin, dashboard = setup(tmp_path)
     call(plugin._store.whisper_scope("a").write("secret.md", thing("secret", body="A 的秘密")))
     call(plugin._store.whisper_scope("b").write("other.md", thing("other", body="B 的内容")))
     plugin.reply = json.dumps([{"op": "delete", "file": "other.md", "reason": "过期"}])
-    body({"scope": "whisper", "key": "a"})
-    result = route(dashboard, "consolidate_preview")
-    assert result["status"] == "ok", result
+    task = start_tidy(dashboard, "whisper", "a")
     prompt = plugin.prompts[-1]
     assert "secret.md" in prompt
     assert "other.md" not in prompt and "B 的内容" not in prompt
     # 方案里不能出现另一段对话的文件（delete 不存在的文件会被丢掉）
-    assert raw(result)["operations"] == []
+    assert task["state"] == "ready"
+    assert task["plan"]["operations"] == []
 
 
 def test_consolidate_apply_cannot_touch_other_scope(tmp_path):
@@ -618,13 +668,12 @@ def test_board_consolidate_keeps_signature_through_preview_and_apply(tmp_path):
             }
         ]
     )
-    body({"scope": "board", "key": ""})
-    preview = raw(route(dashboard, "consolidate_preview"))
-    operation = preview["operations"][0]
+    task = start_tidy(dashboard, "board", "")
+    operation = task["plan"]["operations"][0]
     # 预览能看到真实署名；模型给的署名被插件覆盖
     assert operation["signature"] == "原署名"
 
-    body({"scope": "board", "key": "", "operations": preview["operations"]})
+    body({"scope": "board", "key": "", "operations": task["plan"]["operations"]})
     assert route(dashboard, "consolidate_apply")["status"] == "ok"
     content = call(board.read("notice.md"))
     assert pkg_memstore.parse_memory(content).signature == "原署名"

@@ -179,8 +179,33 @@ def test_history_cleanup_only_runs_when_memory_enabled(tmp_path):
     assert calls == ["cleanup"]
 
 
-def test_manual_consolidation_uses_default_chat_provider(tmp_path):
+def test_tidy_uses_selected_model_by_provider_id(tmp_path):
+    """整理改用管理员选定的提供商 ID 调用，不再走默认对话模型（PLAN 3.12.1）。"""
     plugin = make_plugin(tmp_path)
+    plugin._tidy.save_model("provider-x", "model-x")
+    plugin.tidy_model_options = lambda: [
+        {"providerId": "provider-x", "model": "model-x"}
+    ]
+    calls = []
+
+    async def llm_generate(**kwargs):
+        calls.append(kwargs)
+        return types.SimpleNamespace(completion_text="[]")
+
+    plugin.context.llm_generate = llm_generate
+    text, log = run(plugin.call_tidy_model("整理"))
+    assert text == "[]"
+    assert calls == [{"chat_provider_id": "provider-x", "prompt": "整理"}]
+    assert log and "成功" in log[0] and "provider-x" in log[0]
+
+
+def test_tidy_model_falls_back_to_get_provider_by_id(tmp_path):
+    """旧版 AstrBot 没有 llm_generate 时，按 ID 找到提供商再调用 text_chat。"""
+    plugin = make_plugin(tmp_path)
+    plugin._tidy.save_model("provider-x", "model-x")
+    plugin.tidy_model_options = lambda: [
+        {"providerId": "provider-x", "model": "model-x"}
+    ]
     calls = []
 
     class Provider:
@@ -188,15 +213,58 @@ def test_manual_consolidation_uses_default_chat_provider(tmp_path):
             calls.append(prompt)
             return types.SimpleNamespace(completion_text="[]")
 
-    async def get_using_provider(umo=None):
-        calls.append(umo)
-        return Provider()
-
-    plugin.context.get_using_provider = get_using_provider
-    text, log = run(plugin.call_consolidator("整理"))
+    plugin.context.get_provider_by_id = lambda provider_id: Provider()
+    text, _log = run(plugin.call_tidy_model("整理"))
     assert text == "[]"
-    assert calls == [None, "整理"]
-    assert log and "成功" in log[0]
+    assert calls == ["整理"]
+
+
+def test_tidy_without_selected_model_does_not_call_any_model(tmp_path):
+    plugin = make_plugin(tmp_path)
+    called = []
+
+    async def llm_generate(**kwargs):
+        called.append(kwargs)
+        return types.SimpleNamespace(completion_text="[]")
+
+    plugin.context.llm_generate = llm_generate
+    text, log = run(plugin.call_tidy_model("整理"))
+    assert text is None
+    assert called == []
+    assert log == ["没有选择整理模型"]
+
+
+def test_tidy_model_options_list_loaded_chat_providers(tmp_path):
+    plugin = make_plugin(tmp_path)
+
+    class Inst:
+        def __init__(self, provider_id, model):
+            self.provider_config = {"id": provider_id, "model": model}
+
+        def meta(self):
+            return types.SimpleNamespace(id=self.provider_config["id"], model=self.provider_config["model"])
+
+    plugin.context.provider_manager = types.SimpleNamespace(
+        provider_insts=[Inst("provider-b", "model-b"), Inst("provider-a", "model-a")]
+    )
+    assert plugin.tidy_model_options() == [
+        {"providerId": "provider-a", "model": "model-a"},
+        {"providerId": "provider-b", "model": "model-b"},
+    ]
+
+
+def test_tidy_model_options_fall_back_to_enabled_config(tmp_path):
+    plugin = make_plugin(tmp_path)
+    plugin.context.provider_manager = types.SimpleNamespace(
+        provider_insts=[],
+        providers_config=[
+            {"id": "a", "enable": True, "provider_type": "chat_completion", "model": "m1", "type": "openai"},
+            {"id": "b", "enable": False, "provider_type": "chat_completion", "model": "m2", "type": "openai"},
+            {"id": "c", "enable": True, "provider_type": "speech_to_text", "model": "m3", "type": "openai"},
+            {"id": "d", "enable": True, "provider_type": "chat_completion", "type": "agent_runner"},
+        ],
+    )
+    assert plugin.tidy_model_options() == [{"providerId": "a", "model": "m1"}]
 
 
 def test_board_notices_count_as_used_so_forgetting_does_not_drop_them(tmp_path):
