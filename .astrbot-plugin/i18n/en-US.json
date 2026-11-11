@@ -7,35 +7,35 @@
   "config": {
     "enable_memory": {
       "description": "Enable long-term memory",
-      "hint": "Injects the memory opening block and gives the chat model memory_read / memory_search to read and memory_write / memory_edit / memory_delete to write the three layers. Memories have three layers: the notice board (visible to every chat, written by admins), the notebook (shared by every group and private chat of this bot), and whispers (only the current conversation). When turned off, saved memories stay on disk; the bot just stops reading and writing them."
+      "hint": "When on, the plugin appends the index of all three layers (notice board, notebook, whispers) to the system prompt, recalls related memories for each message, and gives the chat model the memory_read / memory_search / memory_write / memory_edit / memory_delete tools. When off, all of that stops; existing memory files stay on disk and come back when you turn it on again."
     },
     "recall_max_files": {
       "description": "Max memories recalled per turn",
-      "hint": "The most memory files attached per turn. Default 5. Each file is capped at 3,000 characters and all of them together at 9,000; anything longer is cut. 0 turns recall off."
+      "hint": "Before each message, the most relevant memories are attached. One file contributes at most 3000 characters, 9000 in total. Set 0 to turn recall off; memory_search still works when needed."
     },
     "recall_full_files": {
       "description": "Recalled files attached in full per turn",
-      "hint": "Each turn, the most relevant few non-identity recalled files are attached in full; the rest are collapsed into a single pointer line to read with memory_read when needed. Identity files (the sender, people mentioned with @, and so on) in the notebook are always attached in full, do not use these slots, and still count against the per-file 3,000-character and 9,000-character total budgets. Set it to at least \"Max memories recalled per turn\" to attach every recalled file in full. Default 2."
+      "hint": "Of the recalled memories, this many with the highest relevance come with full text; the rest are listed by file name and read on demand. The sender's and mentioned users' profiles always come in full and do not count against this number. Setting it at or above the recall limit gives full text to all of them."
     },
     "memory_reminder_turns": {
       "description": "Remind the model to write memory every N turns",
-      "hint": "Every this many turns, remind the model in the request to review the recent conversation and write down what is worth keeping long-term. Default 10; 0 turns it off. One extra reminder is added right before AstrBot truncates or compresses the context (at most once per truncation or compression)."
+      "hint": "Every this many turns the plugin reminds the model to review the conversation and write down what is worth keeping. Right before AstrBot truncates or compacts the context it reminds once more, regardless of this number. Set 0 to turn the per-turn reminder off."
     },
     "history_keep_days": {
       "description": "History retention (days)",
-      "hint": "Old versions saved before memories are overwritten or edited are kept this long and then cleaned up; 0 keeps them forever. Each file always keeps at least its 10 most recent versions. Default 90."
+      "hint": "Before every overwrite or edit the old content is kept as a version for this many days. Each file always keeps its 10 most recent versions. Set 0 to keep them forever."
     },
     "trash_keep_days": {
       "description": "Trash retention (days)",
-      "hint": "Deleted memory files stay in the trash this long and are then cleaned up; 0 keeps them forever. The memory page can view, restore, or delete them early. Default 90."
+      "hint": "Deleted memories go to the trash first and are cleaned up after this many days; meanwhile the management page can view, restore or permanently delete them. Set 0 to keep them forever."
     },
     "enable_forgetting": {
       "description": "Enable memory forgetting",
-      "hint": "When on, memories that have not been recalled or read for a long time drop out of the index and recall so the bot stops carrying them, but the files are kept: they come back automatically when that person shows up again or the bot reads the memory itself, and the memory page's \"Forgotten\" tab lets you restore or delete them for good. Agreement memories are never forgotten. Off by default; nothing changes while off."
+      "hint": "When on, memories that have not been recalled or read for a long time leave the index and recall without being deleted: they come back when the person shows up again or the model reads them, and the management page can restore or permanently delete them. Agreements are never forgotten."
     },
     "forget_after_days": {
       "description": "Forget after this many unused days",
-      "hint": "A memory that has not been recalled or read for this many days (unused ones count from their last modification) moves to \"Forgotten\". Only applies while \"Enable memory forgetting\" is on. Default 90."
+      "hint": "A memory that has not been recalled or read for this many days (unused ones count from their last modification) moves to forgotten. Only used when memory forgetting is on."
     }
   },
   "pages": {

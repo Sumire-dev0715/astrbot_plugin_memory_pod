@@ -85,3 +85,39 @@ def test_english_consolidate_all_hint_has_no_global_scope():
     hint = pages["consolidateAllHint"].lower()
     assert "global" not in hint
     assert "every scope" in hint
+
+
+def test_dependent_configs_use_condition_so_the_page_can_hide_them():
+    """长记忆关掉时下面的选项不可改；关掉遗忘时遗忘天数不可改。
+
+    WebUI 的配置表单按 condition 里列的「键: 值」全部匹配才显示该项，
+    所以这里锁住：除了总开关本身，每一项都依赖 enable_memory；遗忘天数
+    还依赖 enable_forgetting。
+    """
+    schema = load("_conf_schema.json")
+    for key, item in schema.items():
+        if key == "enable_memory":
+            assert "condition" not in item
+            continue
+        assert item.get("condition", {}).get("enable_memory") is True, key
+    assert schema["forget_after_days"]["condition"] == {
+        "enable_memory": True,
+        "enable_forgetting": True,
+    }
+
+
+def test_numeric_configs_use_sliders_with_the_documented_ranges():
+    schema = load("_conf_schema.json")
+    for key in (
+        "recall_max_files",
+        "recall_full_files",
+        "memory_reminder_turns",
+        "forget_after_days",
+        "history_keep_days",
+        "trash_keep_days",
+    ):
+        item = schema[key]
+        assert item["type"] == "int", key
+        slider = item.get("slider") or {}
+        assert set(slider) == {"min", "max", "step"}, key
+        assert slider["min"] <= item["default"] <= slider["max"], key
