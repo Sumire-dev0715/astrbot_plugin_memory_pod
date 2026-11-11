@@ -127,16 +127,18 @@ def count_outcomes(results: list[ImportResult]) -> dict[str, int]:
 def free_name(store: ScopeStore, name: str) -> str:
     """目标里给同名文件另起一个带序号的名字（PLAN 3.12.2"保留两份"）。
 
-    依次试 <名字>-2.md、-3.md……在册与已遗忘的文件都算占用；找不到空位抛
-    TransferError。
+    依次试 <名字>-2.md、-3.md……在册与已遗忘的文件都算占用；名字接近长度上限、
+    加序号后不合法时跳过，找不到合适合法名字抛 TransferError。
     """
     suffix = MEMORY_FILE_SUFFIX
     stem = name[: -len(suffix)] if name.endswith(suffix) else name
     for index in range(2, MAX_RENAME_INDEX + 1):
         candidate = f"{stem}-{index}{suffix}"
+        if not store.is_valid_name(candidate):
+            continue
         if not store.exists(candidate) and not store.has_forgotten(candidate):
             return candidate
-    raise TransferError("目标里同名文件太多，保留两份时加不上序号")
+    raise TransferError("目标里同名文件太多，或文件名太长，保留两份时加不上序号")
 
 
 def _entry_to_json(entry: ImportEntry) -> dict:

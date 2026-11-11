@@ -1275,6 +1275,9 @@
         });
       }
       ((S.ov && S.ov.notebooks) || []).forEach(function (item) { add(item.platform || item.key); });
+      // 这段对话自己的机器人先列出来：拿不到机器人清单（migrate/info 失败）时，
+      // 默认目标也不会缺失
+      add(platform);
       ((info && info.platforms) || []).forEach(function (item) { add(item.platform); });
       ((info && info.adapters) || []).forEach(add);
       return items;
@@ -1407,6 +1410,9 @@
           dlg.close(null);
         }
         await afterMove(targetRef);
+      } catch (err) {
+        // 接口报错（文件刚被别处删掉、名字加不上序号等）：说明原因，弹窗留着可以重试或取消
+        ui.toast(err.message, "error");
       } finally {
         if (dlg) {
           dlg.setBusy(false);
@@ -1432,7 +1438,11 @@
             "ul",
             { class: "confirm-points" },
             h("li", null, renamed ? t("conflictKeepPoint", { name: renamed }) : t("conflictKeepPointPlain")),
-            h("li", null, t("conflictOverwritePoint"))
+            h(
+              "li",
+              null,
+              t(keepPreview.forgotten ? "conflictOverwriteForgottenPoint" : "conflictOverwritePoint")
+            )
           )
         ),
         actions: [
@@ -1500,6 +1510,10 @@
                 ui.apiPost("migrate/file", payload),
                 ui.apiPost("migrate/file", Object.assign({}, payload, { conflict: "keep" })),
               ]);
+            } catch (err) {
+              // 预演失败（文件刚被别处删掉、目标标识非法等）：说明原因，弹窗留着
+              ui.toast(err.message, "error");
+              return;
             } finally {
               dlg.setBusy(false);
             }

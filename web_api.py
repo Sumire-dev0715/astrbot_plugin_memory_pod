@@ -1684,7 +1684,8 @@ class MemoryDashboard:
         先按原样把文件写进目标（created / updated / source 与写入时间不变），
         再把来源文件移进回收站。目标里同名时由页面先问过用户：keep 保留两份
         （新名字加序号，报告里的 renamed 给出对应关系）、overwrite 用搬来的
-        覆盖（旧版进历史）。dryRun 只预览，不写盘。
+        覆盖（在册的旧版进历史，已遗忘的同名副本进回收站）。dryRun 只预览，
+        不写盘；报告的 forgotten 说明目标里是否只有已遗忘的同名副本。
         """
         body = await _body()
         src = self._ref(body.get("from"))
@@ -1701,9 +1702,8 @@ class MemoryDashboard:
         dst_store = self.transfer.scope_store(dst)
         if not await asyncio.to_thread(src_store.exists, name):
             raise ApiError(f"来源里没有 {name}")
-        has_conflict = await asyncio.to_thread(
-            lambda: dst_store.exists(name) or dst_store.has_forgotten(name)
-        )
+        has_conflict = await asyncio.to_thread(dst_store.exists, name)
+        has_forgotten = await asyncio.to_thread(dst_store.has_forgotten, name)
         dry_run = bool(body.get("dryRun"))
         report = await self.transfer.transfer(
             src,
@@ -1715,13 +1715,15 @@ class MemoryDashboard:
             dry_run=dry_run,
             keep_both=conflict == MOVE_KEEP_BOTH,
         )
-        report["conflict"] = has_conflict
+        report["conflict"] = has_conflict or has_forgotten
+        report["forgotten"] = has_forgotten and not has_conflict
         if dry_run:
             return _ok(report)
         self._changed_ref(dst)
         self._changed_ref(src)
-        landed = report["counts"]["added"] + report["counts"]["replaced"]
-        if not landed:
+        counts = report["counts"]
+        changed = counts["added"] + counts["replaced"]
+        if not changed + counts["same"]:
             issues = "；".join(
                 item["reason"] for item in report.get("issues", []) if item.get("reason")
             )
@@ -1730,6 +1732,9 @@ class MemoryDashboard:
                 message += f"（{issues}）"
         elif not report.get("moved"):
             message = f"已写入目标，但 {name} 没能移入回收站，请在原处手动删除"
+        elif not changed:
+            # 目标里已经是一模一样的内容：不用重写，来源照样移进回收站
+            message = f"目标里已有相同内容，{name} 已移入回收站"
         elif report.get("renamed"):
             message = (
                 f"已移动到目标，两处都保留：{name} → "

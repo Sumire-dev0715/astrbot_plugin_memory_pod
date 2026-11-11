@@ -183,11 +183,10 @@ class MemoryPodPlugin(Star):
         except OSError as exc:
             logger.warning(LOG_PREFIX + f"清理回收站里的旧索引副本失败：{exc}")
         else:
-            if index_copies:
-                logger.info(
-                    LOG_PREFIX
-                    + f"已清理回收站里旧版本留下的 MEMORY.md 副本 {index_copies} 份"
-                )
+            logger.info(
+                LOG_PREFIX
+                + f"回收站里旧版本留下的 MEMORY.md 副本：清理了 {index_copies} 份"
+            )
         self._history_cleanup_at = 0.0
         self._state_dir = data_dir / "state"
         self._registry = registry.SessionRegistry(data_dir / "sessions.json")

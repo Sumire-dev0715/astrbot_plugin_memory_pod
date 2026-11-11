@@ -2468,7 +2468,7 @@ class ScopeStore:
         if written:
             if adopt_index:
                 self._write_atomic(index_path, index.strip("\n") + "\n")
-                self._rebuild_index_sync(actor)
+                self._rebuild_index_sync()
             else:
                 for name, content in written:
                     self._sync_index_line(name, parse_description(content)[0])
@@ -2705,7 +2705,7 @@ class ScopeStore:
             dangling=[name for name in listed if name not in files],
         )
 
-    async def rebuild_index(self, actor: str = history.ACTOR_WEBUI) -> int:
+    async def rebuild_index(self) -> int:
         """按磁盘上的实际文件重建 MEMORY.md，返回索引行数。
 
         已有行原位刷新钩子、保留手工加的标题与分组，指向不存在文件的行
@@ -2713,9 +2713,9 @@ class ScopeStore:
         （PLAN 3.12.3），重建不需要先备份，也不改任何记忆文件。
         """
         async with self._lock:
-            return await asyncio.to_thread(self._rebuild_index_sync, actor)
+            return await asyncio.to_thread(self._rebuild_index_sync)
 
-    def _rebuild_index_sync(self, actor: str = "") -> int:
+    def _rebuild_index_sync(self) -> int:
         headers = {h.file: h for h in self.headers()}
         entries = self._journal_entries(list(headers.values()))
         index_path = self.root / INDEX_FILENAME

@@ -186,6 +186,66 @@ def test_move_rejects_board_same_scope_and_missing_file(tmp_path):
     assert whisper.root.joinpath("health.md").is_file()
 
 
+def test_move_overwrite_same_content_moves_source_without_error(tmp_path):
+    """目标里已经是一模一样的内容：来源照样移进回收站，回执不能说没写进去。"""
+    _, dashboard, key, whisper, notebook = make(tmp_path)
+    content = thing("health", description="一样", body="一样的内容")
+    call(notebook.write("health.md", content))
+    call(whisper.write("health.md", content))
+
+    done = move(dashboard, **from_whisper(key, "health.md", conflict="overwrite"))
+    assert done["status"] == "ok", done
+    assert done["data"]["counts"]["same"] == 1
+    assert done["data"]["moved"] == 1
+    assert "没有写入目标" not in done["message"]
+    assert "相同内容" in done["message"]
+    assert not (whisper.root / "health.md").exists()
+    assert "一样的内容" in call(notebook.read("health.md"))
+    assert not (notebook.root / "health-2.md").exists()
+
+
+def test_move_overwrite_forgotten_copy_goes_to_trash_not_history(tmp_path):
+    """目标里只有已遗忘的同名副本：覆盖时旧版进回收站，页面据此换一种说法。"""
+    _, dashboard, key, whisper, notebook = make(tmp_path)
+    call(notebook.write("health.md", thing("health", description="旧版", body="遗忘区的旧内容")))
+    call(notebook.forget("health.md"))
+    call(whisper.write("health.md", thing("health", description="搬来的", body="搬来的内容")))
+
+    dry = move(dashboard, **from_whisper(key, "health.md", dry_run=True))
+    assert dry["status"] == "ok", dry
+    assert dry["data"]["conflict"] is True
+    assert dry["data"]["forgotten"] is True
+
+    done = move(dashboard, **from_whisper(key, "health.md"))
+    assert done["status"] == "ok", done
+    assert done["data"]["forgotten"] is True
+    assert done["data"]["moved"] == 1
+    assert "搬来的内容" in call(notebook.read("health.md"))
+    assert notebook.history_versions("health.md") == []
+    assert not notebook.has_forgotten("health.md")
+    assert any(
+        "遗忘区的旧内容" in (notebook.read_trash(item.entry) or "")
+        for item in notebook.trash_entries()
+    )
+    assert not (whisper.root / "health.md").exists()
+
+
+def test_move_keep_both_rejects_names_that_cannot_take_a_suffix(tmp_path):
+    """名字已经到长度上限时加不上序号：报错、两份原样不动，不返回非法的新名字。"""
+    _, dashboard, key, whisper, notebook = make(tmp_path)
+    name = "a" * 118 + ".md"
+    assert pkg_memstore.ScopeStore.is_valid_name(name)
+    call(notebook.write(name, thing("long", description="目标", body="目标内容")))
+    call(whisper.write(name, thing("long", description="来源", body="来源内容")))
+
+    done = move(dashboard, **from_whisper(key, name, conflict="keep"))
+    assert done["status"] == "error", done
+    assert "加不上序号" in done["message"]
+    assert (whisper.root / name).is_file()
+    assert "目标内容" in call(notebook.read(name))
+    assert call(notebook.read("a" * 118 + "-2.md")) is None
+
+
 def test_move_keeps_source_when_target_write_is_rejected(tmp_path):
     _, dashboard, key, whisper, notebook = make(tmp_path)
     huge = thing("huge", description="太大", body="x" * pkg_memstore.MAX_FILE_BYTES)

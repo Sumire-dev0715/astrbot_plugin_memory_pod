@@ -295,6 +295,8 @@ def test_move_buttons_open_a_target_dialog_and_ask_about_conflicts():
     assert 't("conflictKeep")' in move
     assert 't("conflictOverwrite")' in move
     assert 't("cancel")' in move
+    # 目标里只有已遗忘的同名副本时，覆盖的说法换成"进回收站"，不谎称进历史版本
+    assert 'keepPreview.forgotten ? "conflictOverwriteForgottenPoint" : "conflictOverwritePoint"' in move
     # 从悄悄话移出去时写清"这个机器人的所有群聊和私聊都能读到"
     assert 't("moveNotebookConsequence", { platform: picked.platform })' in move
     assert 't("moveWhisperConsequence")' in move
@@ -302,6 +304,29 @@ def test_move_buttons_open_a_target_dialog_and_ask_about_conflicts():
     assert move.count('apiPost("migrate/file"') >= 2
     assert "dryRun: true" in move and "dryRun: false" in move
     assert 't("moveToTrashPoint")' in move
+    # 预演与真正的写都有 catch：接口报错时提示原因，不留下未处理的拒绝
+    assert move.count("catch (err)") >= 2
+    assert move.count('ui.toast(err.message, "error")') >= 2
+    # 这段对话自己的机器人先列进目标，migrate/info 取不到时默认目标也不会缺
+    targets = _between(memory, "function moveTargets(r, toNotebook, info) {", "  /**\n   * 移动一个文件")
+    assert targets.index("add(platform);") < targets.index("((info && info.platforms) || [])")
+
+
+def test_move_posts_only_from_a_confirmed_dialog():
+    """migrate/file 会移走来源：真正的写只在三选一弹窗或无冲突的确认框之后发出。"""
+    memory = _page("memory.js")
+    move = _between(memory, "async function moveFile(view, r, name) {", "function FileDetail(")
+    send = _between(move, "async function sendMove(", "/** 同名冲突")
+    assert send.count('apiPost("migrate/file"') == 1
+    assert "dryRun: false" in send
+    conflict = _between(move, "function askConflict(", "async function confirmNoConflict(")
+    assert 'sendMove(dlg, "keep"' in conflict and 'sendMove(dlg, "overwrite"' in conflict
+    assert 't("cancel")' in conflict
+    assert 't("conflictKeep")' in conflict and 't("conflictOverwrite")' in conflict
+    confirm = _between(move, "async function confirmNoConflict(", "const ctrl = ui.dialog(")
+    assert confirm.index("ui.confirm(") < confirm.index('sendMove(null, "overwrite"')
+    # 除了定义，只有这两个确认/选择入口会发真正的移动
+    assert move.count("sendMove(") == 4
 
 
 # ------------------------------------------------------------ 具体功能的接线

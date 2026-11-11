@@ -133,10 +133,12 @@ def test_plugin_load_cleans_index_copies_and_logs(tmp_path, monkeypatch, caplog)
     caplog.set_level(logging.INFO, logger="memory_pod_test")
     main.MemoryPodPlugin(FakeContext(), {})
     assert not copy.exists()
-    assert any(
-        "MEMORY.md" in record.getMessage() and "1 份" in record.getMessage()
-        for record in caplog.records
-    ), [record.getMessage() for record in caplog.records]
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("MEMORY.md" in m and "1 份" in m for m in messages), messages
+    # 没有副本时也记一行 0 份（PLAN 3.12.3：日志里记删了几份）
+    main.MemoryPodPlugin(FakeContext(), {})
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("MEMORY.md" in m and "0 份" in m for m in messages), messages
 
 
 def test_model_tools_cannot_reach_audit_history_or_trash(tmp_path):
