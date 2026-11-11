@@ -219,8 +219,8 @@ def test_non_entry_lines_over_limit_fall_back_to_bottom_cut(tmp_path):
     store = ScopeStore(tmp_path)
     total = memstore.INDEX_MAX_LINES + 50
     text = "\n".join(f"## 分组 {i}" for i in range(total))
-    report = run(store.write_index(text))
-    assert report.ok and "注入视图" in report.message
+    # 索引只能由插件按记忆文件维护（PLAN 3.12.3）：直接放一份超长的旧索引
+    (tmp_path / INDEX_FILENAME).write_text(text + "\n", encoding="utf-8")
 
     snap = run(store.load_index())
     assert snap.truncated
@@ -243,14 +243,14 @@ def test_health_uses_compact_injection_size(tmp_path):
     assert len(text.encode("utf-8")) > memstore.INDEX_MAX_BYTES
     assert compact < memstore.INDEX_MAX_BYTES * memstore.INDEX_WARN_RATIO
 
-    report = run(store.write_index(text))
-    # 磁盘链接格式超过 25KB，但注入视图没超，不应误报
-    assert "注入上限" not in report.message
+    (tmp_path / INDEX_FILENAME).write_text(text + "\n", encoding="utf-8")
+    # 磁盘链接格式超过 25KB，但注入视图没超，健康提示不应误报超限
     snap = run(store.load_index())
     assert not snap.truncated
     detail = store.index_report()
     assert detail.size == compact
     assert detail.truncated is False
+    assert store._index_health(*store._injection_metrics(text)) is None
 
 
 def test_write_receipt_uses_compact_injection_size(tmp_path):

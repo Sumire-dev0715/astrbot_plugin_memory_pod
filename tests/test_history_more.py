@@ -73,12 +73,14 @@ def test_delete_file_completely_removes_history_and_trash(tmp_path):
     assert run(scope.read("MEMORY.md")) is not None
 
 
-def test_write_index_rebuild_and_report(tmp_path):
+def test_rebuild_index_and_report(tmp_path):
     scope = store(tmp_path)
     run(scope.write("a.md", thing("a", description="甲", body="内容")))
     run(scope.write("b.md", thing("b", description="乙", body="内容")))
-    report = run(scope.write_index("- [a](a.md) — 手工钩子\n"))
-    assert report.ok
+    # 直接改磁盘上的索引（手工编辑入口已删，PLAN 3.12.3）：缺一行、钩子也旧了
+    (scope.root / "MEMORY.md").write_text(
+        "# 分组\n- [a](a.md) — 手工钩子\n", encoding="utf-8"
+    )
     health = scope.index_report()
     assert "b.md" in health.missing
     count = run(scope.rebuild_index())
@@ -86,33 +88,25 @@ def test_write_index_rebuild_and_report(tmp_path):
     health = scope.index_report()
     assert health.missing == [] and health.dangling == []
     assert "手工钩子" not in run(scope.read("MEMORY.md"))
+    # 分组标题保留；索引只是缓存，重建不会往回收站里放副本
+    assert "# 分组" in run(scope.read("MEMORY.md"))
+    assert scope.trash_entries() == []
 
 
-def test_index_save_and_rebuild_keep_old_index_recoverable(tmp_path):
+def test_rebuild_index_does_not_copy_index_to_trash(tmp_path):
     scope = store(tmp_path)
     run(scope.write("note.md", thing("note", description="甲", body="内容")))
-    auto_index = run(scope.read("MEMORY.md"))
-
-    run(scope.write_index("- [note](note.md) — 手工钩子\n"))
-    entries = [e for e in scope.trash_entries() if e.file == "MEMORY.md"]
-    assert len(entries) == 1
-    assert scope.read_trash(entries[0].entry) == auto_index
-
-    manual_index = run(scope.read("MEMORY.md"))
     run(scope.rebuild_index())
-    entries = [e for e in scope.trash_entries() if e.file == "MEMORY.md"]
-    manual = next(
-        e for e in entries if scope.read_trash(e.entry) == manual_index
-    )
-    # 旧索引在回收站里能恢复；恢复前当前的索引也会留档
-    report = run(scope.restore_trash(manual.entry))
-    assert report.ok
-    assert run(scope.read("MEMORY.md")) == manual_index
-    assert any(
-        scope.read_trash(e.entry) != manual_index
-        for e in scope.trash_entries()
-        if e.file == "MEMORY.md"
-    )
+    run(scope.rebuild_index())
+    assert scope.trash_entries() == []
+    assert scope.trash_count() == 0
+    # 旧版本留下的 MEMORY.md 副本可以一键清掉
+    trash = scope.root / ".trash"
+    trash.mkdir(exist_ok=True)
+    (trash / "20260101-000000-000__MEMORY.md").write_text("# 旧索引", encoding="utf-8")
+    assert scope.trash_entries() == [] and scope.trash_count() == 0
+    assert scope.remove_index_copies() == 1
+    assert not (trash / "20260101-000000-000__MEMORY.md").exists()
 
 
 def test_import_conflict_policies(tmp_path):

@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import logging
+
 from support import (
+    FakeContext,
     FakeEvent,
+    main,
     make_plugin,
     pkg_history,
     pkg_memstore,
@@ -14,6 +18,15 @@ from support import (
 
 def store(tmp_path):
     return pkg_memstore.MemoryStore(tmp_path / "memories").notebook_scope("Bot-A")
+
+
+def trash_copy(root, name="MEMORY.md", stamp="20260101-000000-000"):
+    """在作用域目录的回收站里放一条副本，模拟旧版本留下的文件。"""
+    trash = root / ".trash"
+    trash.mkdir(parents=True, exist_ok=True)
+    path = trash / f"{stamp}__{name}"
+    path.write_text("# 旧内容\n", encoding="utf-8")
+    return path
 
 
 def test_every_overwrite_keeps_the_previous_version(tmp_path):
@@ -69,6 +82,61 @@ def test_cleanup_removes_old_trash_and_keeps_recent(tmp_path):
     now = old.ts + 10 * 86400
     scope.cleanup_history(now=now, force=True)
     assert not scope.trash_entries()
+
+
+def test_trash_list_and_count_hide_index_copies(tmp_path):
+    scope = store(tmp_path)
+    run(scope.write("note.md", thing("note", body="正文")))
+    run(scope.delete("note.md"))
+    index_copy = trash_copy(scope.root)
+    assert [item.file for item in scope.trash_entries()] == ["note.md"]
+    assert scope.trash_count() == 1
+    # 恢复索引的分支已删除：这条副本恢复不了，MEMORY.md 保持原样
+    before = run(scope.read("MEMORY.md"))
+    report = run(scope.restore_trash(index_copy.name))
+    assert not report.ok
+    assert run(scope.read("MEMORY.md")) == before
+    assert index_copy.is_file()
+
+
+def test_memory_store_removes_index_copies_from_every_layer(tmp_path):
+    memories = tmp_path / "memories"
+    store_obj = pkg_memstore.MemoryStore(memories)
+    board = store_obj.board_scope()
+    notebook = store_obj.notebook_scope("Bot-A")
+    whisper = store_obj.whisper_scope("Bot-A:FriendMessage:1")
+    copies = [
+        trash_copy(board.root),
+        trash_copy(notebook.root),
+        trash_copy(whisper.root),
+    ]
+    # 普通回收站条目不是索引副本，不能删
+    run(notebook.write("note.md", thing("note", body="正文")))
+    run(notebook.delete("note.md"))
+    keep = [item.entry for item in notebook.trash_entries()]
+    assert len(keep) == 1
+
+    assert store_obj.remove_index_copies() == len(copies)
+    assert not any(path.exists() for path in copies)
+    assert notebook.trash_entries()
+    assert store_obj.remove_index_copies() == 0
+
+
+def test_plugin_load_cleans_index_copies_and_logs(tmp_path, monkeypatch, caplog):
+    data_dir = tmp_path / "data"
+    copy = trash_copy(data_dir / "memories" / "board")
+    monkeypatch.setattr(
+        main.MemoryPodPlugin,
+        "_resolve_data_dir",
+        staticmethod(lambda: data_dir),
+    )
+    caplog.set_level(logging.INFO, logger="memory_pod_test")
+    main.MemoryPodPlugin(FakeContext(), {})
+    assert not copy.exists()
+    assert any(
+        "MEMORY.md" in record.getMessage() and "1 份" in record.getMessage()
+        for record in caplog.records
+    ), [record.getMessage() for record in caplog.records]
 
 
 def test_model_tools_cannot_reach_audit_history_or_trash(tmp_path):

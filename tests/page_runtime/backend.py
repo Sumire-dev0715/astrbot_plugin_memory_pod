@@ -162,6 +162,18 @@ class Handler(BaseHTTPRequestHandler):
             if model_file.is_file():
                 model_file.unlink()
             return self._send({"ok": True})
+        if endpoint == "__ruin_index":
+            # 测试用：没有手工编辑索引的接口了，直接往磁盘上放一份缺项的旧索引
+            plugin = STATE["plugin"]
+            name = params.get("scope")
+            store = {
+                "board": plugin._store.board_scope,
+                "notebook": lambda: plugin._store.notebook_scope_by_key(params.get("key", "")),
+                "whisper": lambda: plugin._store.whisper_scope_by_key(params.get("key", "")),
+            }[name]()
+            store.root.mkdir(parents=True, exist_ok=True)
+            (store.root / "MEMORY.md").write_text("# 索引\n", encoding="utf-8")
+            return self._send({"ok": True})
         failing = STATE.get("fail", {})
         if failing.get(endpoint, 0) > 0:
             failing[endpoint] -= 1

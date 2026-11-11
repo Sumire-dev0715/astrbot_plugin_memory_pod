@@ -58,8 +58,8 @@ async function whisperKey(remark) {
 
   section("R3 小本本 → 索引：服务端把索引修好后，点刷新后健康提示跟着变；有未保存的草稿时不动草稿");
   // 先把索引改成缺项，再打开页面（页面读到的就是缺项的索引）
-  const ruined = await backend("/index/save", { scope: "notebook", key: "Bot-A", content: "# 索引\n" });
-  assert(ruined.status === "ok", "后端改坏索引: " + JSON.stringify(ruined).slice(0, 120));
+  const ruined = await backend("/__ruin_index?scope=notebook&key=Bot-A");
+  assert(ruined.ok, "后端改坏索引: " + JSON.stringify(ruined).slice(0, 120));
   p = await ready(await boot());
   p.click(p.find(".nav-item", "小本本"));
   await until(() => p.find(".row", "plans.md"), "小本本文件列表");
@@ -69,14 +69,9 @@ async function whisperKey(remark) {
   p.click(refreshButton(p));
   await until(() => p.find(".pane-detail .notice", "索引和记忆文件一致"), "刷新后索引页变成一致");
   assert(!p.find(".pane-detail .notice", "没有出现在索引里"), "缺项提示消失");
-  const area = p.$(".pane-detail textarea");
-  assert(area && /plans\.md/.test(area.value), "文本框里是重建后的索引");
-  // 有未保存的草稿：刷新不能把草稿冲掉
-  p.input(area, area.value + "\n- 我手写的一行");
-  await backend("/index/rebuild", { scope: "notebook", key: "Bot-A" });
-  p.click(refreshButton(p));
-  await until(() => toasts(p).some((x) => /没有动它/.test(x)), "提示说明没动未保存的修改");
-  assert(/我手写的一行/.test(p.$(".pane-detail textarea").value), "未保存的草稿还在");
+  const area = p.$(".pane-detail pre");
+  assert(area && /plans\.md/.test(p.text(area)), "只读文本里是重建后的索引");
+  assert(!p.$(".pane-detail textarea") && !p.find(".detail-head button", "保存"), "索引没有编辑入口");
 
   // ------------------------------------------------------------ 失败要看得见
   section("R4 总览重新加载失败：提示失败，横幅说明数字可能过期，重试后恢复");

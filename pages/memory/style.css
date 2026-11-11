@@ -1780,6 +1780,48 @@ select.input {
   overflow-wrap: anywhere;
 }
 
+/* 移动文件：目标是一组可点的行，选中项用边框和底色标出来 */
+.move-targets {
+  display: grid;
+  gap: 4px;
+  max-height: 300px;
+  overflow: auto;
+}
+
+.move-target {
+  display: grid;
+  gap: 2px;
+  justify-items: start;
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.move-target:hover {
+  border-color: var(--line-strong);
+}
+
+.move-target.is-on {
+  border-color: var(--accent);
+  background: var(--surface-2);
+}
+
+.move-target-title {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.move-target-sub {
+  color: var(--text-3);
+  font-size: var(--fs-xs);
+  overflow-wrap: anywhere;
+}
+
 /* 编辑器 */
 .editor-tools {
   display: flex;

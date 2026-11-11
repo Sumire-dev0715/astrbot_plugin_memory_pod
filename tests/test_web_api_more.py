@@ -70,33 +70,39 @@ def test_trash_file_and_delete(tmp_path):
     assert notebook.trash_entries() == []
 
 
-def test_index_save_and_rebuild(tmp_path):
+def test_index_rebuild_only(tmp_path):
     plugin, dashboard = setup(tmp_path)
     notebook = plugin._store.notebook_scope("Bot-A")
     call(notebook.write("note.md", thing("note", description="甲", body="内容")))
-    body({"scope": "notebook", "key": "Bot-A", "content": "- [note](note.md) — 手工\n"})
-    assert route(dashboard, "index_save")["status"] == "ok"
-    assert "手工" in call(notebook.read("MEMORY.md"))
+    # 手工编辑索引的接口已经删除（PLAN 3.12.3），只能改磁盘上的旧索引再重建
+    (notebook.root / "MEMORY.md").write_text("- [note](note.md) — 手工\n", encoding="utf-8")
     body({"scope": "notebook", "key": "Bot-A"})
     data = raw(route(dashboard, "index_rebuild"))
     assert data["count"] == 1
     assert "手工" not in call(notebook.read("MEMORY.md"))
+    routes = {path for path, _method, _handler, _desc in dashboard._routes()}
+    assert "index/save" not in routes
+    assert not hasattr(dashboard, "index_save")
 
 
-def test_index_save_keeps_old_index_restorable_from_trash(tmp_path):
+def test_trash_list_never_shows_index_copies(tmp_path):
     plugin, dashboard = setup(tmp_path)
     notebook = plugin._store.notebook_scope("Bot-A")
-    call(notebook.write("note.md", thing("note", description="甲", body="内容")))
-    old = call(notebook.read("MEMORY.md"))
-    body({"scope": "notebook", "key": "Bot-A", "content": "- [note](note.md) — 手工\n"})
-    assert route(dashboard, "index_save")["status"] == "ok"
+    call(notebook.write("note.md", thing("note", body="正文")))
+    call(notebook.delete("note.md"))
+    trash = notebook.root / ".trash"
+    trash.mkdir(exist_ok=True)
+    old_index = trash / "20260101-000000-000__MEMORY.md"
+    old_index.write_text("# 旧索引\n", encoding="utf-8")
 
     query(scope="notebook", key="Bot-A")
     entries = raw(route(dashboard, "trash_entries"))["entries"]
-    entry = next(item for item in entries if item["file"] == "MEMORY.md")
-    body({"scope": "notebook", "key": "Bot-A", "entry": entry["entry"]})
-    assert route(dashboard, "trash_restore")["status"] == "ok"
-    assert call(notebook.read("MEMORY.md")) == old
+    assert [item["file"] for item in entries] == ["note.md"]
+    # 恢复旧索引的分支已经删掉：这条副本既看不到，也恢复不了
+    body({"scope": "notebook", "key": "Bot-A", "entry": old_index.name})
+    assert route(dashboard, "trash_restore")["status"] == "error"
+    assert "# 旧索引" not in (call(notebook.read("MEMORY.md")) or "")
+    assert old_index.is_file()
 
 
 def test_whisper_context_remark_and_purge(tmp_path):

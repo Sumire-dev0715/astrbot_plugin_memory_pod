@@ -217,7 +217,6 @@ CONFIRMED = {
     "import/apply": (("ui.confirm(",),),
     "consolidate/apply": (("confirmApply(",),),
     "index/rebuild": (("ui.confirm(",),),
-    "index/save": (("ui.dialog(",), ("await ctrl.done",)),
     # 编辑器保存先显示改动对比；续期的对话框就是确认（写着现在的到期日）
     "file/save": (("confirmSave(", "ui.dialog("),),
 }
@@ -261,9 +260,48 @@ def test_real_migrations_run_only_after_a_confirmation_built_from_the_dry_run():
 def test_trash_restore_confirms_before_overwriting():
     memory = _page("memory.js")
     body = _between(memory, "async function restoreTrash(item) {", "async function viewTrash(item) {")
-    assert "if (exists) {" in body
+    assert "if (activeFiles().has(item.file)) {" in body
     assert body.index("ui.confirm(") < body.index('ui.apiPost("trash/restore"')
-    assert 't("restoreOverwritePoint"' in body and 't("restoreIndexPoint")' in body
+    assert 't("restoreOverwritePoint"' in body
+    # 索引副本不再出现在回收站，也没有"恢复旧索引"的确认与分支
+    assert "isIndexFile" not in memory and "restoreIndexPoint" not in memory
+
+
+def test_manual_index_editing_is_gone():
+    memory = _page("memory.js")
+    panel = _between(memory, "function IndexPanel(view, r) {", "// ------------------------------------------------------------ 回收站与已遗忘")
+    # 只读：没有编辑框、没有保存入口，也没有旧索引备份的说明；重建与健康提示保留
+    assert "textarea" not in panel
+    assert "index/save" not in panel and "index/save" not in memory
+    assert 't("indexReadonlyHint")' in panel
+    assert 'apiPost("index/rebuild"' in panel
+    assert "indexHealth(idx)" in panel
+    api_source = (ROOT / "web_api.py").read_text("utf-8")
+    assert "index/save" not in api_source
+    assert "def index_save" not in api_source and "write_index" not in api_source
+    memstore_source = (ROOT / "core" / "memstore.py").read_text("utf-8")
+    assert "_backup_index_to_trash" not in memstore_source
+    assert "def write_index" not in memstore_source
+    assert "copy_to_trash" not in memstore_source
+
+
+def test_move_buttons_open_a_target_dialog_and_ask_about_conflicts():
+    memory = _page("memory.js")
+    actions = _between(memory, "function headActions(d) {", "function paint() {")
+    assert 't("moveToNotebook")' in actions and 't("moveToWhisper")' in actions
+    assert "moveFile(view, r, name)" in actions
+    move = _between(memory, "async function moveFile(view, r, name) {", "function FileDetail(")
+    # 目标里有同名文件时三种选择；取消不发写请求
+    assert 't("conflictKeep")' in move
+    assert 't("conflictOverwrite")' in move
+    assert 't("cancel")' in move
+    # 从悄悄话移出去时写清"这个机器人的所有群聊和私聊都能读到"
+    assert 't("moveNotebookConsequence", { platform: picked.platform })' in move
+    assert 't("moveWhisperConsequence")' in move
+    # 先预演（改盘前），再写；取消关掉弹窗就结束
+    assert move.count('apiPost("migrate/file"') >= 2
+    assert "dryRun: true" in move and "dryRun: false" in move
+    assert 't("moveToTrashPoint")' in move
 
 
 # ------------------------------------------------------------ 具体功能的接线
@@ -273,10 +311,11 @@ def test_trash_tab_purge_button_only_for_missing_active_files():
     memory = _page("memory.js")
     render = _between(memory, "function trashList() {", "function forgottenList() {")
     assert "const active = activeFiles();" in render
-    assert "active.has(item.file)" in render
-    assert "!isIndexFile(item.file)" in render
+    assert "!active.has(item.file)" in render
     assert "purgeTrashFile(item)" in render
     assert 't("purgeFile")' in render
+    # MEMORY.md 副本不会出现在列表里，不需要特判
+    assert "isIndexFile" not in render
 
 
 def test_trash_purge_uses_file_purge_with_confirmation():

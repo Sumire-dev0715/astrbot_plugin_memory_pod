@@ -101,7 +101,7 @@ const { boot, assert, until, sleep, section, summary } = require("../harness.js"
   await sleep(150);
   assert(!find(".row", "keep-calm.md"), "遗忘后从列表消失");
   click(find(".row", "plans.md"));
-  await until(() => /plans\.md/.test(text($("[data-detail-heading]"))), "打开 plans");
+  await until(() => find(".detail-actions button", "删除"), "打开 plans");
   click(find(".detail-actions button", "删除"));
   await until(() => $(".overlay"), "删除确认");
   assert(/回收站/.test(text($(".overlay"))), "删除确认写明回收站");
@@ -153,20 +153,16 @@ const { boot, assert, until, sleep, section, summary } = require("../harness.js"
   section("B7 索引");
   click(find(".foot-link", "索引"));
   await until(() => $(".meters"), "索引面板");
-  const idx = $(".pane-detail textarea");
-  assert(idx && idx.value.length > 0, "索引内容");
+  const idx = $(".pane-detail pre");
+  assert(idx && /plans\.md/.test(text(idx)), "索引内容只读显示");
+  assert(!$(".pane-detail textarea") && !find(".detail-head button", "保存"), "没有编辑框和保存入口");
   console.log("  索引健康:", $$(".notice").map((n) => text(n)));
-  input(idx, idx.value + "\n## 手加的分组\n");
-  click(find(".detail-head button", "保存"));
-  await until(() => $(".overlay .diff"), "索引保存前对比");
-  click(find(".overlay button", "保存"));
-  await until(() => p.lastCall("index/save"), "index/save");
-  await sleep(100);
   click(find(".detail-head button", "按文件重建"));
   await until(() => $(".overlay"), "重建确认");
-  assert(/回收站/.test(text($(".overlay"))), "重建确认写明旧索引会进回收站");
+  assert(/不会改动任何记忆文件/.test(text($(".overlay"))), "重建确认写明不影响记忆文件");
   click(find(".overlay button", "按文件重建"));
   await until(() => p.lastCall("index/rebuild"), "index/rebuild");
+  await until(() => $(".pane-detail pre"), "重建后索引仍在");
 
   console.log("\nuncaught:", p.uncaught().map((e) => String(e && e.stack || e).slice(0, 300)));
   assert(p.uncaught().length === 0, "没有未捕获错误");

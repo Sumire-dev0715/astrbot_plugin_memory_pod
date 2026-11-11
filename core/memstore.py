@@ -2103,6 +2103,13 @@ class ScopeStore:
         """读回收站条目的原文。"""
         return self._history.read_trash(entry)
 
+    def remove_index_copies(self) -> int:
+        """删掉回收站里旧版本留下的 MEMORY.md 副本，返回份数（同步方法）。
+
+        索引只是缓存（PLAN 3.12.3），不再从回收站恢复，旧副本没有保留价值。
+        """
+        return self._history.remove_index_copies()
+
     async def restore_trash(
         self, entry: str, actor: str = history.ACTOR_WEBUI
     ) -> WriteReport:
@@ -2121,35 +2128,8 @@ class ScopeStore:
                         "可以彻底删除这条回收站记录，或从回收站目录手工取回原始字节",
                     )
                 return WriteReport(False, "回收站里没有这个条目")
-            # 索引也会在保存/重建前留一份回收站副本：恢复是把旧索引写回
-            # MEMORY.md，当前索引同样先留档，不直接丢掉
-            if info.file.lower() == INDEX_FILENAME.lower():
-                index_path = self.root / INDEX_FILENAME
-                try:
-                    self._backup_index_to_trash(actor)
-                except OSError as exc:
-                    return WriteReport(
-                        False, f"当前索引保存到回收站失败，未恢复：{exc}"
-                    )
-                before_sha1 = ""
-                try:
-                    if index_path.is_file():
-                        before_sha1 = hashlib.sha1(
-                            index_path.read_bytes()
-                        ).hexdigest()
-                    self._write_atomic(index_path, content)
-                except OSError as exc:
-                    return WriteReport(False, f"恢复索引失败：{exc}")
-                self._history.record(
-                    history.ACTION_RESTORE,
-                    INDEX_FILENAME,
-                    actor,
-                    "",
-                    before_sha1,
-                    history.content_sha1(content),
-                )
-                await asyncio.to_thread(self._history.remove_entry, entry)
-                return WriteReport(True, "已从回收站恢复旧索引")
+            # 索引只是缓存（PLAN 3.12.3）：回收站列表不再列出 MEMORY.md 副本，
+            # trash_info 也找不到它们，这里没有"恢复旧索引"的分支
             path = self.root / info.file
             current: str | None = None
             current_bytes: bytes | None = None
@@ -2488,8 +2468,7 @@ class ScopeStore:
         if written:
             if adopt_index:
                 self._write_atomic(index_path, index.strip("\n") + "\n")
-                # 刚写进去的就是这份导入的索引，不用再留一份回收站副本
-                self._rebuild_index_sync(actor, backup=False)
+                self._rebuild_index_sync(actor)
             else:
                 for name, content in written:
                     self._sync_index_line(name, parse_description(content)[0])
@@ -2726,65 +2705,20 @@ class ScopeStore:
             dangling=[name for name in listed if name not in files],
         )
 
-    def _backup_index_to_trash(self, actor: str) -> None:
-        """覆盖索引前把旧 MEMORY.md 复制进回收站，保留手工分组、排序与钩子。"""
-        index_path = self.root / INDEX_FILENAME
-        if not index_path.is_file():
-            return
-        try:
-            if index_path.stat().st_size == 0:
-                return
-        except OSError:
-            pass
-        self._history.copy_to_trash(
-            index_path, INDEX_FILENAME, history.ACTION_WRITE, actor
-        )
-
-    async def write_index(
-        self, content: str, actor: str = history.ACTOR_WEBUI
-    ) -> WriteReport:
-        """管理员手工改写 MEMORY.md（调整分组、顺序、措辞）。
-
-        模型不能直接写索引；这个入口只给 WebUI 用。旧索引先复制进回收站，
-        保存错了可以在管理页的回收站里找回。
-        """
-        if len(content.encode("utf-8")) > MAX_FILE_BYTES:
-            return WriteReport(
-                False, f"内容超过单文件上限 {MAX_FILE_BYTES // 1024}KB"
-            )
-        text = content.strip("\n")
-        async with self._lock:
-            try:
-                await asyncio.to_thread(self._backup_index_to_trash, actor)
-            except OSError as exc:
-                return WriteReport(False, f"旧索引保存到回收站失败，未保存：{exc}")
-            await asyncio.to_thread(
-                self._write_atomic,
-                self.root / INDEX_FILENAME,
-                text + "\n" if text else "",
-            )
-        message = "索引已保存"
-        health = self._index_health(*self._injection_metrics(text))
-        if health:
-            message += "。" + health
-        return WriteReport(True, message)
-
     async def rebuild_index(self, actor: str = history.ACTOR_WEBUI) -> int:
         """按磁盘上的实际文件重建 MEMORY.md，返回索引行数。
 
         已有行原位刷新钩子、保留手工加的标题与分组，指向不存在文件的行
-        删掉，没登记的文件追加到末尾；日记只保留末尾折叠块。用于手工改动
-        文件目录之后的修复。旧索引先复制进回收站，重建结果不满意可以找回。
+        删掉，没登记的文件追加到末尾；日记只保留末尾折叠块。索引只是缓存
+        （PLAN 3.12.3），重建不需要先备份，也不改任何记忆文件。
         """
         async with self._lock:
             return await asyncio.to_thread(self._rebuild_index_sync, actor)
 
-    def _rebuild_index_sync(self, actor: str = "", backup: bool = True) -> int:
+    def _rebuild_index_sync(self, actor: str = "") -> int:
         headers = {h.file: h for h in self.headers()}
         entries = self._journal_entries(list(headers.values()))
         index_path = self.root / INDEX_FILENAME
-        if backup:
-            self._backup_index_to_trash(actor)
         existing = index_path.read_text("utf-8") if index_path.is_file() else ""
         lines: list[str] = []
         listed: set[str] = set()
@@ -3230,6 +3164,17 @@ class MemoryStore:
         return sorted(
             p.name for p in root.iterdir() if p.is_dir() and is_scope_key(p.name)
         )
+
+    def remove_index_copies(self) -> int:
+        """删掉各层回收站里旧版本留下的 MEMORY.md 副本，返回份数。
+
+        插件加载时调用（PLAN 3.12.3）；扫的是 board 与小本本、悄悄话三类
+        作用域目录下的 .trash，不认识或名字不合法的目录不碰。
+        """
+        removed = 0
+        for store in self.scopes_for_cleanup():
+            removed += store.remove_index_copies()
+        return removed
 
     def scopes_for_cleanup(self) -> list[ScopeStore]:
         """参与保留期清理的作用域；应在事件循环里取好再进工作线程。"""

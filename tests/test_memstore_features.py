@@ -68,12 +68,6 @@ def test_rebuild_index_keeps_manual_groups(tmp_path):
     assert "# 分组" in content and "旧钩子" not in content
 
 
-def test_write_index_rejects_too_large(tmp_path):
-    scope = store(tmp_path)
-    report = run(scope.write_index("x" * (pkg_memstore.MAX_FILE_BYTES + 1)))
-    assert not report.ok
-
-
 def test_snapshot_and_import_round_trip(tmp_path):
     scope = store(tmp_path)
     run(scope.write("note.md", thing("note", body="正文")))
@@ -131,7 +125,7 @@ def test_resolve_rejects_traversal(tmp_path):
     assert scope._resolve("note.md") is not None
 
 
-def test_write_index_refused(tmp_path):
+def test_write_refuses_index_name(tmp_path):
     scope = store(tmp_path)
     report = run(scope.write(pkg_memstore.INDEX_FILENAME, "# 乱写"))
     assert not report.ok and "自动维护" in report.message

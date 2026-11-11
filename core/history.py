@@ -9,8 +9,9 @@
 三个路径都以 "." 开头、不是作用域根目录下的 .md 文件，所以 list_files、
 headers、索引、召回、搜索与遗忘扫描天然看不到它们。
 
-真正删除字节的只有两种情况：管理员在回收站点"彻底删除"，以及保留期到期
-清理。保留期由 history_keep_days / trash_keep_days 控制，0 表示永久；
+真正删除字节的只有这几种情况：管理员在回收站点"彻底删除"、保留期到期
+清理，以及插件加载时删掉旧版本留下的 MEMORY.md 索引副本（索引只是缓存，
+PLAN 3.12.3）。保留期由 history_keep_days / trash_keep_days 控制，0 表示永久；
 历史版本清理时每个文件至少保留最近 MIN_KEEP_VERSIONS 版。清理每个作用域
 至多每 CLEANUP_INTERVAL 秒跑一次，由调用方放进工作线程执行。
 
@@ -82,6 +83,11 @@ _TRASH_NAME_RE = re.compile(
 )
 # .trash-scopes 归档名：<层>-<键>-<时间>；键本身可能含连字符，按末尾时间戳切开
 _ARCHIVE_NAME_RE = re.compile(r"^(.*)-(\d{8}-\d{6}-\d{3})$")
+
+
+def _is_index_copy(file: str) -> bool:
+    """回收站条目的文件名是不是 MEMORY.md 索引副本。"""
+    return file.lower() == INDEX_FILENAME.lower()
 
 
 def _now() -> float:
@@ -601,6 +607,9 @@ class HistoryLog:
             match = _TRASH_NAME_RE.match(path.name)
             if match is None or not path.is_file():
                 continue
+            if _is_index_copy(match.group(2)):
+                # 索引只是缓存（PLAN 3.12.3）：旧版留下的 MEMORY.md 副本不列出
+                continue
             try:
                 st = path.stat()
             except OSError:
@@ -637,6 +646,8 @@ class HistoryLog:
         for path in entries:
             match = _TRASH_NAME_RE.match(path.name)
             if match is None or not path.is_file():
+                continue
+            if _is_index_copy(match.group(2)):
                 continue
             if _parse_stamp(match.group(1)) is not None:
                 count += 1
@@ -721,53 +732,32 @@ class HistoryLog:
             source=source,
         )
 
-    def copy_to_trash(
-        self,
-        path: Path,
-        file: str,
-        action: str,
-        actor: str = "",
-        source: str = "",
-        reason: str = "",
-        audit: AuditContext | None = None,
-    ) -> TrashEntry:
-        """把文件复制一份进回收站并记审计（原文件保持不动）。
+    def remove_index_copies(self) -> int:
+        """删掉回收站里旧版本留下的 MEMORY.md 副本，返回删除份数。
 
-        用于索引这类先留档、再原地重写的路径：写入失败时原文件还在。
+        索引只是缓存（PLAN 3.12.3）：不再从回收站恢复，旧副本留着没有用处。
         """
-        before_sha1 = _file_sha1(path)
-        ts = round(_now() * 1000) / 1000
+        if not self.trash_root.is_dir():
+            return 0
+        removed = 0
         with self._lock:
-            while True:
-                entry = f"{_stamp(ts)}__{file}"
-                dest = self.trash_root / entry
-                if not dest.exists():
-                    break
-                ts = round(ts + 0.001, 3)
-            self.trash_root.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(path, dest)
-            st = dest.stat()
-            self.record(
-                action,
-                file,
-                actor,
-                source,
-                before_sha1,
-                "",
-                ts=ts,
-                reason=reason,
-                audit=audit,
-            )
-        return TrashEntry(
-            entry=entry,
-            file=file,
-            ts=ts,
-            mtime=st.st_mtime,
-            size=st.st_size,
-            action=action,
-            actor=actor,
-            source=source,
-        )
+            try:
+                entries = list(self.trash_root.iterdir())
+            except OSError:
+                return 0
+            for path in entries:
+                match = _TRASH_NAME_RE.match(path.name)
+                if match is None or not _is_index_copy(match.group(2)):
+                    continue
+                try:
+                    if path.is_file():
+                        path.unlink()
+                        removed += 1
+                except OSError:
+                    continue
+            if removed:
+                _rmdir_if_empty(self.trash_root)
+        return removed
 
     def remove_entry(self, entry: str) -> bool:
         """从回收站删掉一条（恢复成功后或彻底删除时用）；不记审计。"""

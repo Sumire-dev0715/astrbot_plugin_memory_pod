@@ -68,6 +68,10 @@ MAX_REMARK = 64
 MAX_QUERY = 200
 MAX_BOARD_TITLE = 120
 MAX_BOARD_BODY = 8000
+# 移动单个文件时目标同名文件的处理（PLAN 3.12.2）：保留两份或用搬来的覆盖
+MOVE_KEEP_BOTH = "keep"
+MOVE_OVERWRITE = "overwrite"
+MOVE_CONFLICTS = (MOVE_KEEP_BOTH, MOVE_OVERWRITE)
 # 告示卡片上显示的正文开头（字符数）；完整正文在详情里看
 BOARD_EXCERPT_CHARS = 280
 # 导出、导入的暂存：先生成再下载、先预演再执行，期间内容放在内存里
@@ -385,7 +389,6 @@ class MemoryDashboard:
             ("trash/restore", "POST", self.trash_restore, "记忆管理：从回收站恢复"),
             ("trash/delete", "POST", self.trash_delete, "记忆管理：彻底删除回收站条目"),
             ("file/purge", "POST", self.file_purge, "记忆管理：彻底删除文件及其历史"),
-            ("index/save", "POST", self.index_save, "记忆管理：保存索引"),
             ("index/rebuild", "POST", self.index_rebuild, "记忆管理：重建索引"),
             ("whisper/remark", "POST", self.whisper_remark, "记忆管理：会话备注"),
             ("whisper/purge", "POST", self.whisper_purge, "记忆管理：清除会话数据"),
@@ -410,6 +413,7 @@ class MemoryDashboard:
             ("import/preview", "POST", self.import_preview, "记忆管理：预览导入"),
             ("import/apply", "POST", self.import_apply, "记忆管理：导入备份"),
             ("migrate/scope", "POST", self.migrate_scope, "记忆管理：迁移一处记忆"),
+            ("migrate/file", "POST", self.migrate_file, "记忆管理：移动单个文件"),
             ("migrate/platform", "POST", self.migrate_platform, "记忆管理：平台改名迁移"),
         ]
 
@@ -501,7 +505,7 @@ class MemoryDashboard:
             name += memstore.MEMORY_FILE_SUFFIX
         # 不分大小写：Windows / macOS 上 memory.md 和 MEMORY.md 是同一个文件
         if name.lower() == memstore.INDEX_FILENAME.lower():
-            raise ApiError("MEMORY.md 请在「索引」页编辑")
+            raise ApiError("MEMORY.md 由插件自动维护，不能当记忆文件")
         if not name or not memstore.ScopeStore.is_valid_name(name):
             raise ApiError("文件名不合法：" + memstore.ScopeStore.path_rules())
         return name
@@ -977,7 +981,7 @@ class MemoryDashboard:
             if not memstore.ScopeStore.is_valid_name(name):
                 raise ApiError("文件名不合法：" + memstore.ScopeStore.path_rules())
             if name.lower() == memstore.INDEX_FILENAME.lower():
-                raise ApiError("MEMORY.md 请在「索引」页编辑")
+                raise ApiError("MEMORY.md 由插件自动维护，不能当告示文件名")
             return name
         stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime())
         base = f"notice-{stamp}"
@@ -1177,15 +1181,6 @@ class MemoryDashboard:
         await asyncio.to_thread(self.plugin._tidy.remove_file, sid, name)
         self._changed(scope, key)
         return _ok({"file": name}, report.message)
-
-    async def index_save(self) -> dict:
-        body = await _body()
-        scope, key, store = self._scope_from_body(body)
-        report = await store.write_index(_text(body.get("content")))
-        if not report.ok:
-            raise ApiError(report.message)
-        self._changed(scope, key)
-        return _ok({}, report.message)
 
     async def index_rebuild(self) -> dict:
         body = await _body()
@@ -1670,6 +1665,78 @@ class MemoryDashboard:
         message = f"已写入 {counts['added'] + counts['replaced']} 条"
         if report.get("moved"):
             message += f"，已从原处移走 {report['moved']} 条"
+        return _ok(report, message)
+
+    def _move_target(self, raw: Any) -> transfer.ScopeRef:
+        """移动单个文件的目标；小本本可以只给平台 ID（还没有目录也能搬进去）。"""
+        if (
+            isinstance(raw, dict)
+            and raw.get("scope") == SCOPE_NOTEBOOK
+            and raw.get("platform")
+        ):
+            platform = transfer.check_platform(raw.get("platform"))
+            return transfer.ScopeRef(SCOPE_NOTEBOOK, memstore.safe_key(platform))
+        return self._ref(raw)
+
+    async def migrate_file(self) -> dict:
+        """文件详情里的移动（PLAN 3.12.2）：悄悄话与小本本之间搬一个文件。
+
+        先按原样把文件写进目标（created / updated / source 与写入时间不变），
+        再把来源文件移进回收站。目标里同名时由页面先问过用户：keep 保留两份
+        （新名字加序号，报告里的 renamed 给出对应关系）、overwrite 用搬来的
+        覆盖（旧版进历史）。dryRun 只预览，不写盘。
+        """
+        body = await _body()
+        src = self._ref(body.get("from"))
+        dst = self._move_target(body.get("to"))
+        if src.scope == SCOPE_BOARD or dst.scope == SCOPE_BOARD:
+            raise ApiError("留言板不参与移动")
+        if src.scope == dst.scope:
+            raise ApiError("移动只在小本本和悄悄话之间进行")
+        name = self._file_name(body.get("file"))
+        conflict = _text(body.get("conflict")).strip().lower()
+        if conflict not in MOVE_CONFLICTS:
+            raise ApiError("目标里有同名文件时，要选择保留两份或覆盖")
+        src_store = self.transfer.scope_store(src)
+        dst_store = self.transfer.scope_store(dst)
+        if not await asyncio.to_thread(src_store.exists, name):
+            raise ApiError(f"来源里没有 {name}")
+        has_conflict = await asyncio.to_thread(
+            lambda: dst_store.exists(name) or dst_store.has_forgotten(name)
+        )
+        dry_run = bool(body.get("dryRun"))
+        report = await self.transfer.transfer(
+            src,
+            dst,
+            files=[name],
+            include_forgotten=False,
+            mode=transfer.MODE_MOVE,
+            policy=memstore.CONFLICT_OVERWRITE,
+            dry_run=dry_run,
+            keep_both=conflict == MOVE_KEEP_BOTH,
+        )
+        report["conflict"] = has_conflict
+        if dry_run:
+            return _ok(report)
+        self._changed_ref(dst)
+        self._changed_ref(src)
+        landed = report["counts"]["added"] + report["counts"]["replaced"]
+        if not landed:
+            issues = "；".join(
+                item["reason"] for item in report.get("issues", []) if item.get("reason")
+            )
+            message = f"没有写入目标：{name} 的这份内容不能导入"
+            if issues:
+                message += f"（{issues}）"
+        elif not report.get("moved"):
+            message = f"已写入目标，但 {name} 没能移入回收站，请在原处手动删除"
+        elif report.get("renamed"):
+            message = (
+                f"已移动到目标，两处都保留：{name} → "
+                f"{report['renamed'][0]['to']}"
+            )
+        else:
+            message = f"已移动 {name}，原文件已移入回收站"
         return _ok(report, message)
 
     async def migrate_platform(self) -> dict:

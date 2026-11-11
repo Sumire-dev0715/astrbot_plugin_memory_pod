@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from . import history
 from .memstore import (
@@ -30,6 +30,7 @@ from .memstore import (
     IMPORT_KEPT,
     IMPORT_REPLACED,
     IMPORT_SAME,
+    MEMORY_FILE_SUFFIX,
     ImportEntry,
     ImportResult,
     MemoryStore,
@@ -59,6 +60,8 @@ MODE_MOVE = "move"
 
 MAX_PLATFORM_CHARS = 64
 OUTCOMES = (IMPORT_ADDED, IMPORT_REPLACED, IMPORT_SAME, IMPORT_KEPT, IMPORT_INVALID)
+# 保留两份时新名字最多试到 <名字>-<这个数>.md
+MAX_RENAME_INDEX = 99
 
 
 class TransferError(Exception):
@@ -119,6 +122,21 @@ def count_outcomes(results: list[ImportResult]) -> dict[str, int]:
     for item in results:
         counts[item.outcome] = counts.get(item.outcome, 0) + 1
     return counts
+
+
+def free_name(store: ScopeStore, name: str) -> str:
+    """目标里给同名文件另起一个带序号的名字（PLAN 3.12.2"保留两份"）。
+
+    依次试 <名字>-2.md、-3.md……在册与已遗忘的文件都算占用；找不到空位抛
+    TransferError。
+    """
+    suffix = MEMORY_FILE_SUFFIX
+    stem = name[: -len(suffix)] if name.endswith(suffix) else name
+    for index in range(2, MAX_RENAME_INDEX + 1):
+        candidate = f"{stem}-{index}{suffix}"
+        if not store.exists(candidate) and not store.has_forgotten(candidate):
+            return candidate
+    raise TransferError("目标里同名文件太多，保留两份时加不上序号")
 
 
 def _entry_to_json(entry: ImportEntry) -> dict:
@@ -388,11 +406,14 @@ class MemoryTransfer:
         mode: str = MODE_COPY,
         policy: str = CONFLICT_NEWER,
         dry_run: bool = False,
+        keep_both: bool = False,
     ) -> dict:
         """把 src 的记忆（全部或挑出的文件）复制或移动到 dst。
 
         移动只删成功落到目标里的文件；因冲突被保留在目标外的仍留在源处。
         整个作用域一起搬、目标原本没有索引时，源的索引（分组与顺序）跟过去。
+        keep_both 用于"保留两份"：目标里同名的文件（在册或已遗忘）先让开，
+        搬来的这份用 <名字>-<序号>.md 落下，两份都保留。
         """
         if src == dst:
             raise TransferError("来源和目标是同一处")
@@ -407,6 +428,11 @@ class MemoryTransfer:
             index = ""
         if not entries:
             raise TransferError("来源没有可迁移的记忆")
+        renames: list[dict[str, str]] = []
+        if keep_both:
+            entries = await asyncio.to_thread(
+                self._rename_taken, dst_store, entries, renames
+            )
         results = await dst_store.import_files(
             entries,
             policy,
@@ -420,28 +446,49 @@ class MemoryTransfer:
                 umo = dst_umo if dst_umo and safe_key(dst_umo) == dst.key else ""
                 await asyncio.to_thread(self.registry.adopt, dst.key, umo)
             if mode == MODE_MOVE:
-                moved = await self._remove_landed(src_store, entries, results)
+                moved = await self._remove_landed(
+                    src_store, entries, results, renames
+                )
         report = self._report(src, dst, results)
         report["moved"] = moved
+        report["renamed"] = renames
         return report
 
     @staticmethod
+    def _rename_taken(
+        store: ScopeStore, entries: list[ImportEntry], renames: list[dict[str, str]]
+    ) -> list[ImportEntry]:
+        """把目标里已被占用的名字换成带序号的新名字；其余原样。"""
+        result = []
+        for entry in entries:
+            if store.exists(entry.name) or store.has_forgotten(entry.name):
+                new = free_name(store, entry.name)
+                renames.append({"from": entry.name, "to": new})
+                entry = replace(entry, name=new)
+            result.append(entry)
+        return result
+
+    @staticmethod
     async def _remove_landed(
-        store: ScopeStore, entries: list[ImportEntry], results: list[ImportResult]
+        store: ScopeStore,
+        entries: list[ImportEntry],
+        results: list[ImportResult],
+        renames: list[dict[str, str]] | None = None,
     ) -> int:
+        # 保留两份时结果里是新名字，删除来源仍要用原来的名字
+        original = {item["to"]: item["from"] for item in (renames or [])}
         forgotten = {e.name for e in entries if e.forgotten}
         moved = 0
         for item in results:
             if not item.landed:
                 continue
+            name = original.get(item.name, item.name)
             if item.name in forgotten:
                 report = await store.delete_forgotten(
-                    item.name, actor=history.ACTOR_TRANSFER
+                    name, actor=history.ACTOR_TRANSFER
                 )
             else:
-                report = await store.delete(
-                    item.name, actor=history.ACTOR_TRANSFER
-                )
+                report = await store.delete(name, actor=history.ACTOR_TRANSFER)
             moved += 1 if report.ok else 0
         return moved
 

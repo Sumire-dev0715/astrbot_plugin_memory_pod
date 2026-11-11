@@ -964,9 +964,6 @@
   }
 
   function trashReason(item) {
-    if (String(item.file || "").toLowerCase() === "memory.md") {
-      return t("trash_index");
-    }
     const k = key("trash_", item.action);
     return MP.i18n.has(k) ? t(k) : item.action || "—";
   }
@@ -1256,6 +1253,272 @@
     ];
   }
 
+  // ------------------------------------------------------------ 移动文件
+
+  /** 移动的目标：悄悄话 → 小本本列出各机器人；小本本 → 悄悄话只列已有对话 */
+  function moveTargets(r, toNotebook, info) {
+    const items = [];
+    if (toNotebook) {
+      const source = store.whisperByKey(r.key);
+      const platform = (source && source.platform) || "";
+      const seen = {};
+      function add(name) {
+        if (!name || seen[name]) {
+          return;
+        }
+        seen[name] = true;
+        items.push({
+          platform: name,
+          label: t("notebookTitle", { platform: name }),
+          sub: "",
+          selected: name === platform,
+        });
+      }
+      ((S.ov && S.ov.notebooks) || []).forEach(function (item) { add(item.platform || item.key); });
+      ((info && info.platforms) || []).forEach(function (item) { add(item.platform); });
+      ((info && info.adapters) || []).forEach(add);
+      return items;
+    }
+    ((S.ov && S.ov.whispers) || []).forEach(function (item) {
+      items.push({
+        ref: store.ref("whisper", item.key),
+        label: store.sessionTitle(item),
+        sub: store.sessionSub(item),
+        selected: false,
+      });
+    });
+    return items;
+  }
+
+  /**
+   * 移动一个文件（PLAN 3.12.2）：悄悄话 ↔ 小本本。
+   * 先选目标；目标里有同名文件时，让用户选保留两份（新名字加序号）、
+   * 覆盖（旧版进历史）或取消；取消只关弹窗，不发写请求。
+   */
+  async function moveFile(view, r, name) {
+    const toNotebook = r.scope === "whisper";
+    let info = null;
+    try {
+      info = await ui.apiGet("migrate/info");
+    } catch (err) {
+      // 拿不到机器人清单时仍然可以列已有小本本与对话，不影响移动
+      info = null;
+    }
+    const targets = moveTargets(r, toNotebook, info);
+    if (!targets.length) {
+      ui.toast(t("moveNoTargets"), "info");
+      return;
+    }
+    let picked = targets.find(function (item) { return item.selected; }) || null;
+    const search = h("input", { class: "input", type: "search", placeholder: t("moveSearch"), "aria-label": t("moveSearch") });
+    const list = h("div", { class: "move-targets", role: "group", "aria-label": t("moveTargetLabel") });
+    const empty = h("p", { class: "hint" }, t("moveNoMatch"));
+    empty.hidden = true;
+    const warning = ui.notice("warn", "");
+    const warningBody = warning.querySelector(".notice-body");
+
+    function targetText(item) {
+      return (item.label + " " + (item.sub || "") + " " + (item.platform || "")).toLowerCase();
+    }
+
+    function updateWarning() {
+      let text = t("movePickHint");
+      if (picked) {
+        text = toNotebook
+          ? t("moveNotebookConsequence", { platform: picked.platform })
+          : t("moveWhisperConsequence");
+      }
+      ui.replace(warningBody, text);
+    }
+
+    function selectTarget(item, button) {
+      picked = item;
+      Array.prototype.forEach.call(list.querySelectorAll("button"), function (other) {
+        const on = other === button;
+        other.setAttribute("aria-pressed", on ? "true" : "false");
+        other.classList.toggle("is-on", on);
+      });
+      updateWarning();
+    }
+
+    const buttons = targets.map(function (item) {
+      return h(
+        "button",
+        {
+          type: "button",
+          class: "move-target" + (picked === item ? " is-on" : ""),
+          "aria-pressed": picked === item ? "true" : "false",
+          "data-search": targetText(item),
+          onclick: function (event) { selectTarget(item, event.currentTarget); },
+        },
+        h("span", { class: "move-target-title" }, item.label),
+        item.sub ? h("span", { class: "move-target-sub" }, item.sub) : null
+      );
+    });
+    ui.replace(list, buttons);
+    search.addEventListener("input", function () {
+      const query = search.value.trim().toLowerCase();
+      let shown = 0;
+      buttons.forEach(function (button) {
+        const hit = !query || button.getAttribute("data-search").indexOf(query) >= 0;
+        button.hidden = !hit;
+        if (hit) {
+          shown += 1;
+        }
+      });
+      empty.hidden = shown > 0;
+    });
+    updateWarning();
+
+    function payloadOf() {
+      return {
+        from: { scope: r.scope, key: r.key },
+        to: picked.platform
+          ? { scope: "notebook", platform: picked.platform }
+          : { scope: "whisper", key: picked.ref.key },
+        file: name,
+        dryRun: true,
+        conflict: "overwrite",
+      };
+    }
+
+    function afterMove(targetRef) {
+      return store.changed(r)
+        .then(function () { return store.loadScope(targetRef); })
+        .then(function () {
+          return openPane(view, { kind: view === "whisper" ? "session" : "empty" }, { skipGuard: true, fresh: true });
+        });
+    }
+
+    async function sendMove(dlg, conflict, payload, targetRef) {
+      if (dlg) {
+        dlg.setBusy(true);
+      }
+      try {
+        const res = await ui.apiPost("migrate/file", Object.assign({}, payload, { dryRun: false, conflict: conflict }));
+        const renamed = res.renamed && res.renamed.length ? res.renamed[0].to : "";
+        const fallback = !res.moved
+          ? t("moveSourceKept")
+          : renamed
+            ? t("movedRenamed", { file: name, renamed: renamed })
+            : t("moved");
+        ui.toast(ui.resultMessage(res, fallback), res.moved ? "info" : "warn");
+        if (dlg) {
+          dlg.close(null);
+        }
+        await afterMove(targetRef);
+      } finally {
+        if (dlg) {
+          dlg.setBusy(false);
+        }
+      }
+    }
+
+    /** 同名冲突：三个选择，取消不发请求 */
+    function askConflict(payload, keepPreview, targetRef) {
+      const renamed = keepPreview.renamed && keepPreview.renamed.length ? keepPreview.renamed[0].to : "";
+      const ctrl = ui.dialog({
+        title: t("conflictTitle"),
+        size: "sm",
+        alert: true,
+        body: h(
+          "div",
+          { class: "confirm" },
+          h("p", { class: "confirm-message" }, t("conflictMessage", { file: name })),
+          toNotebook
+            ? ui.notice("warn", t("moveNotebookConsequence", { platform: picked.platform }))
+            : ui.notice("info", t("moveWhisperConsequence")),
+          h(
+            "ul",
+            { class: "confirm-points" },
+            h("li", null, renamed ? t("conflictKeepPoint", { name: renamed }) : t("conflictKeepPointPlain")),
+            h("li", null, t("conflictOverwritePoint"))
+          )
+        ),
+        actions: [
+          { label: t("cancel"), value: "cancel", autofocus: true },
+          {
+            label: t("conflictKeep"),
+            onClick: function (dlg) { return sendMove(dlg, "keep", payload, targetRef); },
+          },
+          {
+            label: t("conflictOverwrite"),
+            kind: "danger",
+            onClick: function (dlg) { return sendMove(dlg, "overwrite", payload, targetRef); },
+          },
+        ],
+      });
+      return ctrl.done;
+    }
+
+    async function confirmNoConflict(payload, preview, targetRef) {
+      const counts = preview.counts || {};
+      const ok = await ui.confirm({
+        title: t("moveConfirmTitle", { file: name }),
+        points: [
+          toNotebook
+            ? t("moveNotebookConsequence", { platform: picked.platform })
+            : t("moveWhisperConsequence"),
+          t("moveToTrashPoint"),
+          t("moveWillWrite", { n: (counts.added || 0) + (counts.replaced || 0) }),
+        ],
+        confirmLabel: t("moveConfirm"),
+        danger: true,
+      });
+      if (ok) {
+        await sendMove(null, "overwrite", payload, targetRef);
+      }
+    }
+
+    const ctrl = ui.dialog({
+      title: toNotebook ? t("moveToNotebook") : t("moveToWhisper"),
+      size: "md",
+      body: h(
+        "div",
+        { class: "stack" },
+        h("p", { class: "hint" }, t("moveHint")),
+        search,
+        list,
+        empty,
+        warning
+      ),
+      actions: [
+        { label: t("cancel"), value: false },
+        {
+          label: t("moveConfirm"),
+          kind: "primary",
+          onClick: async function (dlg) {
+            if (!picked) {
+              ui.toast(t("movePickHint"), "error");
+              return;
+            }
+            const payload = payloadOf();
+            dlg.setBusy(true);
+            let previews;
+            try {
+              previews = await Promise.all([
+                ui.apiPost("migrate/file", payload),
+                ui.apiPost("migrate/file", Object.assign({}, payload, { conflict: "keep" })),
+              ]);
+            } finally {
+              dlg.setBusy(false);
+            }
+            const preview = previews[0];
+            const keepPreview = previews[1];
+            const targetRef = { scope: preview.to.scope, key: preview.to.key };
+            dlg.close(null);
+            if (preview.conflict) {
+              await askConflict(payload, keepPreview, targetRef);
+            } else {
+              await confirmNoConflict(payload, preview, targetRef);
+            }
+          },
+        },
+      ],
+    });
+    return ctrl.done;
+  }
+
   function FileDetail(view, r, name, initialTab) {
     const root = h("article", { class: "detail" });
     const st = { data: null, error: "", tab: initialTab || "content", versions: null, versionsError: "" };
@@ -1335,6 +1598,15 @@
       const board = r.scope === "board";
       return [
         h("button", { type: "button", class: "btn btn-primary btn-sm", "data-fk": "edit", onclick: function () { openPane(view, { kind: "edit", file: name }, { fresh: true }); } }, icon("edit"), t("edit")),
+        // 留言板不参与移动（PLAN 3.12.2）：只有小本本与悄悄话之间能搬
+        board
+          ? null
+          : h(
+              "button",
+              { type: "button", class: "btn btn-sm", "data-fk": "move", onclick: action(function () { return moveFile(view, r, name); }) },
+              icon("transfer"),
+              r.scope === "whisper" ? t("moveToNotebook") : t("moveToWhisper")
+            ),
         board
           ? h("button", { type: "button", class: "btn btn-sm", onclick: action(function () { return renewNotice(r, name, d).then(function (ok) { if (ok) { load(); } }); }) }, icon("calendar"), t("renew"))
           : null,
@@ -2080,24 +2352,16 @@
     return out;
   }
 
+  /** 索引只读（PLAN 3.12.3）：MEMORY.md 只是缓存，没有编辑入口，只能按文件重建 */
   function IndexPanel(view, r) {
     const root = h("div", { class: "detail" });
     let idx = null;
     let error = "";
-    let base = "";
-    let draft = "";
-    let clean = false;
-
-    function isDirty() {
-      return !clean && idx !== null && draft !== base;
-    }
 
     async function init() {
       try {
         const data = await store.waitScope(r);
         idx = data.index || {};
-        base = idx.content || "";
-        draft = base;
         error = "";
       } catch (err) {
         error = err.message;
@@ -2106,55 +2370,21 @@
       return !error;
     }
 
-    /** 顶部刷新用：按重新读到的索引更新健康提示；有未保存的草稿就留着草稿 */
+    /** 顶部刷新用：按重新读到的索引更新内容与健康提示 */
     async function reload() {
-      try {
-        const data = await store.waitScope(r);
-        idx = data.index || {};
-        if (!isDirty()) {
-          base = idx.content || "";
-          draft = base;
-        }
-        error = "";
-      } catch (err) {
-        error = err.message;
-      }
-      paint();
-      return !error;
-    }
-
-    async function save() {
-      if (!isDirty()) {
-        ui.toast(t("noChanges"), "info");
-        return;
-      }
-      const ctrl = ui.dialog({
-        title: t("indexSaveTitle"),
-        size: "lg",
-        body: h("div", { class: "save-confirm" }, h("p", { class: "hint" }, t("indexSaveHint")), MP.diff.render(MP.diff.diffLines(base, draft))),
-        actions: [{ label: t("cancel"), value: false }, { label: t("save"), kind: "primary", value: true, autofocus: true }],
-      });
-      if ((await ctrl.done) !== true) {
-        return;
-      }
-      const res = await ui.apiPost("index/save", { scope: r.scope, key: r.key, content: draft });
-      clean = true;
-      ui.toast(ui.resultMessage(res, t("saved")));
-      await store.changed(r);
-      await openPane(view, { kind: "index" }, { skipGuard: true, fresh: true });
+      return init();
     }
 
     async function rebuild() {
       const ok = await ui.confirm({
         title: t("rebuildTitle"),
-        points: [t("rebuildPoint1"), t("rebuildPoint2"), isDirty() ? t("rebuildPointDraft") : null],
+        points: [t("rebuildPoint1"), t("rebuildPoint2")],
         confirmLabel: t("rebuildIndex"),
       });
       if (!ok) {
         return;
       }
       const res = await ui.apiPost("index/rebuild", { scope: r.scope, key: r.key });
-      clean = true;
       ui.toast(ui.resultMessage(res, t("done")));
       await store.changed(r);
       await openPane(view, { kind: "index" }, { skipGuard: true, fresh: true });
@@ -2164,12 +2394,9 @@
       const head = detailHead({
         view: view,
         title: t("indexTitle"),
-        desc: t("indexEditorHint"),
+        desc: t("indexReadonlyHint"),
         actions: idx
-          ? [
-              h("button", { type: "button", class: "btn btn-primary btn-sm", "data-fk": "save", onclick: action(save) }, icon("check"), t("save")),
-              h("button", { type: "button", class: "btn btn-sm", onclick: action(rebuild) }, icon("refresh"), t("rebuildIndex")),
-            ]
+          ? [h("button", { type: "button", class: "btn btn-sm", onclick: action(rebuild) }, icon("refresh"), t("rebuildIndex"))]
           : null,
       });
       root.setAttribute("aria-labelledby", head.id);
@@ -2177,17 +2404,6 @@
         ui.replace(root, head.el, error ? ui.errorState(error, init) : ui.spinner());
         return;
       }
-      const area = h("textarea", {
-        class: "textarea mono",
-        value: draft,
-        spellcheck: "false",
-        "aria-label": t("indexTitle"),
-        oninput: function (event) {
-          draft = event.target.value;
-          autoRows(event.target, 14, 40);
-        },
-      });
-      autoRows(area, 14, 40);
       ui.replace(
         root,
         head.el,
@@ -2199,27 +2415,16 @@
           meter(t("indexLines"), ui.fmtNum(idx.lines) + " / " + ui.fmtNum(idx.maxLines), idx.maxLines ? idx.lines / idx.maxLines : 0),
           meter(t("indexSize"), ui.fmtBytes(idx.size) + " / " + ui.fmtBytes(idx.maxBytes), idx.maxBytes ? idx.size / idx.maxBytes : 0)
         ),
-        area,
-        h("p", { class: "hint" }, t("indexBackupHint"))
+        h("pre", { class: "pre", "aria-label": t("indexTitle") }, idx.content || t("indexEmpty"))
       );
     }
 
-    root.addEventListener("keydown", function (event) {
-      if ((event.ctrlKey || event.metaKey) && !event.altKey && event.key.toLowerCase() === "s") {
-        event.preventDefault();
-        action(save)({ currentTarget: root.querySelector('[data-fk="save"]') });
-      }
-    });
     paint();
     init();
-    return { el: root, reload: reload, isDirty: isDirty, markClean: function () { clean = true; } };
+    return { el: root, reload: reload };
   }
 
   // ------------------------------------------------------------ 回收站与已遗忘
-
-  function isIndexFile(name) {
-    return String(name || "").toLowerCase() === "memory.md";
-  }
 
   function itemRow(main, meta, buttons) {
     return h(
@@ -2282,14 +2487,12 @@
       return new Set(((st.data && st.data.files) || []).map(function (row) { return row.file; }));
     }
 
-    // ---- 回收站条目
+    // ---- 回收站条目（MEMORY.md 副本不会出现在列表里，见 PLAN 3.12.3）
     async function restoreTrash(item) {
-      const index = isIndexFile(item.file);
-      const exists = index || activeFiles().has(item.file);
-      if (exists) {
+      if (activeFiles().has(item.file)) {
         const ok = await ui.confirm({
           title: t("restoreTrashTitle", { file: item.file }),
-          points: [index ? t("restoreIndexPoint") : t("restoreOverwritePoint", { file: item.file })],
+          points: [t("restoreOverwritePoint", { file: item.file })],
           confirmLabel: t("restore"),
         });
         if (!ok) {
@@ -2305,7 +2508,7 @@
     async function viewTrash(item) {
       const data = await ui.apiGet("trash/file", { scope: r.scope, key: r.key, entry: item.entry });
       let current;
-      if (!isIndexFile(item.file) && activeFiles().has(item.file)) {
+      if (activeFiles().has(item.file)) {
         try {
           current = (await ui.apiGet("file", { scope: r.scope, key: r.key, file: item.file })).content || "";
         } catch (err) {
@@ -2395,7 +2598,7 @@
           "ul",
           { class: "items" },
           st.trash.map(function (item) {
-            const canPurge = !active.has(item.file) && !isIndexFile(item.file);
+            const canPurge = !active.has(item.file);
             return itemRow(
               [h("span", { class: "mono" }, item.file), h("span", { class: "tag tag-muted" }, trashReason(item))],
               [ui.timeEl(item.ts), " · ", actorLabel(item.actor), " · ", ui.fmtBytes(item.size)],

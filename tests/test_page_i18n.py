@@ -68,14 +68,14 @@ def _families() -> dict[str, set[str]]:
         "typeHint_": set(memstore.MEMORY_TYPES),
         "ver_": {key(action) for action in actions},
         "actor_": {key(actor) for actor in actors},
-        # 回收站条目的来源：写入前的备份、删除、导入覆盖、替换遗忘副本……外加旧索引
+        # 回收站条目的来源：写入前的备份、删除、导入覆盖、替换遗忘副本……
+        # （旧索引副本已经不再出现在回收站里，见 PLAN 3.12.3）
         "trash_": {
             key(history.ACTION_WRITE),
             key(history.ACTION_DELETE),
             key(history.ACTION_IMPORT),
             key(history.ACTION_DELETE_FORGOTTEN),
             key(history.ACTION_DISCARD_FORGOTTEN),
-            "index",
         },
         "trigger_": {tidy.TRIGGER_MANUAL},
         "part_": set(context_stats.PART_KEYS),
