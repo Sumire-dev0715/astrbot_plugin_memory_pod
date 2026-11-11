@@ -98,7 +98,8 @@ const { boot, assert, until, sleep, section, summary } = require("../harness.js"
   assert(stillThere.content, "复制模式下来源还在");
 
   // 悄悄话搬到小本本：确认框要写明可见范围（PLAN 3.12.2）
-  const whisperOpt = Array.from(src.querySelectorAll("option")).find((o) => /^悄悄话 · /.test(o.textContent));
+  // 悄悄话的标签形如「[Bot-A] 小红 · 悄悄话」
+  const whisperOpt = Array.from(src.querySelectorAll("option")).find((o) => / · 悄悄话$/.test(o.textContent));
   assert(whisperOpt, "迁移来源里有悄悄话: " + Array.from(src.querySelectorAll("option")).map((o) => o.textContent).join(" / "));
   change(src, whisperOpt.value);
   await sleep(80);

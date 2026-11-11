@@ -287,7 +287,7 @@
   /** 整理模型下拉框（PLAN 3.12.1）：选择存在服务端，下次打开还在。 */
   function TidyModelCard(onChange) {
     const root = h("div", { class: "model-picker" });
-    const st = { loading: true, error: "", models: [], selected: null, saving: false, timeout: null, choices: [], customRange: null, draftSeconds: "" };
+    const st = { loading: true, error: "", models: [], selected: null, saving: false, timeout: null, choices: [], customRange: null, draftSeconds: "", pendingCustom: false };
 
     async function load() {
       st.loading = true;
@@ -299,6 +299,7 @@
         st.timeout = data.timeout || { mode: "auto" };
         st.choices = data.timeoutChoices || [];
         st.customRange = data.timeoutCustomRange || null;
+        st.pendingCustom = false;
         if (st.timeout && st.timeout.mode === "custom") {
           st.draftSeconds = String(st.timeout.seconds || "");
         }
@@ -418,7 +419,9 @@
 
     /** 超时下拉框：默认（自动推算）、不限时、3 分钟、5 分钟、自定义。 */
     function timeoutRows() {
-      const mode = (st.timeout && st.timeout.mode) || "auto";
+      // 选了「自定义」但还没保存时，下拉框要停在这一项并露出输入框；
+      // 只看 st.timeout 的话，重画会弹回已保存的值，看上去像选不中。
+      const mode = st.pendingCustom ? "custom" : (st.timeout && st.timeout.mode) || "auto";
       const fixed = st.timeout && st.timeout.seconds ? st.timeout.seconds : null;
       const selectId = ui.uid("tidy-timeout");
       const options = [
@@ -455,11 +458,14 @@
               onchange: function (event) {
                 const value = event.target.value;
                 if (value.indexOf("fixed:") === 0) {
+                  st.pendingCustom = false;
                   saveTimeout({ mode: "fixed", seconds: Number(value.slice(6)) });
                 } else if (value === "custom") {
+                  st.pendingCustom = true;
                   st.draftSeconds = st.draftSeconds || String(fixed || 300);
                   paint();
                 } else {
+                  st.pendingCustom = false;
                   saveTimeout({ mode: value });
                 }
               },
@@ -516,6 +522,7 @@
       try {
         const data = await ui.apiPost("tidy/timeout", { timeout: timeout });
         st.timeout = data.timeout || st.timeout;
+        st.pendingCustom = false;
         if (st.timeout && st.timeout.mode === "custom") {
           st.draftSeconds = String(st.timeout.seconds || "");
         }

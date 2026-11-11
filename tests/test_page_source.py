@@ -678,3 +678,6 @@ def test_tidy_timeout_is_selectable_in_the_page():
         assert 't("' + key + '"' in card, key
     assert 'apiPost("tidy/timeout"' in card
     assert 'value: "fixed:" + seconds' in card
+    # 选了「自定义」还没保存时也要停在自定义并露出输入框，否则重画会弹回原值
+    assert "st.pendingCustom = true" in card
+    assert 'st.pendingCustom ? "custom"' in card
